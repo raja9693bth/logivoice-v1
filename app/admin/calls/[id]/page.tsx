@@ -21,10 +21,23 @@ import {
 import { Card } from '@/components/ui/Card';
 import { MOCK_CALLS } from '@/lib/mock/logivoice-data';
 import { formatCurrencyINR, formatDuration, formatDateTime } from '@/lib/utils';
+import { Call } from '@/types/logivoice';
 
 export default function CallDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const resolvedParams = use(params);
-  const call = MOCK_CALLS.find((c) => c.id === resolvedParams.id) || MOCK_CALLS[0];
+  const fallbackCall = MOCK_CALLS.find((c) => c.id === resolvedParams.id) || MOCK_CALLS[0];
+  const [call, setCall] = React.useState<Call>(fallbackCall);
+
+  React.useEffect(() => {
+    fetch(`/api/calls/${resolvedParams.id}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.call) {
+          setCall(data.call);
+        }
+      })
+      .catch((err) => console.warn('[CallDetailPage] API fetch error:', err));
+  }, [resolvedParams.id]);
 
   return (
     <div className="space-y-6 min-w-0 max-w-full">

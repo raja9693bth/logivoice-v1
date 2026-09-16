@@ -27,6 +27,17 @@ export default function LeadsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [inspectLead, setInspectLead] = useState<Lead | null>(null);
 
+  React.useEffect(() => {
+    fetch('/api/leads')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.leads && Array.isArray(data.leads) && data.leads.length > 0) {
+          setLeads(data.leads);
+        }
+      })
+      .catch((err) => console.warn('[LeadsPage] API fetch error:', err));
+  }, []);
+
   const filteredLeads = useMemo(() => {
     return leads.filter((lead) => {
       const matchesTemp = tempFilter === 'ALL' || lead.temperature === tempFilter;

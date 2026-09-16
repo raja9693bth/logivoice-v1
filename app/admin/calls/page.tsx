@@ -21,14 +21,26 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { Call } from '@/types/logivoice';
 
 export default function CallsPage() {
+  const [calls, setCalls] = useState<Call[]>(MOCK_CALLS);
   const [searchQuery, setSearchQuery] = useState('');
   const [intentFilter, setIntentFilter] = useState<string>('ALL');
   const [outcomeFilter, setOutcomeFilter] = useState<string>('ALL');
   const [tempFilter, setTempFilter] = useState<string>('ALL');
   const [selectedCall, setSelectedCall] = useState<Call | null>(null);
 
+  React.useEffect(() => {
+    fetch('/api/calls')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.calls && Array.isArray(data.calls) && data.calls.length > 0) {
+          setCalls(data.calls);
+        }
+      })
+      .catch((err) => console.warn('[CallsPage] API fetch error:', err));
+  }, []);
+
   const filteredCalls = useMemo(() => {
-    return MOCK_CALLS.filter((call) => {
+    return calls.filter((call) => {
       const query = searchQuery.toLowerCase();
       const matchesSearch =
         !searchQuery ||

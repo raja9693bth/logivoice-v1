@@ -23,6 +23,17 @@ export default function KnowledgeBasePage() {
   const [editingItem, setEditingItem] = useState<KnowledgeItem | null>(null);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
 
+  React.useEffect(() => {
+    fetch('/api/knowledge')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.knowledge_items && Array.isArray(data.knowledge_items) && data.knowledge_items.length > 0) {
+          setItems(data.knowledge_items);
+        }
+      })
+      .catch((err) => console.warn('[KnowledgePage] API fetch error:', err));
+  }, []);
+
   // Form State
   const [formCategory, setFormCategory] = useState<KnowledgeItem['category']>('OPERATIONAL_FAQ');
   const [formTitle, setFormTitle] = useState('');

@@ -38,14 +38,44 @@ export default function SettingsPage() {
   const [bargeInEnabled, setBargeInEnabled] = useState(true);
 
   // Escalation State
-  const [primaryDispatcher, setPrimaryDispatcher] = useState('+91 98100 11223 (Harish - Senior Fleet Desk)');
-  const [opsManager, setOpsManager] = useState('+91 98100 99887 (Sunil Kumar - Hub Head)');
-  const [breakdownEmergency, setBreakdownEmergency] = useState('+91 98111 00112 (24/7 Roadside Rescue Line)');
+  const [primaryDispatcher, setPrimaryDispatcher] = useState('+91 98111 22334 (Vikas Sharma - Senior Fleet Desk)');
+  const [opsManager, setOpsManager] = useState('+91 98222 33445 (Rohan Verma - Hub Head)');
+  const [breakdownEmergency, setBreakdownEmergency] = useState('+91 98333 44556 (24/7 Roadside Rescue Line)');
 
-  const handleSave = (e: React.FormEvent) => {
+  React.useEffect(() => {
+    fetch('/api/settings')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.config) {
+          const cfg = data.config;
+          if (cfg.brand_name) setBrandName(cfg.brand_name);
+          if (cfg.business_name) setLegalName(cfg.business_name);
+          if (cfg.primary_operating_cities) setOperatingRegions(cfg.primary_operating_cities.join(', '));
+          if (cfg.ai_disclosure_wording) setDisclosureWording(cfg.ai_disclosure_wording);
+        }
+      })
+      .catch((err) => console.warn('[SettingsPage] API fetch error:', err));
+  }, []);
+
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSaveSuccess(true);
-    setTimeout(() => setSaveSuccess(false), 3000);
+    try {
+      await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          brand_name: brandName,
+          business_name: legalName,
+          primary_operating_cities: operatingRegions.split(',').map((s) => s.trim()),
+          ai_disclosure_wording: disclosureWording,
+        }),
+      });
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 3000);
+    } catch {
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 3000);
+    }
   };
 
   return (

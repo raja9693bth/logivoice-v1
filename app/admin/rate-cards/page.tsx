@@ -25,6 +25,17 @@ export default function RateCardsPage() {
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [editingCard, setEditingCard] = useState<RateCard | null>(null);
 
+  React.useEffect(() => {
+    fetch('/api/rates')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.rate_cards && Array.isArray(data.rate_cards) && data.rate_cards.length > 0) {
+          setRateCards(data.rate_cards);
+        }
+      })
+      .catch((err) => console.warn('[RateCardsPage] API fetch error:', err));
+  }, []);
+
   // Form State
   const [formOrigin, setFormOrigin] = useState('');
   const [formDest, setFormDest] = useState('');

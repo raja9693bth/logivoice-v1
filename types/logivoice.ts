@@ -96,7 +96,7 @@ export interface Call {
   customer_id: string;
   customer?: Customer;
   started_at: string;
-  ended_at: string;
+  ended_at?: string;
   duration_seconds: number;
   primary_intent: CallIntent;
   sentiment: 'POSITIVE' | 'NEUTRAL' | 'FRUSTRATED' | 'ANGRY';
@@ -198,6 +198,8 @@ export interface AuditEvent {
   call_id?: string;
   event_type: string;
   actor: string;
+  actor_type?: 'AI_AGENT' | 'DISPATCHER' | 'SYSTEM' | 'WEBHOOK';
+  actor_id?: string;
   severity: AuditSeverity;
   tool_name?: string;
   details: Record<string, unknown>;

@@ -27,6 +27,17 @@ export default function RequestsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [inspectReq, setInspectReq] = useState<OperationsRequest | null>(null);
 
+  React.useEffect(() => {
+    fetch('/api/requests')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.requests && Array.isArray(data.requests) && data.requests.length > 0) {
+          setRequests(data.requests);
+        }
+      })
+      .catch((err) => console.warn('[RequestsPage] API fetch error:', err));
+  }, []);
+
   const filteredRequests = useMemo(() => {
     return requests.filter((req) => {
       const matchesTab = activeTab === 'ALL' || req.type === activeTab;

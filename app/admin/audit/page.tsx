@@ -23,6 +23,17 @@ export default function SystemAuditPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedEvent, setSelectedEvent] = useState<AuditEvent | null>(null);
 
+  React.useEffect(() => {
+    fetch('/api/audit')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.events && Array.isArray(data.events) && data.events.length > 0) {
+          setEvents(data.events);
+        }
+      })
+      .catch((err) => console.warn('[AuditPage] API fetch error:', err));
+  }, []);
+
   const filteredEvents = useMemo(() => {
     return events.filter((ev) => {
       const matchesSeverity = severityFilter === 'ALL' || ev.severity === severityFilter;

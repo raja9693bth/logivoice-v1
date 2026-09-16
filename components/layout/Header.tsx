@@ -1,0 +1,84 @@
+'use client';
+
+import React from 'react';
+import Link from 'next/link';
+import { Search, Bell, LogOut, User, Menu } from 'lucide-react';
+import { SystemStatusPill } from '@/components/ui/Banner';
+import { ThemeToggle } from '@/components/ui/ThemeToggle';
+import { useSidebar } from '@/components/layout/SidebarContext';
+
+interface HeaderProps {
+  userEmail?: string;
+  userRole?: string;
+}
+
+export function Header({
+  userEmail = 'dispatcher@logivoice.local',
+  userRole = 'Senior Fleet Dispatcher',
+}: HeaderProps) {
+  const { toggleMobile } = useSidebar();
+
+  return (
+    <header className="h-16 bg-white/90 dark:bg-slate-950/90 backdrop-blur-xs border-b border-slate-200 dark:border-slate-800/80 px-4 sm:px-6 flex items-center justify-between sticky top-0 z-30 transition-colors max-w-full">
+      {/* Mobile Menu Toggle & Search Input */}
+      <div className="flex items-center flex-1 max-w-md min-w-0 mr-2 sm:mr-4">
+        <button
+          onClick={toggleMobile}
+          className="p-1.5 -ml-1 mr-2 rounded-lg text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 md:hidden shrink-0 transition-colors"
+          aria-label="Open mobile navigation"
+        >
+          <Menu className="w-5 h-5" />
+        </button>
+
+        <div className="relative group w-full min-w-0">
+          <Search className="w-4 h-4 text-slate-400 dark:text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 group-focus-within:text-sky-600 dark:group-focus-within:text-sky-400 transition-colors" />
+          <input
+            type="text"
+            placeholder="Search calls, LR #, rates..."
+            className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-900 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-hidden focus:border-sky-500 focus:ring-1 focus:ring-sky-500/20 transition-all truncate"
+          />
+        </div>
+      </div>
+
+      {/* Right Controls */}
+      <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+        <div className="hidden sm:block">
+          <SystemStatusPill />
+        </div>
+
+        {/* Theme Toggle Button */}
+        <ThemeToggle />
+
+        {/* Urgent Alert indicator */}
+        <Link
+          href="/admin/requests"
+          className="relative p-2 rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:text-amber-600 dark:hover:text-amber-300 hover:border-amber-400 dark:hover:border-amber-800/60 transition-colors shrink-0"
+          title="1 Urgent Roadside Escalation Pending"
+          aria-label="Alerts"
+        >
+          <Bell className="w-4 h-4" />
+          <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+        </Link>
+
+        {/* User Profile */}
+        <div className="flex items-center gap-2 sm:gap-3 pl-2 sm:pl-3 border-l border-slate-200 dark:border-slate-800 shrink-0">
+          <div className="text-right hidden lg:block">
+            <div className="text-xs font-semibold text-slate-900 dark:text-white tracking-tight truncate max-w-[180px]">{userEmail}</div>
+            <div className="text-[10px] text-sky-600 dark:text-sky-400 font-medium truncate">{userRole}</div>
+          </div>
+          <div className="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-300 shrink-0">
+            <User className="w-4 h-4" />
+          </div>
+          <Link
+            href="/login"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors shrink-0"
+            title="Sign Out"
+            aria-label="Sign Out"
+          >
+            <LogOut className="w-4 h-4" />
+          </Link>
+        </div>
+      </div>
+    </header>
+  );
+}

@@ -1,0 +1,139 @@
+'use client';
+
+import React, { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { Truck, Lock, Mail, ArrowRight, AlertCircle, Loader2 } from 'lucide-react';
+import { ThemeToggle } from '@/components/ui/ThemeToggle';
+
+export default function LoginPage() {
+  const router = useRouter();
+  const [email, setEmail] = useState('dispatcher@logivoice.local');
+  const [password, setPassword] = useState('LogiVoice@2026');
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoading(true);
+    setError(null);
+
+    // Simulate session authentication verification
+    setTimeout(() => {
+      setIsLoading(false);
+      router.push('/admin');
+    }, 600);
+  };
+
+  const handleDemoFill = () => {
+    setEmail('dispatcher@logivoice.local');
+    setPassword('LogiVoice@2026');
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 dark:bg-[#090d16] flex flex-col items-center justify-center p-4 relative transition-colors">
+      {/* Theme Toggle in Header / Corner */}
+      <div className="absolute top-4 right-4">
+        <ThemeToggle />
+      </div>
+
+      <div className="w-full max-w-md">
+        {/* Brand Header */}
+        <div className="text-center mb-8">
+          <div className="w-12 h-12 rounded-xl bg-sky-600 flex items-center justify-center mx-auto mb-3 shadow-lg shadow-sky-600/20 text-white">
+            <Truck className="w-6 h-6" />
+          </div>
+          <h1 className="text-xl font-bold text-slate-900 dark:text-white tracking-tight">LogiVoice V1</h1>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Inbound Voice Operations &amp; Dispatcher Portal</p>
+        </div>
+
+        {/* Login Card */}
+        <div className="bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
+          <div className="border-b border-slate-200 dark:border-slate-800/80 pb-4">
+            <h2 className="text-sm font-semibold text-slate-900 dark:text-white">Dispatcher Sign In</h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Enter authorized operational credentials</p>
+          </div>
+
+          {error && (
+            <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 dark:text-rose-400" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5" htmlFor="email">
+                Work Email / Dispatcher ID
+              </label>
+              <div className="relative">
+                <Mail className="w-4 h-4 text-slate-400 dark:text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  id="email"
+                  type="email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="dispatcher@company.com"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg pl-9 pr-3 py-2 text-xs text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-hidden focus:border-sky-500 focus:ring-1 focus:ring-sky-500/30 transition-all"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5" htmlFor="password">
+                Password
+              </label>
+              <div className="relative">
+                <Lock className="w-4 h-4 text-slate-400 dark:text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  id="password"
+                  type="password"
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••••••"
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg pl-9 pr-3 py-2 text-xs text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-hidden focus:border-sky-500 focus:ring-1 focus:ring-sky-500/30 transition-all"
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={isLoading}
+              className="w-full py-2.5 px-4 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold tracking-wide transition-colors flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-xs cursor-pointer"
+            >
+              {isLoading ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Verifying Session...
+                </>
+              ) : (
+                <>
+                  Access Operations Console
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </>
+              )}
+            </button>
+          </form>
+
+          {/* Quick Demo Fill Helper */}
+          <div className="pt-2 border-t border-slate-200 dark:border-slate-800/60 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+            <span>Development Evaluation?</span>
+            <button
+              type="button"
+              onClick={handleDemoFill}
+              className="text-sky-600 dark:text-sky-400 hover:text-sky-700 dark:hover:text-sky-300 underline font-medium focus:outline-hidden cursor-pointer"
+            >
+              Autofill Demo Account
+            </button>
+          </div>
+        </div>
+
+        {/* Security & Telecom Note */}
+        <p className="text-center text-[11px] text-slate-500 dark:text-slate-400 mt-6 max-w-xs mx-auto">
+          Authorized personnel only. Sessions are encrypted and audited under LogiVoice tenant boundaries.
+        </p>
+      </div>
+    </div>
+  );
+}

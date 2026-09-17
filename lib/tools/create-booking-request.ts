@@ -69,7 +69,7 @@ export async function executeCreateBookingRequest(
           pickup_date: input.pickup_date,
           vehicle_type: input.vehicle_type,
           weight: input.weight,
-          material_type: input.material_type || 'General Cargo',
+          material_type: input.material_type || null,
           special_requirements: input.special_requirements || null,
           idempotency_key: input.idempotency_key || null,
         },
@@ -90,9 +90,9 @@ export async function executeCreateBookingRequest(
         route: `${input.origin} -> ${input.destination}`,
         vehicle_type: input.vehicle_type,
         weight: input.weight,
-        requirement: `Booking ${referenceNo}: ${input.material_type || 'Cargo'} on ${input.pickup_date}`,
+        requirement: `Booking ${referenceNo}: ${input.material_type || 'Commercial Freight'} on ${input.pickup_date}`,
         next_action: 'Dispatcher vehicle assignment & WhatsApp confirmation dispatch',
-        assigned_to: 'Primary Dispatcher',
+        assigned_to: undefined,
         followup_status: 'PENDING',
         last_call_at: new Date().toISOString(),
       },
@@ -124,7 +124,9 @@ export async function executeCreateBookingRequest(
       status: requestStatus,
       reference_no: referenceNo,
       request_id: newRequest.id,
-      message: `Booking request successfully created with reference ${referenceNo}. Our dispatch team has been notified.`,
+      message: isPendingConfirmation
+        ? `Booking request logged with reference ${referenceNo}, pending caller confirmation.`
+        : `Booking request successfully created with reference ${referenceNo}. Awaiting operations review and vehicle assignment.`,
     };
   } catch (error) {
     return {

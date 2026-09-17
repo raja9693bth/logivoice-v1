@@ -11,6 +11,22 @@ export async function executeCreateSupportTicket(
   tenantId: string = DEFAULT_TENANT_ID
 ): Promise<CreateSupportTicketOutput> {
   try {
+    if (input.idempotency_key) {
+      const existing = await db.listRequests(tenantId);
+      const matched = existing.find(
+        (r) => (r.details as Record<string, unknown>)?.idempotency_key === input.idempotency_key
+      );
+      if (matched) {
+        return {
+          status: 'SUCCESS',
+          ticket_id: matched.id,
+          reference_no: matched.reference_no,
+          priority: matched.priority,
+          message: `Idempotent replay: Support ticket already registered under ID ${matched.reference_no}.`,
+        };
+      }
+    }
+
     let customer = await db.getCustomerByPhone(input.customer_phone, tenantId);
     if (!customer) {
       customer = await db.createCustomer(
@@ -42,6 +58,7 @@ export async function executeCreateSupportTicket(
         details: {
           issue: input.issue,
           tracking_reference: input.tracking_reference || null,
+          idempotency_key: input.idempotency_key || null,
           reported_at: new Date().toISOString(),
         },
       },

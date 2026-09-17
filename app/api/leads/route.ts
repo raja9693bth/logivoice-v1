@@ -66,7 +66,7 @@ export async function POST(req: NextRequest) {
         weight: val.weight,
         requirement: val.requirement,
         next_action: val.next_action || 'Follow up with corridor quote',
-        assigned_to: val.assigned_to || 'Primary Dispatcher',
+        assigned_to: val.assigned_to || undefined,
         last_call_at: new Date().toISOString(),
         followup_status: val.followup_status,
       },

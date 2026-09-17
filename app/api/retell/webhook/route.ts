@@ -43,16 +43,40 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Malformed JSON payload' }, { status: 400 });
     }
 
+    const SUPPORTED_EVENTS = ['call_started', 'call_ended', 'call_analyzed'] as const;
     const event = rawBody.event;
+
+    // Strict event allowlist: fail closed on missing or unknown event
+    if (!event || !SUPPORTED_EVENTS.includes(event as any)) {
+      logError(correlation, 'RETELL_WEBHOOK_UNKNOWN_EVENT', { event });
+      return NextResponse.json(
+        { error: 'Unsupported or missing event type in webhook payload' },
+        { status: 400 }
+      );
+    }
+
     const callData = rawBody.call || rawBody;
     const externalCallId = callData.call_id || rawBody.call_id;
 
-    if (!externalCallId) {
-      return NextResponse.json({ error: 'Missing call_id in webhook payload' }, { status: 400 });
+    if (!externalCallId || typeof externalCallId !== 'string') {
+      return NextResponse.json({ error: 'Missing or invalid call_id in webhook payload' }, { status: 400 });
     }
 
-    // Resolve tenant ID securely
-    const tenantId = (process.env.NODE_ENV !== 'production' && (rawBody.tenant_id || callData.tenant_id)) || DEFAULT_TENANT_ID;
+    // Resolve tenant ID securely from trusted server mapping in production
+    let tenantId = DEFAULT_TENANT_ID;
+    if (process.env.NODE_ENV === 'production') {
+      const agentId = callData.agent_id || rawBody.agent_id;
+      const configuredAgentId = process.env.RETELL_AGENT_ID;
+      if (configuredAgentId && agentId && agentId !== configuredAgentId) {
+        logError(correlation, 'RETELL_UNKNOWN_AGENT_ID', { agentId });
+        return NextResponse.json({ error: 'Unknown agent identifier for tenant' }, { status: 400 });
+      }
+      // Production tenant resolution
+      tenantId = process.env.AUTHORITATIVE_TENANT_ID || DEFAULT_TENANT_ID;
+    } else {
+      tenantId = rawBody.tenant_id || callData.tenant_id || DEFAULT_TENANT_ID;
+    }
+
     logTrace(correlation, 'RETELL_WEBHOOK_RECEIVED', { event, external_call_id: externalCallId });
 
     // 1. Lifecycle Event: call_started
@@ -86,7 +110,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 2. Lifecycle Event: call_ended / call_analyzed
-    if (event === 'call_ended' || event === 'call_analyzed' || !event) {
+    if (event === 'call_ended' || event === 'call_analyzed') {
       // Map sentiment if present
       let sentiment: 'POSITIVE' | 'NEUTRAL' | 'FRUSTRATED' | 'ANGRY' = 'NEUTRAL';
       const rawSentiment = callData.call_analysis?.in_call_sentiment?.toLowerCase();
@@ -120,23 +144,23 @@ export async function POST(req: NextRequest) {
         outcome = 'TRANSFERRED';
       } else if (customData.callback_scheduled || reason.includes('callback')) {
         outcome = 'CALLBACK_SCHEDULED';
-      } else if (reason.includes('busy') || reason.includes('no_answer') || reason.includes('voicemail')) {
+      } else if (reason.includes('miss') || reason.includes('no_answer') || reason.includes('timeout')) {
         outcome = 'MISSED';
-      } else if (reason.includes('error') || reason.includes('failed')) {
+      } else if (reason.includes('fail') || reason.includes('error')) {
         outcome = 'FAILED';
-      } else if (durationSeconds < 5 && (reason.includes('hangup') || reason.includes('inactivity'))) {
+      } else if (reason.includes('user_hangup') && durationSeconds < 10) {
         outcome = 'ABANDONED';
       }
 
-      // Execute authoritative post-call pipeline
+      // Execute post-call processing pipeline
       const result = await processPostCallPipeline({
         external_call_id: externalCallId,
         from_number: callData.from_number,
-        to_number: callData.to_number,
-        started_at: callData.start_timestamp ? new Date(callData.start_timestamp).toISOString() : undefined,
-        ended_at: callData.end_timestamp ? new Date(callData.end_timestamp).toISOString() : new Date().toISOString(),
+        caller_name: callData.caller_name || customData.caller_name,
+        summary: callData.call_analysis?.call_summary || 'Call concluded via Retell agent.',
+        recording_url: callData.recording_url,
+        transcript: callData.transcript_object || [],
         duration_seconds: durationSeconds,
-        summary: callData.call_analysis?.call_summary || callData.summary,
         intent,
         sentiment,
         outcome,
@@ -156,13 +180,13 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    return NextResponse.json({ success: true, event: 'unhandled_event_ignored' });
+    return NextResponse.json({ error: 'Unhandled event type' }, { status: 400 });
   } catch (error) {
     logError(correlation, 'RETELL_WEBHOOK_ERROR', error);
     return NextResponse.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : 'Webhook ingestion failure',
+        error: 'Internal webhook processing error',
       },
       { status: 500 }
     );

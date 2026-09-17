@@ -123,6 +123,8 @@ export interface Call {
   transcript?: TranscriptTurn[];
   tool_events?: ToolExecutionEvent[];
   agent_version: string;
+  recording_url?: string;
+  intent_confidence?: number;
 }
 
 export interface OperationsRequest {

@@ -356,7 +356,7 @@ export default function RequestsPage() {
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-slate-500 dark:text-slate-400 font-medium">Assigned Dispatcher</span>
-                <span className="text-slate-900 dark:text-white font-medium">{inspectReq.assigned_to || 'Primary Dispatcher'}</span>
+                <span className="text-slate-900 dark:text-white font-medium">{inspectReq.assigned_to || 'Unassigned'}</span>
               </div>
             </div>
 

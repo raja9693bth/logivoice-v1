@@ -130,7 +130,7 @@ export async function executeSaveCallOutcome(
             weight: input.facts?.weight,
             requirement: input.summary.slice(0, 150),
             next_action: leadTemp === 'HOT' ? 'Lock booking & assign vehicle' : 'Follow up with corridor quote',
-            assigned_to: 'Primary Dispatcher',
+            assigned_to: 'LogiVoice Operations',
             followup_status: 'PENDING',
             last_call_at: new Date().toISOString(),
           },

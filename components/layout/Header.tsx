@@ -15,13 +15,14 @@ interface HeaderProps {
 }
 
 export function Header({
-  userEmail = 'dispatcher@logivoice.local',
-  userRole = 'Senior Fleet Dispatcher',
+  userEmail = 'Authenticated Dispatcher',
+  userRole = 'LogiVoice Operations',
 }: HeaderProps) {
   const router = useRouter();
   const { toggleMobile } = useSidebar();
   const [displayEmail, setDisplayEmail] = useState(userEmail);
   const [displayRole, setDisplayRole] = useState(userRole);
+  const [urgentCount, setUrgentCount] = useState(0);
   const [isSigningOut, setIsSigningOut] = useState(false);
 
   useEffect(() => {
@@ -39,6 +40,19 @@ export function Header({
     } catch {
       // Keep defaults
     }
+
+    // Fetch actual pending urgent requests for truthful alert notification
+    fetch('/api/requests?priority=URGENT&status=PENDING')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.requests) {
+          setUrgentCount(data.requests.length);
+        }
+      })
+      .catch(() => {
+        // Fallback gracefully without animating a false alarm
+        setUrgentCount(0);
+      });
   }, []);
 
   const handleSignOut = async () => {
@@ -85,15 +99,17 @@ export function Header({
         {/* Theme Toggle Button */}
         <ThemeToggle />
 
-        {/* Urgent Alert indicator */}
+        {/* Truthful Alert indicator: badges only if genuine urgent requests exist */}
         <Link
           href="/admin/requests"
           className="relative p-2 rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:text-amber-600 dark:hover:text-amber-300 hover:border-amber-400 dark:hover:border-amber-800/60 transition-colors shrink-0"
-          title="1 Urgent Roadside Escalation Pending"
+          title={urgentCount > 0 ? `${urgentCount} Urgent Request${urgentCount > 1 ? 's' : ''} Pending` : 'No urgent alerts'}
           aria-label="Alerts"
         >
           <Bell className="w-4 h-4" />
-          <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+          {urgentCount > 0 && (
+            <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+          )}
         </Link>
 
         {/* User Profile */}

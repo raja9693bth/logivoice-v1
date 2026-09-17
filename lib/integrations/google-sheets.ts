@@ -93,7 +93,21 @@ export async function syncCallToGoogleSheets(
   call: Call,
   lead?: Lead | null
 ): Promise<SheetSyncResult> {
-  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID || DEFAULT_SPREADSHEET_ID;
+  const tenantId = call.tenant_id || DEFAULT_TENANT_ID;
+  let spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+
+  try {
+    const config = await db.getClientConfig(tenantId);
+    if (config.sheets_config?.spreadsheet_id) {
+      spreadsheetId = config.sheets_config.spreadsheet_id;
+    }
+  } catch {
+    // Graceful fallback
+  }
+
+  if (!spreadsheetId) {
+    spreadsheetId = DEFAULT_SPREADSHEET_ID;
+  }
 
   // Format row columns strictly according to SSOT 03_STRUCTURED_DATA_MODEL line 214
   const rowData: SheetRowData = {
@@ -115,7 +129,7 @@ export async function syncCallToGoogleSheets(
     summary: call.summary || '',
     escalated: call.escalation_status?.is_escalated ? 'YES' : 'NO',
     next_action: lead?.next_action || 'Review outcome',
-    assigned_to: lead?.assigned_to || 'Primary Dispatcher',
+    assigned_to: lead?.assigned_to || 'Unassigned',
   };
 
   // Idempotency: skip if already synced in current runtime
@@ -130,7 +144,6 @@ export async function syncCallToGoogleSheets(
 
   // Durable DB idempotency check: query audit trail to ensure no duplicate sync across restarts
   try {
-    const tenantId = call.tenant_id || DEFAULT_TENANT_ID;
     const existingEvents = await db.listAuditEvents(tenantId, 50);
     const alreadySynced = existingEvents.some(
       (e) =>
@@ -169,8 +182,28 @@ export async function syncCallToGoogleSheets(
         };
       }
 
+      // Dynamic worksheet verification: inspect spreadsheet metadata to select active sheet title
+      let sheetTab = 'Sheet1';
+      try {
+        const metaRes = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties.title`,
+          {
+            headers: { Authorization: `Bearer ${accessToken}` },
+            signal: AbortSignal.timeout(5000),
+          }
+        );
+        if (metaRes.ok) {
+          const metaData = await metaRes.json();
+          if (metaData.sheets && metaData.sheets.length > 0 && metaData.sheets[0].properties?.title) {
+            sheetTab = metaData.sheets[0].properties.title;
+          }
+        }
+      } catch {
+        // Fallback to default tab name if metadata query times out
+      }
+
       const appendRes = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1:append?valueInputOption=USER_ENTERED`,
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetTab)}!A1:append?valueInputOption=USER_ENTERED`,
         {
           method: 'POST',
           headers: {
@@ -216,9 +249,21 @@ export async function syncCallToGoogleSheets(
         };
       }
 
+      // Extract updated row index from Google API response
+      let rowIndex: number | undefined;
+      try {
+        const appendData = await appendRes.json();
+        const updatedRange: string | undefined = appendData.updates?.updatedRange;
+        if (updatedRange) {
+          const match = updatedRange.match(/!A(\d+)/i);
+          if (match) rowIndex = parseInt(match[1], 10);
+        }
+      } catch {
+        // Non-critical range parse error
+      }
+
       syncedCallIds.add(call.external_call_id);
       try {
-        const tenantId = call.tenant_id || DEFAULT_TENANT_ID;
         await db.logAuditEvent(
           {
             tenant_id: tenantId,
@@ -230,6 +275,8 @@ export async function syncCallToGoogleSheets(
             details: {
               external_call_id: call.external_call_id,
               spreadsheet_id: spreadsheetId,
+              worksheet: sheetTab,
+              row_index: rowIndex,
               status: 'SYNCED',
             },
           },
@@ -242,6 +289,7 @@ export async function syncCallToGoogleSheets(
         synced: true,
         status: 'SYNCED',
         spreadsheet_id: spreadsheetId,
+        row_index: rowIndex,
         provider: 'GOOGLE_SHEETS_API_V4',
       };
     } catch (err) {

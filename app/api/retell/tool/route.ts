@@ -54,15 +54,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Malformed JSON payload' }, { status: 400 });
     }
 
-    logTrace(correlation, 'RETELL_TOOL_INVOKED', { body });
-
-    // Handle both Retell payload formats:
-    // Format A: { name: 'get_rate_quote', args: { ... }, call: { call_id: '...' } }
-    // Format B: { tool_name: 'get_rate_quote', arguments: { ... }, call_id: '...' }
     const toolName = body.name || body.tool_name;
     const args = body.args || body.arguments || {};
     const callId = body.call?.call_id || body.call_id;
-    const tenantId = body.tenant_id || DEFAULT_TENANT_ID;
+    const tenantId = (process.env.NODE_ENV === 'production' && process.env.AUTHORITATIVE_TENANT_ID) || body.tenant_id || DEFAULT_TENANT_ID;
+
+    logTrace(correlation, 'RETELL_TOOL_INVOKED', { toolName, callId });
 
     if (!toolName) {
       return NextResponse.json(

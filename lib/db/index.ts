@@ -26,6 +26,55 @@ import {
   FollowupChannel,
   FollowupRecord,
 } from '@/types/logivoice';
+import {
+  domainCallToDbRow,
+  dbCallToDomain,
+  domainLeadToDbRow,
+  dbLeadToDomain,
+  domainRequestToDbRow,
+  dbRequestToDomain,
+  domainKnowledgeToDbRow,
+  dbKnowledgeToDomain,
+  domainCustomerToDbRow,
+  dbCustomerToDomain,
+  domainFollowupToDbRow,
+  dbFollowupToDomain,
+  domainAuditToDbRow,
+  CallsDbRow,
+  CallFactsDbRow,
+  LeadsDbRow,
+  OperationsRequestsDbRow,
+  KnowledgeItemsDbRow,
+  FollowupsDbRow,
+  CustomersDbRow,
+  AuditEventsDbRow,
+} from './mappers';
+
+export {
+  domainCallToDbRow,
+  dbCallToDomain,
+  domainLeadToDbRow,
+  dbLeadToDomain,
+  domainRequestToDbRow,
+  dbRequestToDomain,
+  domainKnowledgeToDbRow,
+  dbKnowledgeToDomain,
+  domainCustomerToDbRow,
+  dbCustomerToDomain,
+  domainFollowupToDbRow,
+  dbFollowupToDomain,
+  domainAuditToDbRow,
+};
+export type {
+  CallsDbRow,
+  CallFactsDbRow,
+  LeadsDbRow,
+  OperationsRequestsDbRow,
+  KnowledgeItemsDbRow,
+  FollowupsDbRow,
+  CustomersDbRow,
+  AuditEventsDbRow,
+};
 
 export interface TrackingRecord {
   id: string;
@@ -682,6 +731,26 @@ export async function isSupabaseLive(): Promise<boolean> {
   return false;
 }
 
+// Cross-tenant relationship validation helper
+async function validateTenantEntityOwnership(
+  entity: 'customer' | 'call',
+  entityId: string | undefined | null,
+  tenantId: string
+): Promise<void> {
+  if (!entityId || entityId.startsWith('cust-unknown') || entityId.startsWith('call-unknown')) return;
+  if (entity === 'customer') {
+    const cust = await db.getCustomerById(entityId, tenantId);
+    if (!cust && getRuntimeMode() === 'PRODUCTION') {
+      throw new Error(`Tenant isolation violation: Customer '${entityId}' not found or does not belong to tenant '${tenantId}'.`);
+    }
+  } else if (entity === 'call') {
+    const call = await db.getCallById(entityId, tenantId);
+    if (!call && getRuntimeMode() === 'PRODUCTION') {
+      throw new Error(`Tenant isolation violation: Call '${entityId}' not found or does not belong to tenant '${tenantId}'.`);
+    }
+  }
+}
+
 // =========================================================================
 // REPOSITORY IMPLEMENTATION
 // =========================================================================
@@ -797,8 +866,9 @@ export const db = {
 
     if (await isSupabaseLive()) {
       const client = createAdminClient();
-      const { data, error } = await client.from('customers').insert([newCustomer]).select().single();
-      if (!error && data) return data as Customer;
+      const dbRow = domainCustomerToDbRow(newCustomer);
+      const { data, error } = await client.from('customers').insert([dbRow]).select().single();
+      if (!error && data) return dbCustomerToDomain(data);
     }
     assertProductionDbReady();
     globalStore.customers.push(newCustomer);
@@ -813,11 +883,15 @@ export const db = {
       const client = createAdminClient();
       const { data, error } = await client
         .from('calls')
-        .select('*, customer:customers(*), facts:call_facts(*)')
+        .select('*, customer:customers(*), facts:call_facts(*), transcript:transcript_segments(*)')
         .eq('id', callId)
         .eq('tenant_id', tenantId)
         .single();
-      if (!error && data) return data as Call;
+      if (!error && data) {
+        const factsRow = Array.isArray(data.facts) ? data.facts[0] : data.facts;
+        const customerRow = Array.isArray(data.customer) ? data.customer[0] : data.customer;
+        return dbCallToDomain(data, factsRow, customerRow, data.transcript);
+      }
     }
     assertProductionDbReady();
     const call = globalStore.calls.find((c) => c.id === callId && c.tenant_id === tenantId);
@@ -831,11 +905,15 @@ export const db = {
       const client = createAdminClient();
       const { data, error } = await client
         .from('calls')
-        .select('*, customer:customers(*), facts:call_facts(*)')
+        .select('*, customer:customers(*), facts:call_facts(*), transcript:transcript_segments(*)')
         .eq('external_call_id', externalCallId)
         .eq('tenant_id', tenantId)
         .single();
-      if (!error && data) return data as Call;
+      if (!error && data) {
+        const factsRow = Array.isArray(data.facts) ? data.facts[0] : data.facts;
+        const customerRow = Array.isArray(data.customer) ? data.customer[0] : data.customer;
+        return dbCallToDomain(data, factsRow, customerRow, data.transcript);
+      }
     }
     assertProductionDbReady();
     const call = globalStore.calls.find((c) => c.external_call_id === externalCallId && c.tenant_id === tenantId);
@@ -846,15 +924,36 @@ export const db = {
 
   async listCalls(
     tenantId: string = DEFAULT_TENANT_ID,
-    filters?: { intent?: CallIntent; outcome?: CallOutcome; search?: string }
+    filters?: { intent?: CallIntent; outcome?: CallOutcome; search?: string; limit?: number; offset?: number }
   ): Promise<Call[]> {
+    const limit = Math.min(Math.max(filters?.limit || 50, 1), 100);
+    const offset = Math.max(filters?.offset || 0, 0);
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
-      let query = client.from('calls').select('*, customer:customers(*), facts:call_facts(*)').eq('tenant_id', tenantId).order('started_at', { ascending: false });
+      let query = client
+        .from('calls')
+        .select('*, customer:customers(*), facts:call_facts(*)')
+        .eq('tenant_id', tenantId)
+        .order('started_at', { ascending: false })
+        .range(offset, offset + limit - 1);
+
       if (filters?.intent) query = query.eq('primary_intent', filters.intent);
       if (filters?.outcome) query = query.eq('outcome', filters.outcome);
+      if (filters?.search) {
+        const s = filters.search.trim();
+        if (s) {
+          query = query.or(`summary.ilike.%${s}%,external_call_id.ilike.%${s}%`);
+        }
+      }
       const { data, error } = await query;
-      if (!error && data) return data as Call[];
+      if (!error && data) {
+        return data.map((d: any) => {
+          const factsRow = Array.isArray(d.facts) ? d.facts[0] : d.facts;
+          const customerRow = Array.isArray(d.customer) ? d.customer[0] : d.customer;
+          return dbCallToDomain(d, factsRow, customerRow);
+        });
+      }
     }
     assertProductionDbReady();
     let calls = globalStore.calls.filter((c) => c.tenant_id === tenantId);
@@ -870,25 +969,48 @@ export const db = {
           c.customer?.phone.includes(s)
       );
     }
-    return calls.map((c) => ({
+    return calls.slice(offset, offset + limit).map((c) => ({
       ...c,
       customer: globalStore.customers.find((cust) => cust.id === c.customer_id),
     }));
   },
 
   async createCall(callData: Omit<Call, 'id'>, tenantId: string = DEFAULT_TENANT_ID): Promise<Call> {
+    if (callData.customer_id) {
+      await validateTenantEntityOwnership('customer', callData.customer_id, tenantId);
+    }
+
     const id = crypto.randomUUID();
     const newCall: Call = {
       ...callData,
       id,
       tenant_id: tenantId,
-      customer_id: callData.customer_id && callData.customer_id !== 'cust-unknown' ? callData.customer_id : undefined,
+      customer_id: callData.customer_id && !callData.customer_id.startsWith('cust-unknown') ? callData.customer_id : undefined,
     };
 
     if (await isSupabaseLive()) {
       const client = createAdminClient();
-      const { data, error } = await client.from('calls').insert([newCall]).select().single();
-      if (!error && data) return data as Call;
+      const { callRow, factsRow } = domainCallToDbRow(newCall);
+      const { data, error } = await client.from('calls').insert([callRow]).select().single();
+      if (!error && data) {
+        if (factsRow) {
+          await client.from('call_facts').upsert([factsRow]);
+        }
+        if (newCall.transcript && newCall.transcript.length > 0) {
+          const transcriptRows = newCall.transcript.map((t) => ({
+            id: crypto.randomUUID(),
+            call_id: id,
+            tenant_id: tenantId,
+            speaker: t.speaker,
+            text: t.text,
+            timestamp: t.timestamp,
+            language: t.language || null,
+            created_at: new Date().toISOString(),
+          }));
+          await client.from('transcript_segments').insert(transcriptRows);
+        }
+        return dbCallToDomain(data, factsRow);
+      }
     }
     assertProductionDbReady();
     globalStore.calls.unshift(newCall);
@@ -896,16 +1018,45 @@ export const db = {
   },
 
   async updateCall(callId: string, updates: Partial<Call>, tenantId: string = DEFAULT_TENANT_ID): Promise<Call | null> {
+    if (updates.customer_id) {
+      await validateTenantEntityOwnership('customer', updates.customer_id, tenantId);
+    }
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
+      const { callRow, factsRow } = domainCallToDbRow({
+        ...updates,
+        id: callId,
+        tenant_id: tenantId,
+        external_call_id: updates.external_call_id || '',
+      } as any);
+
+      const updatePayload: Record<string, unknown> = { updated_at: new Date().toISOString() };
+      if (updates.ended_at !== undefined) updatePayload.ended_at = updates.ended_at;
+      if (updates.duration_seconds !== undefined) updatePayload.duration_seconds = updates.duration_seconds;
+      if (updates.primary_intent !== undefined) updatePayload.primary_intent = updates.primary_intent;
+      if (updates.sentiment !== undefined) updatePayload.sentiment = updates.sentiment;
+      if (updates.outcome !== undefined) updatePayload.outcome = updates.outcome;
+      if (updates.lead_temperature !== undefined) updatePayload.lead_temperature = updates.lead_temperature;
+      if (updates.summary !== undefined) updatePayload.summary = updates.summary;
+      if (updates.escalation_status !== undefined) updatePayload.escalation_status = updates.escalation_status;
+      if (updates.followup_state !== undefined) updatePayload.followup_state = updates.followup_state;
+      if (updates.customer_id !== undefined) updatePayload.customer_id = updates.customer_id;
+
       const { data, error } = await client
         .from('calls')
-        .update(updates)
+        .update(updatePayload)
         .eq('id', callId)
         .eq('tenant_id', tenantId)
         .select()
         .single();
-      if (!error && data) return data as Call;
+
+      if (!error && data) {
+        if (factsRow && updates.facts) {
+          await client.from('call_facts').upsert([factsRow]);
+        }
+        return dbCallToDomain(data, factsRow);
+      }
     }
     assertProductionDbReady();
     const idx = globalStore.calls.findIndex((c) => c.id === callId && c.tenant_id === tenantId);
@@ -919,14 +1070,34 @@ export const db = {
   // -----------------------------------------------------------------------
   async listLeads(
     tenantId: string = DEFAULT_TENANT_ID,
-    filters?: { temperature?: LeadTemperature; search?: string }
+    filters?: { temperature?: LeadTemperature; search?: string; limit?: number; offset?: number }
   ): Promise<Lead[]> {
+    const limit = Math.min(Math.max(filters?.limit || 50, 1), 100);
+    const offset = Math.max(filters?.offset || 0, 0);
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
-      let query = client.from('leads').select('*').eq('tenant_id', tenantId).order('created_at', { ascending: false });
+      let query = client
+        .from('leads')
+        .select('*, customer:customers(*)')
+        .eq('tenant_id', tenantId)
+        .order('created_at', { ascending: false })
+        .range(offset, offset + limit - 1);
+
       if (filters?.temperature) query = query.eq('temperature', filters.temperature);
+      if (filters?.search) {
+        const s = filters.search.trim();
+        if (s) {
+          query = query.or(`requirement.ilike.%${s}%,route.ilike.%${s}%`);
+        }
+      }
       const { data, error } = await query;
-      if (!error && data) return data as Lead[];
+      if (!error && data) {
+        return data.map((d: any) => {
+          const customer = Array.isArray(d.customer) ? d.customer[0] : d.customer;
+          return dbLeadToDomain(d, customer);
+        });
+      }
     }
     assertProductionDbReady();
     let leads = globalStore.leads.filter((l) => l.tenant_id === tenantId);
@@ -941,10 +1112,17 @@ export const db = {
           l.route?.toLowerCase().includes(s)
       );
     }
-    return leads;
+    return leads.slice(offset, offset + limit);
   },
 
   async createLead(leadData: Omit<Lead, 'id' | 'created_at' | 'updated_at'>, tenantId: string = DEFAULT_TENANT_ID): Promise<Lead> {
+    if (leadData.customer_id) {
+      await validateTenantEntityOwnership('customer', leadData.customer_id, tenantId);
+    }
+    if (leadData.call_id) {
+      await validateTenantEntityOwnership('call', leadData.call_id, tenantId);
+    }
+
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
     const newLead: Lead = {
@@ -957,8 +1135,12 @@ export const db = {
 
     if (await isSupabaseLive()) {
       const client = createAdminClient();
-      const { data, error } = await client.from('leads').insert([newLead]).select().single();
-      if (!error && data) return data as Lead;
+      const dbRow = domainLeadToDbRow(newLead);
+      const { data, error } = await client.from('leads').insert([dbRow]).select('*, customer:customers(*)').single();
+      if (!error && data) {
+        const customer = Array.isArray(data.customer) ? data.customer[0] : data.customer;
+        return dbLeadToDomain(data, customer);
+      }
     }
     assertProductionDbReady();
     globalStore.leads.unshift(newLead);
@@ -978,9 +1160,12 @@ export const db = {
         .update({ ...updates, updated_at: now })
         .eq('id', id)
         .eq('tenant_id', tenantId)
-        .select()
+        .select('*, customer:customers(*)')
         .single();
-      if (!error && data) return data as Lead;
+      if (!error && data) {
+        const customer = Array.isArray(data.customer) ? data.customer[0] : data.customer;
+        return dbLeadToDomain(data, customer);
+      }
     }
     assertProductionDbReady();
     const idx = globalStore.leads.findIndex((l) => l.id === id && l.tenant_id === tenantId);
@@ -998,36 +1183,57 @@ export const db = {
   // -----------------------------------------------------------------------
   async listRequests(
     tenantId: string = DEFAULT_TENANT_ID,
-    filters?: { status?: RequestStatus; priority?: RequestPriority; type?: RequestType }
+    filters?: { status?: RequestStatus; priority?: RequestPriority; type?: RequestType; limit?: number; offset?: number }
   ): Promise<OperationsRequest[]> {
+    const limit = Math.min(Math.max(filters?.limit || 50, 1), 100);
+    const offset = Math.max(filters?.offset || 0, 0);
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
-      let query = client.from('operations_requests').select('*').eq('tenant_id', tenantId).order('created_at', { ascending: false });
+      let query = client
+        .from('operations_requests')
+        .select('*, customer:customers(*)')
+        .eq('tenant_id', tenantId)
+        .order('created_at', { ascending: false })
+        .range(offset, offset + limit - 1);
+
       if (filters?.status) query = query.eq('status', filters.status);
       if (filters?.priority) query = query.eq('priority', filters.priority);
       if (filters?.type) query = query.eq('type', filters.type);
       const { data, error } = await query;
-      if (!error && data) return data as OperationsRequest[];
+      if (!error && data) {
+        return data.map((d: any) => {
+          const customer = Array.isArray(d.customer) ? d.customer[0] : d.customer;
+          return dbRequestToDomain(d, customer);
+        });
+      }
     }
     assertProductionDbReady();
     let reqs = globalStore.operations_requests.filter((r) => r.tenant_id === tenantId);
     if (filters?.status) reqs = reqs.filter((r) => r.status === filters.status);
     if (filters?.priority) reqs = reqs.filter((r) => r.priority === filters.priority);
     if (filters?.type) reqs = reqs.filter((r) => r.type === filters.type);
-    return reqs;
+    return reqs.slice(offset, offset + limit);
   },
 
   async createRequest(
     requestData: Omit<OperationsRequest, 'id' | 'created_at' | 'updated_at'>,
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<OperationsRequest> {
+    if (requestData.customer_id) {
+      await validateTenantEntityOwnership('customer', requestData.customer_id, tenantId);
+    }
+    if (requestData.call_id) {
+      await validateTenantEntityOwnership('call', requestData.call_id, tenantId);
+    }
+
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
     const newReq: OperationsRequest = {
       ...requestData,
       id,
       tenant_id: tenantId,
-      customer_id: requestData.customer_id && requestData.customer_id !== 'cust-unknown' ? requestData.customer_id : undefined,
+      customer_id: requestData.customer_id && !requestData.customer_id.startsWith('cust-unknown') ? requestData.customer_id : undefined,
       call_id: requestData.call_id && !requestData.call_id.startsWith('call-') ? requestData.call_id : undefined,
       created_at: now,
       updated_at: now,
@@ -1035,8 +1241,12 @@ export const db = {
 
     if (await isSupabaseLive()) {
       const client = createAdminClient();
-      const { data, error } = await client.from('operations_requests').insert([newReq]).select().single();
-      if (!error && data) return data as OperationsRequest;
+      const dbRow = domainRequestToDbRow(newReq);
+      const { data, error } = await client.from('operations_requests').insert([dbRow]).select('*, customer:customers(*)').single();
+      if (!error && data) {
+        const customer = Array.isArray(data.customer) ? data.customer[0] : data.customer;
+        return dbRequestToDomain(data, customer);
+      }
     }
     assertProductionDbReady();
     globalStore.operations_requests.unshift(newReq);
@@ -1056,9 +1266,12 @@ export const db = {
         .update({ ...updates, updated_at: now })
         .eq('id', id)
         .eq('tenant_id', tenantId)
-        .select()
+        .select('*, customer:customers(*)')
         .single();
-      if (!error && data) return data as OperationsRequest;
+      if (!error && data) {
+        const customer = Array.isArray(data.customer) ? data.customer[0] : data.customer;
+        return dbRequestToDomain(data, customer);
+      }
     }
     assertProductionDbReady();
     const idx = globalStore.operations_requests.findIndex((r) => r.id === id && r.tenant_id === tenantId);
@@ -1085,36 +1298,72 @@ export const db = {
   },
 
   async findApprovedRate(
-    params: { origin: string; destination: string; vehicleType?: string; weightTons?: number },
+    params: { origin: string; destination: string; vehicleType?: string; weightTons?: number; date?: string },
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<RateCard | null> {
     const origin = params.origin.trim().toLowerCase();
     const dest = params.destination.trim().toLowerCase();
     const vehicle = params.vehicleType?.trim().toLowerCase();
     const weight = params.weightTons;
+    const queryDateStr = params.date || new Date().toISOString().split('T')[0];
 
     const cards = await this.listRateCards(tenantId);
+    // Filter active cards
     const activeCards = cards.filter((rc) => rc.status === 'ACTIVE');
+    const validCards = activeCards.filter((rc) => {
+      if (rc.effective_from && rc.effective_from > queryDateStr) return false;
+      if (rc.effective_to && rc.effective_to < queryDateStr) return false;
+      return true;
+    });
 
-    // 1. Exact match origin + destination + vehicleType
+    const matchesRoute = (rc: RateCard) =>
+      rc.origin.trim().toLowerCase() === origin &&
+      rc.destination.trim().toLowerCase() === dest;
+
+    const matchesVehicle = (rc: RateCard) => {
+      if (!vehicle) return true;
+      return rc.vehicle_type.trim().toLowerCase() === vehicle;
+    };
+
+    // Deterministic half-open interval for weight bounds [min, max)
+    // with boundary check: weight >= rc.weight_min_tons && weight < rc.weight_max_tons
+    // If at upper boundary, include only if no other active card starts at that weight
+    const matchesWeight = (rc: RateCard, cardPool: RateCard[]) => {
+      if (weight === undefined) return true;
+      if (weight < rc.weight_min_tons) return false;
+      if (weight < rc.weight_max_tons) return true;
+      if (weight === rc.weight_max_tons) {
+        const hasUpperStart = cardPool.some(
+          (other) =>
+            other.id !== rc.id &&
+            matchesRoute(other) &&
+            matchesVehicle(other) &&
+            other.weight_min_tons === rc.weight_max_tons
+        );
+        return !hasUpperStart;
+      }
+      return false;
+    };
+
+    // 1. Exact match origin + destination + vehicleType + weight among currently valid cards
     if (vehicle) {
-      const exactMatch = activeCards.find((rc) => {
-        const matchRoute = rc.origin.toLowerCase() === origin && rc.destination.toLowerCase() === dest;
-        const matchVehicle = rc.vehicle_type.toLowerCase() === vehicle || rc.vehicle_type.toLowerCase().includes(vehicle);
-        const matchWeight = weight !== undefined ? weight >= rc.weight_min_tons && weight <= rc.weight_max_tons : true;
-        return matchRoute && matchVehicle && matchWeight;
-      });
+      const exactMatch = validCards.find((rc) => matchesRoute(rc) && matchesVehicle(rc) && matchesWeight(rc, validCards));
       if (exactMatch) return exactMatch;
     }
 
-    // 2. Route match within weight limits
-    const routeMatch = activeCards.find((rc) => {
-      const matchRoute = rc.origin.toLowerCase() === origin && rc.destination.toLowerCase() === dest;
-      const matchWeight = weight !== undefined ? weight >= rc.weight_min_tons && weight <= rc.weight_max_tons : true;
-      return matchRoute && matchWeight;
-    });
+    // 2. Route match within weight limits among currently valid cards
+    const routeMatch = validCards.find((rc) => matchesRoute(rc) && matchesWeight(rc, validCards));
+    if (routeMatch) return routeMatch;
 
-    return routeMatch || null;
+    // 3. If no valid card found, check for an expired card on this corridor so get_rate_quote
+    // can return explicit EXPIRED status rather than reporting the corridor as completely unavailable.
+    const expiredCards = activeCards.filter((rc) => rc.effective_to && rc.effective_to < queryDateStr);
+    if (vehicle) {
+      const exactExpired = expiredCards.find((rc) => matchesRoute(rc) && matchesVehicle(rc) && matchesWeight(rc, expiredCards));
+      if (exactExpired) return exactExpired;
+    }
+    const routeExpired = expiredCards.find((rc) => matchesRoute(rc) && matchesWeight(rc, expiredCards));
+    return routeExpired || null;
   },
 
   async createRateCard(
@@ -1202,7 +1451,7 @@ export const db = {
       let query = client.from('knowledge_items').select('*').eq('tenant_id', tenantId);
       if (category) query = query.eq('category', category);
       const { data, error } = await query;
-      if (!error && data) return data as KnowledgeItem[];
+      if (!error && data) return data.map((d) => dbKnowledgeToDomain(d as any));
     }
     assertProductionDbReady();
     let items = globalStore.knowledge_items.filter((k) => k.tenant_id === tenantId);
@@ -1224,8 +1473,9 @@ export const db = {
     };
     if (await isSupabaseLive()) {
       const client = createAdminClient();
-      const { data, error } = await client.from('knowledge_items').insert([newItem]).select().single();
-      if (!error && data) return data as KnowledgeItem;
+      const dbRow = domainKnowledgeToDbRow(newItem);
+      const { data, error } = await client.from('knowledge_items').insert([dbRow]).select().single();
+      if (!error && data) return dbKnowledgeToDomain(data as any);
     }
     assertProductionDbReady();
     globalStore.knowledge_items.unshift(newItem);
@@ -1240,14 +1490,21 @@ export const db = {
     const now = new Date().toISOString().split('T')[0];
     if (await isSupabaseLive()) {
       const client = createAdminClient();
+      const updatePayload: Record<string, unknown> = { updated_at: new Date().toISOString() };
+      if (updates.category) updatePayload.category = updates.category;
+      if (updates.title) updatePayload.title = updates.title;
+      if (updates.content) updatePayload.content = updates.content;
+      if (updates.status) updatePayload.status = updates.status;
+      if (updates.version) updatePayload.version = updates.version;
+
       const { data, error } = await client
         .from('knowledge_items')
-        .update({ ...updates, last_updated: now })
+        .update(updatePayload)
         .eq('id', id)
         .eq('tenant_id', tenantId)
         .select()
         .single();
-      if (!error && data) return data as KnowledgeItem;
+      if (!error && data) return dbKnowledgeToDomain(data as any);
     }
     assertProductionDbReady();
     const idx = globalStore.knowledge_items.findIndex((k) => k.id === id && k.tenant_id === tenantId);
@@ -1279,20 +1536,14 @@ export const db = {
 
     if (await isSupabaseLive()) {
       const client = createAdminClient();
-      await client.from('audit_events').insert([
-        {
-          id: newEvent.id,
-          tenant_id: newEvent.tenant_id,
-          call_id: newEvent.call_id,
-          event_type: newEvent.event_type,
-          actor_type: newEvent.actor_type || 'SYSTEM',
-          actor_id: newEvent.actor_id,
-          tool_name: newEvent.tool_name,
-          severity: newEvent.severity,
-          details: newEvent.details,
-          created_at: timestamp,
-        },
-      ]);
+      const dbRow = domainAuditToDbRow(newEvent);
+      const { error } = await client.from('audit_events').insert([dbRow]);
+      if (error) {
+        console.error('[DB] logAuditEvent insert error:', error);
+        if (getRuntimeMode() === 'PRODUCTION') {
+          throw new Error(`Audit event failed to persist: ${error.message}`);
+        }
+      }
     }
     assertProductionDbReady();
     globalStore.audit_events.unshift(newEvent);
@@ -1335,6 +1586,13 @@ export const db = {
     followupData: Omit<FollowupRecord, 'id' | 'created_at' | 'updated_at'>,
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<FollowupRecord> {
+    if (followupData.call_id) {
+      await validateTenantEntityOwnership('call', followupData.call_id, tenantId);
+    }
+    if (followupData.customer_id) {
+      await validateTenantEntityOwnership('customer', followupData.customer_id, tenantId);
+    }
+
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
     const newFollowup: FollowupRecord = {
@@ -1347,8 +1605,9 @@ export const db = {
 
     if (await isSupabaseLive()) {
       const client = createAdminClient();
-      const { data, error } = await client.from('followups').insert([newFollowup]).select().single();
-      if (!error && data) return data as FollowupRecord;
+      const dbRow = domainFollowupToDbRow(newFollowup);
+      const { data, error } = await client.from('followups').insert([dbRow]).select().single();
+      if (!error && data) return dbFollowupToDomain(data as any);
     }
     assertProductionDbReady();
     globalStore.followups.unshift(newFollowup);
@@ -1367,7 +1626,7 @@ export const db = {
         .eq('call_id', callId)
         .eq('tenant_id', tenantId)
         .single();
-      if (!error && data) return data as FollowupRecord;
+      if (!error && data) return dbFollowupToDomain(data as any);
     }
     assertProductionDbReady();
     return globalStore.followups.find((f: FollowupRecord) => f.call_id === callId && f.tenant_id === tenantId) || null;
@@ -1381,7 +1640,7 @@ export const db = {
         .select('*')
         .eq('tenant_id', tenantId)
         .order('created_at', { ascending: false });
-      if (!error && data) return data as FollowupRecord[];
+      if (!error && data) return data.map((d) => dbFollowupToDomain(d as any));
     }
     assertProductionDbReady();
     return globalStore.followups.filter((f: FollowupRecord) => f.tenant_id === tenantId);
@@ -1395,11 +1654,14 @@ export const db = {
       const client = createAdminClient();
       const { data, error } = await client
         .from('leads')
-        .select('*')
+        .select('*, customer:customers(*)')
         .eq('call_id', callId)
         .eq('tenant_id', tenantId)
         .single();
-      if (!error && data) return data as Lead;
+      if (!error && data) {
+        const customer = Array.isArray(data.customer) ? data.customer[0] : data.customer;
+        return dbLeadToDomain(data, customer);
+      }
     }
     assertProductionDbReady();
     return globalStore.leads.find((l: Lead) => l.call_id === callId && l.tenant_id === tenantId) || null;

@@ -73,7 +73,7 @@ export async function POST(req: NextRequest) {
         summary: val.summary,
         details: val.payload || {},
         payload: val.payload || {},
-        assigned_to: val.assigned_to || 'Primary Dispatcher',
+        assigned_to: val.assigned_to || undefined,
       },
       authContext.tenantId
     );

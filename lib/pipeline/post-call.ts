@@ -25,6 +25,8 @@ export interface PostCallPayload {
   external_call_id: string;
   from_number?: string;
   to_number?: string;
+  caller_name?: string;
+  recording_url?: string;
   started_at?: string;
   ended_at?: string;
   duration_seconds?: number;
@@ -91,7 +93,7 @@ export async function processPostCallPipeline(
         {
           tenant_id: tenantId,
           phone: payload.from_number,
-          name: 'Inbound Shipper',
+          name: payload.caller_name || 'Inbound Shipper',
         },
         tenantId
       );
@@ -126,6 +128,7 @@ export async function processPostCallPipeline(
           outcome,
           lead_temperature: leadTemperature,
           summary: payload.summary || existingCall.summary,
+          recording_url: payload.recording_url || existingCall.recording_url,
           facts: payload.facts ? { call_id: existingCall.id, ...payload.facts } : existingCall.facts,
           escalation_status: {
             is_escalated: Boolean(payload.is_escalated),
@@ -150,6 +153,7 @@ export async function processPostCallPipeline(
           outcome,
           lead_temperature: leadTemperature,
           summary: payload.summary || 'Inbound logistics operations call completed.',
+          recording_url: payload.recording_url,
           facts: {
             call_id: '',
             ...payload.facts,
@@ -187,7 +191,7 @@ export async function processPostCallPipeline(
           {
             tenant_id: tenantId,
             customer_id: customer ? customer.id : undefined,
-            customer_name: customer ? customer.name : 'Inbound Shipper',
+            customer_name: customer ? customer.name : (payload.caller_name || 'Inbound Shipper'),
             phone: contactPhone,
             source: 'INBOUND_CALL',
             status: 'QUALIFIED',
@@ -197,7 +201,7 @@ export async function processPostCallPipeline(
             weight: payload.facts?.weight,
             requirement: payload.summary || `Inbound inquiry: ${primaryIntent}`,
             next_action: leadTemperature === 'HOT' ? 'Immediate vehicle placement & booking closure' : 'Follow up with corridor quote',
-            assigned_to: 'Primary Dispatcher',
+            assigned_to: 'LogiVoice Operations',
             followup_status: 'PENDING',
             last_call_at: new Date().toISOString(),
           },

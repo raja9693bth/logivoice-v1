@@ -13,19 +13,42 @@ export async function executeSendFollowup(
   tenantId: string = DEFAULT_TENANT_ID
 ): Promise<SendFollowupOutput> {
   try {
-    // 1. Idempotency check: verify if a follow-up was already sent for this call and channel
+    // 1. Verify call exists and tenant ownership
     const call = await db.getCallById(input.call_id, tenantId);
-    if (call?.followup_state?.status === 'SENT') {
+    if (!call) {
       return {
-        status: 'SENT',
-        followup_id: `dup-${input.call_id}`,
+        status: 'FAILED',
         channel: input.channel,
         recipient: input.recipient_phone,
-        message: 'Idempotent replay: Follow-up message already successfully delivered.',
+        message: `Call '${input.call_id}' not found or belongs to another tenant.`,
       };
     }
 
-    // 2. Dispatch via Messaging Adapter
+    // 2. Check client configuration
+    const config = await db.getClientConfig(tenantId);
+    if (config.followup_config && !config.followup_config.enabled) {
+      return {
+        status: 'SUPPRESSED',
+        channel: input.channel,
+        recipient: input.recipient_phone,
+        message: 'Follow-up messaging is disabled in client configuration.',
+      };
+    }
+
+    // 3. Durable DB idempotency check: query followups table
+    const existingFollowup = await db.getFollowupByCallId(input.call_id, tenantId);
+    if (existingFollowup && (existingFollowup.status === 'SENT' || existingFollowup.status === 'DELIVERED')) {
+      return {
+        status: 'SENT',
+        followup_id: existingFollowup.id,
+        provider_message_id: existingFollowup.provider_message_id || undefined,
+        channel: existingFollowup.channel,
+        recipient: existingFollowup.recipient,
+        message: `Idempotent replay: Follow-up message already dispatched under record ${existingFollowup.id}.`,
+      };
+    }
+
+    // 4. Dispatch via Messaging Adapter
     const result = await sendFollowupMessage({
       channel: input.channel,
       recipient: input.recipient_phone,
@@ -35,19 +58,17 @@ export async function executeSendFollowup(
 
     if (!result.success) {
       if (result.status === 'OPTED_OUT') {
-        if (call) {
-          await db.updateCall(
-            input.call_id,
-            {
-              followup_state: {
-                eligible: false,
-                status: 'SUPPRESSED',
-                suppression_reason: result.error || 'Recipient opted out',
-              },
+        await db.updateCall(
+          input.call_id,
+          {
+            followup_state: {
+              eligible: false,
+              status: 'SUPPRESSED',
+              suppression_reason: result.error || 'Recipient opted out',
             },
-            tenantId
-          );
-        }
+          },
+          tenantId
+        );
 
         return {
           status: 'OPTED_OUT',
@@ -65,25 +86,39 @@ export async function executeSendFollowup(
       };
     }
 
-    // 3. Persist success state
-    const followupId = `flw-${Date.now()}`;
-    if (call) {
-      await db.updateCall(
-        input.call_id,
-        {
-          followup_state: {
-            eligible: true,
-            channel: input.channel,
-            status: 'SENT',
-            message_snippet: input.message_content.slice(0, 100),
-            sent_at: new Date().toISOString(),
-          },
-        },
-        tenantId
-      );
-    }
+    // 5. Persist durable record into followups table with real UUID
+    const newFollowup = await db.createFollowup(
+      {
+        call_id: input.call_id,
+        customer_id: call.customer_id,
+        tenant_id: tenantId,
+        channel: input.channel,
+        status: 'SENT',
+        recipient: input.recipient_phone,
+        template_id: input.template_id,
+        message_content: input.message_content,
+        provider_message_id: result.providerMessageId || undefined,
+        sent_at: new Date().toISOString(),
+      },
+      tenantId
+    );
 
-    // 4. Log Audit Event
+    // 6. Update call state
+    await db.updateCall(
+      input.call_id,
+      {
+        followup_state: {
+          eligible: true,
+          channel: input.channel,
+          status: 'SENT',
+          message_snippet: input.message_content.slice(0, 100),
+          sent_at: new Date().toISOString(),
+        },
+      },
+      tenantId
+    );
+
+    // 7. Log Audit Event
     await db.logAuditEvent(
       {
         tenant_id: tenantId,
@@ -97,6 +132,7 @@ export async function executeSendFollowup(
         details: {
           channel: input.channel,
           recipient: input.recipient_phone,
+          followup_id: newFollowup.id,
           provider_message_id: result.providerMessageId,
           provider: result.provider,
         },
@@ -106,11 +142,11 @@ export async function executeSendFollowup(
 
     return {
       status: 'SENT',
-      followup_id: followupId,
+      followup_id: newFollowup.id,
       provider_message_id: result.providerMessageId,
       channel: input.channel,
       recipient: input.recipient_phone,
-      message: `Follow-up message dispatched via ${input.channel} (${result.provider}). Message ID: ${result.providerMessageId}`,
+      message: `Follow-up message dispatched via ${input.channel} (${result.provider}). Record ID: ${newFollowup.id}`,
     };
   } catch (error) {
     return {

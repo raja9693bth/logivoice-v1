@@ -92,7 +92,7 @@ export const CreateBookingRequestInputSchema = z.object({
   weight: z.string().min(1, 'Weight is required'),
   material_type: z.string().optional(),
   special_requirements: z.string().optional(),
-  is_confirmed_by_caller: z.boolean().default(true).describe('Explicit confirmation obtained from caller'),
+  is_confirmed_by_caller: z.boolean().default(false).describe('Explicit confirmation obtained from caller'),
   idempotency_key: z.string().optional().describe('Unique key to prevent duplicate booking creation'),
 });
 
@@ -116,6 +116,7 @@ export const CreateSupportTicketInputSchema = z.object({
   issue: z.string().min(5, 'Issue description is required'),
   priority: z.enum(['URGENT', 'HIGH', 'NORMAL', 'LOW']).default('NORMAL'),
   tracking_reference: z.string().optional(),
+  idempotency_key: z.string().optional().describe('Unique key to prevent duplicate support ticket creation'),
 });
 
 export const CreateSupportTicketOutputSchema = z.object({

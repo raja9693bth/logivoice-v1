@@ -59,7 +59,7 @@ export async function executeGetRateQuote(
 
     const statusExplanation =
       quoteType === 'CONFIRMED'
-        ? 'Pre-authorized commercial tariff, valid for 24 hours.'
+        ? 'Pre-authorized commercial tariff authorized by operations desk.'
         : 'Indicative estimate from approved tariff matrix. Formal commercial confirmation finalized upon vehicle placement.';
 
     return {

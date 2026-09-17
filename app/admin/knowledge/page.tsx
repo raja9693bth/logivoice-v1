@@ -12,27 +12,45 @@ import {
   Layers,
   Edit2,
 } from 'lucide-react';
-import { MOCK_KNOWLEDGE_ITEMS } from '@/lib/mock/logivoice-data';
 import { Drawer } from '@/components/ui/Drawer';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { KnowledgeItem } from '@/types/logivoice';
 
 export default function KnowledgeBasePage() {
-  const [items, setItems] = useState<KnowledgeItem[]>(MOCK_KNOWLEDGE_ITEMS);
+  const [items, setItems] = useState<KnowledgeItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [editingItem, setEditingItem] = useState<KnowledgeItem | null>(null);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
 
-  React.useEffect(() => {
+  const fetchKnowledge = React.useCallback(() => {
+    setLoading(true);
+    setError(null);
     fetch('/api/knowledge')
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
       .then((data) => {
-        if (data?.knowledge_items && Array.isArray(data.knowledge_items) && data.knowledge_items.length > 0) {
+        if (data?.knowledge_items && Array.isArray(data.knowledge_items)) {
           setItems(data.knowledge_items);
+        } else {
+          setItems([]);
         }
       })
-      .catch((err) => console.warn('[KnowledgePage] API fetch error:', err));
+      .catch((err) => {
+        console.error('[KnowledgePage] API fetch error:', err);
+        setError('Failed to fetch knowledge items from server.');
+      })
+      .finally(() => setLoading(false));
   }, []);
+
+  React.useEffect(() => {
+    fetchKnowledge();
+  }, [fetchKnowledge]);
 
   // Form State
   const [formCategory, setFormCategory] = useState<KnowledgeItem['category']>('OPERATIONAL_FAQ');
@@ -72,37 +90,45 @@ export default function KnowledgeBasePage() {
     setIsDrawerOpen(true);
   };
 
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (editingItem) {
-      setItems((prev) =>
-        prev.map((i) =>
-          i.id === editingItem.id
-            ? {
-                ...i,
-                category: formCategory,
-                title: formTitle,
-                content: formContent,
-                status: formStatus,
-                last_updated: new Date().toISOString().split('T')[0],
-              }
-            : i
-        )
-      );
-    } else {
-      const newItem: KnowledgeItem = {
-        id: `kb-${Date.now()}`,
-        tenant_id: '00000000-0000-0000-0000-000000000001',
-        category: formCategory,
-        title: formTitle,
-        content: formContent,
-        status: formStatus,
-        last_updated: new Date().toISOString().split('T')[0],
-        version: '1.0',
-      };
-      setItems([newItem, ...items]);
+    setSaving(true);
+    try {
+      if (editingItem) {
+        const res = await fetch('/api/knowledge', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: editingItem.id,
+            category: formCategory,
+            title: formTitle,
+            content: formContent,
+            status: formStatus,
+          }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      } else {
+        const res = await fetch('/api/knowledge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            category: formCategory,
+            title: formTitle,
+            content: formContent,
+            status: formStatus,
+            version: '1.0',
+          }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      }
+      setIsDrawerOpen(false);
+      fetchKnowledge();
+    } catch (err) {
+      console.error('[KnowledgePage] Save error:', err);
+      setError('Failed to persist knowledge item to database.');
+    } finally {
+      setSaving(false);
     }
-    setIsDrawerOpen(false);
   };
 
   return (
@@ -170,53 +196,80 @@ export default function KnowledgeBasePage() {
         </div>
       </div>
 
+      {/* Error Alert */}
+      {error && (
+        <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-lg text-amber-800 dark:text-amber-200 text-xs flex items-center justify-between">
+          <span>{error}</span>
+          <button onClick={() => fetchKnowledge()} className="underline font-semibold hover:text-amber-900">
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Knowledge Cards Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 min-w-0 max-w-full">
-        {filteredItems.map((item) => (
-          <div
-            key={item.id}
-            className="p-5 rounded-xl bg-white dark:bg-slate-900/70 border border-slate-200 dark:border-slate-800 flex flex-col justify-between hover:border-slate-300 dark:hover:border-slate-700 transition-all group shadow-xs min-w-0 max-w-full"
-          >
-            <div className="space-y-2 min-w-0">
-              <div className="flex items-start justify-between gap-3 flex-wrap">
-                <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-sm bg-slate-100 dark:bg-slate-800 text-sky-700 dark:text-sky-400 border border-slate-200 dark:border-slate-700 shrink-0">
-                  {item.category.replace('_', ' ')}
-                </span>
-                <div className="flex items-center gap-2 shrink-0">
-                  <span
-                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded border uppercase ${
-                      item.status === 'APPROVED'
-                        ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
-                        : 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800'
-                    }`}
-                  >
-                    {item.status}
+      {loading ? (
+        <div className="p-8 text-center text-xs text-slate-500 bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 rounded-xl">
+          <div className="inline-block w-6 h-6 border-2 border-sky-500 border-t-transparent rounded-full animate-spin mb-2"></div>
+          <p>Loading operational knowledge items from database...</p>
+        </div>
+      ) : filteredItems.length === 0 ? (
+        <EmptyState
+          title="No knowledge items found"
+          description="Try selecting another category or create a new operational policy."
+          actionLabel="Clear Filters"
+          onAction={() => {
+            setSelectedCategory('ALL');
+            setSearchQuery('');
+          }}
+        />
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 min-w-0 max-w-full">
+          {filteredItems.map((item) => (
+            <div
+              key={item.id}
+              className="p-5 rounded-xl bg-white dark:bg-slate-900/70 border border-slate-200 dark:border-slate-800 flex flex-col justify-between hover:border-slate-300 dark:hover:border-slate-700 transition-all group shadow-xs min-w-0 max-w-full"
+            >
+              <div className="space-y-2 min-w-0">
+                <div className="flex items-start justify-between gap-3 flex-wrap">
+                  <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-sm bg-slate-100 dark:bg-slate-800 text-sky-700 dark:text-sky-400 border border-slate-200 dark:border-slate-700 shrink-0">
+                    {item.category.replace('_', ' ')}
                   </span>
-                  <button
-                    onClick={() => openEditModal(item)}
-                    className="p-1 rounded text-slate-400 hover:text-slate-700 dark:hover:text-white transition-colors"
-                    title="Edit Item"
-                  >
-                    <Edit2 className="w-3.5 h-3.5" />
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span
+                      className={`text-[10px] font-bold px-1.5 py-0.5 rounded border uppercase ${
+                        item.status === 'APPROVED'
+                          ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                          : 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800'
+                      }`}
+                    >
+                      {item.status}
+                    </span>
+                    <button
+                      onClick={() => openEditModal(item)}
+                      className="p-1 rounded text-slate-400 hover:text-slate-700 dark:hover:text-white transition-colors"
+                      title="Edit Item"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
+
+                <h3 className="text-sm font-semibold text-slate-900 dark:text-white group-hover:text-sky-600 dark:group-hover:text-sky-300 transition-colors break-words">
+                  {item.title}
+                </h3>
+                <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed bg-slate-50 dark:bg-slate-950/50 p-3.5 rounded-lg border border-slate-200 dark:border-slate-800/80 break-words">
+                  {item.content}
+                </p>
               </div>
 
-              <h3 className="text-sm font-semibold text-slate-900 dark:text-white group-hover:text-sky-600 dark:group-hover:text-sky-300 transition-colors break-words">
-                {item.title}
-              </h3>
-              <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed bg-slate-50 dark:bg-slate-950/50 p-3.5 rounded-lg border border-slate-200 dark:border-slate-800/80 break-words">
-                {item.content}
-              </p>
+              <div className="flex items-center justify-between pt-3 mt-3 border-t border-slate-200 dark:border-slate-800 text-[10px] text-slate-500 font-mono">
+                <span>Version: v{item.version}</span>
+                <span>Updated: {item.last_updated}</span>
+              </div>
             </div>
-
-            <div className="flex items-center justify-between pt-3 mt-3 border-t border-slate-200 dark:border-slate-800 text-[10px] text-slate-500 font-mono">
-              <span>Version: v{item.version}</span>
-              <span>Updated: {item.last_updated}</span>
-            </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
 
       {/* Add / Edit Drawer */}
       <Drawer

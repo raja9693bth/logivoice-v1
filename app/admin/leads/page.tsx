@@ -21,22 +21,39 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { Lead, LeadTemperature } from '@/types/logivoice';
 
 export default function LeadsPage() {
-  const [leads, setLeads] = useState<Lead[]>(MOCK_LEADS);
+  const [leads, setLeads] = useState<Lead[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [tempFilter, setTempFilter] = useState<string>('ALL');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [inspectLead, setInspectLead] = useState<Lead | null>(null);
 
-  React.useEffect(() => {
+  const fetchLeads = React.useCallback(() => {
+    setLoading(true);
+    setError(null);
     fetch('/api/leads')
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
       .then((data) => {
-        if (data?.leads && Array.isArray(data.leads) && data.leads.length > 0) {
+        if (data?.leads && Array.isArray(data.leads)) {
           setLeads(data.leads);
+        } else {
+          setLeads([]);
         }
       })
-      .catch((err) => console.warn('[LeadsPage] API fetch error:', err));
+      .catch((err) => {
+        console.error('[LeadsPage] API fetch error:', err);
+        setError('Failed to fetch live commercial leads from server.');
+      })
+      .finally(() => setLoading(false));
   }, []);
+
+  React.useEffect(() => {
+    fetchLeads();
+  }, [fetchLeads]);
 
   const filteredLeads = useMemo(() => {
     return leads.filter((lead) => {
@@ -55,12 +72,28 @@ export default function LeadsPage() {
     });
   }, [leads, tempFilter, statusFilter, searchQuery]);
 
-  const handleUpdateStatus = (leadId: string, newStatus: Lead['status']) => {
+  const handleUpdateStatus = async (leadId: string, newStatus: Lead['status']) => {
+    // Optimistic UI update
     setLeads((prev) =>
       prev.map((l) => (l.id === leadId ? { ...l, status: newStatus, updated_at: new Date().toISOString() } : l))
     );
     if (inspectLead && inspectLead.id === leadId) {
       setInspectLead({ ...inspectLead, status: newStatus, updated_at: new Date().toISOString() });
+    }
+
+    try {
+      const res = await fetch('/api/leads', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: leadId, status: newStatus }),
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+    } catch (err) {
+      console.error('[LeadsPage] Failed to update lead status:', err);
+      // Revert on failure
+      fetchLeads();
     }
   };
 
@@ -129,8 +162,23 @@ export default function LeadsPage() {
         </div>
       </div>
 
+      {/* Error Alert */}
+      {error && (
+        <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-lg text-amber-800 dark:text-amber-200 text-xs flex items-center justify-between">
+          <span>{error}</span>
+          <button onClick={() => fetchLeads()} className="underline font-semibold hover:text-amber-900">
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Leads Table */}
-      {filteredLeads.length === 0 ? (
+      {loading ? (
+        <div className="p-8 text-center text-xs text-slate-500 bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 rounded-xl">
+          <div className="inline-block w-6 h-6 border-2 border-sky-500 border-t-transparent rounded-full animate-spin mb-2"></div>
+          <p>Loading commercial pipeline from database...</p>
+        </div>
+      ) : filteredLeads.length === 0 ? (
         <EmptyState
           title="No commercial leads found"
           description="Try changing the temperature or stage filter."

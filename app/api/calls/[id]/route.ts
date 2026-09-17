@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthContext, requireRole, AuthorizationError } from '@/lib/auth/context';
 import { db } from '@/lib/db';
+import { UpdateCallApiSchema } from '@/lib/schemas/api';
+import { Call } from '@/types/logivoice';
 
 export async function GET(
   req: NextRequest,
@@ -37,7 +39,27 @@ export async function PATCH(
     requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'SYSTEM']);
 
     const { id } = await params;
-    const updates = await req.json();
+
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ error: 'Malformed JSON payload' }, { status: 400 });
+    }
+
+    const parseResult = UpdateCallApiSchema.safeParse(body);
+    if (!parseResult.success) {
+      return NextResponse.json(
+        { error: 'Validation failed', details: parseResult.error.flatten() },
+        { status: 400 }
+      );
+    }
+
+    const { facts, ...otherFields } = parseResult.data;
+    const updates: Partial<Call> = {
+      ...otherFields,
+      ...(facts ? { facts: { ...facts, call_id: id } } : {}),
+    };
 
     const updated = await db.updateCall(id, updates, authContext.tenantId);
     if (!updated) {

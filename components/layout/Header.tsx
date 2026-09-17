@@ -1,11 +1,13 @@
 'use client';
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { Search, Bell, LogOut, User, Menu } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { Search, Bell, LogOut, User, Menu, Loader2 } from 'lucide-react';
 import { SystemStatusPill } from '@/components/ui/Banner';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
 import { useSidebar } from '@/components/layout/SidebarContext';
+import { createClient } from '@/lib/supabase/client';
 
 interface HeaderProps {
   userEmail?: string;
@@ -16,7 +18,41 @@ export function Header({
   userEmail = 'dispatcher@logivoice.local',
   userRole = 'Senior Fleet Dispatcher',
 }: HeaderProps) {
+  const router = useRouter();
   const { toggleMobile } = useSidebar();
+  const [displayEmail, setDisplayEmail] = useState(userEmail);
+  const [displayRole, setDisplayRole] = useState(userRole);
+  const [isSigningOut, setIsSigningOut] = useState(false);
+
+  useEffect(() => {
+    try {
+      const supabase = createClient();
+      supabase.auth.getUser().then(({ data: { user } }) => {
+        if (user) {
+          if (user.email) setDisplayEmail(user.email);
+          const role = user.app_metadata?.role;
+          if (role === 'ADMIN') setDisplayRole('Platform Administrator');
+          else if (role === 'OPS_MANAGER') setDisplayRole('Operations Hub Head');
+          else if (role === 'DISPATCHER') setDisplayRole('Senior Fleet Dispatcher');
+        }
+      });
+    } catch {
+      // Keep defaults
+    }
+  }, []);
+
+  const handleSignOut = async () => {
+    setIsSigningOut(true);
+    try {
+      const supabase = createClient();
+      await supabase.auth.signOut();
+    } catch (err) {
+      console.warn('[Header] Sign out error:', err);
+    }
+    // Clear dev cookie if present
+    document.cookie = 'logivoice_dev_session=; path=/; max-age=0';
+    router.push('/login');
+  };
 
   return (
     <header className="h-16 bg-white/90 dark:bg-slate-950/90 backdrop-blur-xs border-b border-slate-200 dark:border-slate-800/80 px-4 sm:px-6 flex items-center justify-between sticky top-0 z-30 transition-colors max-w-full">
@@ -63,20 +99,22 @@ export function Header({
         {/* User Profile */}
         <div className="flex items-center gap-2 sm:gap-3 pl-2 sm:pl-3 border-l border-slate-200 dark:border-slate-800 shrink-0">
           <div className="text-right hidden lg:block">
-            <div className="text-xs font-semibold text-slate-900 dark:text-white tracking-tight truncate max-w-[180px]">{userEmail}</div>
-            <div className="text-[10px] text-sky-600 dark:text-sky-400 font-medium truncate">{userRole}</div>
+            <div className="text-xs font-semibold text-slate-900 dark:text-white tracking-tight truncate max-w-[180px]">{displayEmail}</div>
+            <div className="text-[10px] text-sky-600 dark:text-sky-400 font-medium truncate">{displayRole}</div>
           </div>
           <div className="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-300 shrink-0">
             <User className="w-4 h-4" />
           </div>
-          <Link
-            href="/login"
-            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors shrink-0"
+          <button
+            type="button"
+            onClick={handleSignOut}
+            disabled={isSigningOut}
+            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors shrink-0 cursor-pointer disabled:opacity-50"
             title="Sign Out"
             aria-label="Sign Out"
           >
-            <LogOut className="w-4 h-4" />
-          </Link>
+            {isSigningOut ? <Loader2 className="w-4 h-4 animate-spin text-rose-500" /> : <LogOut className="w-4 h-4" />}
+          </button>
         </div>
       </div>
     </header>

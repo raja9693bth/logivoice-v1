@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import {
   PhoneCall,
@@ -8,6 +8,9 @@ import {
   RotateCcw,
   CheckCircle2,
   ExternalLink,
+  Loader2,
+  AlertTriangle,
+  RefreshCw,
 } from 'lucide-react';
 import {
   TemperatureBadge,
@@ -21,22 +24,50 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { Call } from '@/types/logivoice';
 
 export default function CallsPage() {
-  const [calls, setCalls] = useState<Call[]>(MOCK_CALLS);
+  const [calls, setCalls] = useState<Call[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [isDemoMode, setIsDemoMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [intentFilter, setIntentFilter] = useState<string>('ALL');
   const [outcomeFilter, setOutcomeFilter] = useState<string>('ALL');
   const [tempFilter, setTempFilter] = useState<string>('ALL');
   const [selectedCall, setSelectedCall] = useState<Call | null>(null);
 
-  React.useEffect(() => {
-    fetch('/api/calls')
-      .then((res) => res.json())
-      .then((data) => {
-        if (data?.calls && Array.isArray(data.calls) && data.calls.length > 0) {
-          setCalls(data.calls);
-        }
-      })
-      .catch((err) => console.warn('[CallsPage] API fetch error:', err));
+  const fetchCalls = async () => {
+    setIsLoading(true);
+    setError(null);
+
+    const demoActive = typeof window !== 'undefined' && localStorage.getItem('logivoice_demo_mode') === 'true';
+    setIsDemoMode(demoActive);
+
+    if (demoActive) {
+      setCalls(MOCK_CALLS);
+      setIsLoading(false);
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/calls');
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(`Failed to load calls (HTTP ${res.status})`);
+      }
+      const data = await res.json();
+      setCalls(data?.calls || []);
+    } catch (err) {
+      console.warn('[CallsPage] API fetch error:', err);
+      setError(err instanceof Error ? err.message : 'Error loading calls from backend.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchCalls();
   }, []);
 
   const filteredCalls = useMemo(() => {
@@ -48,9 +79,9 @@ export default function CallsPage() {
         call.customer?.name.toLowerCase().includes(query) ||
         call.customer?.phone.toLowerCase().includes(query) ||
         call.customer?.company?.toLowerCase().includes(query) ||
-        call.facts.tracking_id?.toLowerCase().includes(query) ||
-        call.facts.route_from?.toLowerCase().includes(query) ||
-        call.facts.route_to?.toLowerCase().includes(query);
+        call.facts?.tracking_id?.toLowerCase().includes(query) ||
+        call.facts?.route_from?.toLowerCase().includes(query) ||
+        call.facts?.route_to?.toLowerCase().includes(query);
 
       const matchesIntent = intentFilter === 'ALL' || call.primary_intent === intentFilter;
       const matchesOutcome = outcomeFilter === 'ALL' || call.outcome === outcomeFilter;
@@ -58,7 +89,7 @@ export default function CallsPage() {
 
       return matchesSearch && matchesIntent && matchesOutcome && matchesTemp;
     });
-  }, [searchQuery, intentFilter, outcomeFilter, tempFilter]);
+  }, [calls, searchQuery, intentFilter, outcomeFilter, tempFilter]);
 
   const resetFilters = () => {
     setSearchQuery('');
@@ -72,16 +103,51 @@ export default function CallsPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800/80 pb-4">
         <div>
-          <h1 className="text-xl font-bold text-slate-900 dark:text-white tracking-tight">Inbound Voice Calls</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-xl font-bold text-slate-900 dark:text-white tracking-tight">Inbound Voice Calls</h1>
+            {isDemoMode && (
+              <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded-sm bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                Demo Mode
+              </span>
+            )}
+          </div>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
             Operational call audit log, intent classifications, and structured business outcomes
           </p>
         </div>
-        <div className="text-xs text-slate-500 dark:text-slate-400">
-          Showing <span className="text-slate-900 dark:text-white font-semibold">{filteredCalls.length}</span> of{' '}
-          <span className="text-slate-900 dark:text-white font-semibold">{MOCK_CALLS.length}</span> recorded sessions
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={fetchCalls}
+            disabled={isLoading}
+            className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium transition-colors border border-slate-300 dark:border-slate-700 cursor-pointer disabled:opacity-50"
+            title="Refresh calls"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+          </button>
+          <div className="text-xs text-slate-500 dark:text-slate-400">
+            Showing <span className="text-slate-900 dark:text-white font-semibold">{filteredCalls.length}</span> of{' '}
+            <span className="text-slate-900 dark:text-white font-semibold">{calls.length}</span> recorded sessions
+          </div>
         </div>
       </div>
+
+      {/* Error Alert */}
+      {error && (
+        <div className="p-4 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 flex items-center justify-between text-xs text-rose-800 dark:text-rose-300">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600 dark:text-rose-400" />
+            <span>{error}</span>
+          </div>
+          <button
+            type="button"
+            onClick={fetchCalls}
+            className="px-2.5 py-1 rounded-md bg-rose-600 hover:bg-rose-500 text-white font-medium text-[11px] transition-colors cursor-pointer"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Filter & Search Bar */}
       <div className="p-4 rounded-xl bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
@@ -151,7 +217,7 @@ export default function CallsPage() {
           {(searchQuery || intentFilter !== 'ALL' || outcomeFilter !== 'ALL' || tempFilter !== 'ALL') && (
             <button
               onClick={resetFilters}
-              className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors"
+              className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer"
               title="Reset Filters"
             >
               <RotateCcw className="w-4 h-4" />
@@ -161,81 +227,74 @@ export default function CallsPage() {
       </div>
 
       {/* Operational Calls Table */}
-      {filteredCalls.length === 0 ? (
+      {isLoading ? (
+        <div className="p-16 text-center text-xs text-slate-400 bg-white dark:bg-slate-900/60 rounded-xl border border-slate-200 dark:border-slate-800">
+          <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-sky-500" />
+          Loading inbound calls from operations database...
+        </div>
+      ) : filteredCalls.length === 0 ? (
         <EmptyState
-          title="No calls match your filter criteria"
-          description="Try adjusting your search query, intent category, or outcome status."
-          actionLabel="Reset Filters"
-          onAction={resetFilters}
+          title={calls.length === 0 ? 'No Calls Recorded Yet' : 'No calls match your filter criteria'}
+          description={
+            calls.length === 0
+              ? 'Inbound voice sessions handled by Retell AI will appear here in real-time.'
+              : 'Try adjusting your search query, intent category, or outcome status.'
+          }
+          actionLabel={calls.length > 0 ? 'Reset Filters' : undefined}
+          onAction={calls.length > 0 ? resetFilters : undefined}
         />
       ) : (
         <div className="table-container bg-white dark:bg-slate-900/60 shadow-xs">
           <table className="w-full text-left border-collapse text-xs">
             <thead>
               <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/80 text-slate-500 dark:text-slate-400 uppercase text-[11px] tracking-wider">
-                <th className="py-3 px-4">Call ID &amp; Time</th>
-                <th className="py-3 px-4">Customer</th>
-                <th className="py-3 px-4">Primary Intent</th>
-                <th className="py-3 px-4">Extracted Facts</th>
+                <th className="py-3 px-4">Time &amp; Duration</th>
+                <th className="py-3 px-4">Customer Identity</th>
+                <th className="py-3 px-4">Intent</th>
+                <th className="py-3 px-4">Facts / Quoted Rate</th>
                 <th className="py-3 px-4">Outcome</th>
                 <th className="py-3 px-4">Lead Temp</th>
-                <th className="py-3 px-4">Follow-up</th>
-                <th className="py-3 px-4 text-right">Actions</th>
+                <th className="py-3 px-4">Follow-up Status</th>
+                <th className="py-3 px-4 text-right">Audit &amp; Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 dark:divide-slate-800/60">
               {filteredCalls.map((call) => (
                 <tr key={call.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
-                  <td className="py-3 px-4 font-mono">
-                    <span className="text-slate-900 dark:text-white font-semibold">{call.id}</span>
-                    <span className="block text-[11px] text-slate-500 dark:text-slate-400">{formatDateTime(call.started_at)}</span>
-                    <span className="text-[10px] text-slate-400 dark:text-slate-500 font-sans">
-                      Duration: {formatDuration(call.duration_seconds)}
-                    </span>
+                  <td className="py-3 px-4 font-mono text-slate-600 dark:text-slate-400">
+                    <div>{formatDateTime(call.started_at)}</div>
+                    <div className="text-[10px] text-slate-400 dark:text-slate-500">{formatDuration(call.duration_seconds)}</div>
                   </td>
                   <td className="py-3 px-4">
-                    <div className="font-medium text-slate-900 dark:text-white">{call.customer?.name}</div>
-                    <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400">{call.customer?.phone}</div>
+                    <div className="font-semibold text-slate-900 dark:text-white">{call.customer?.name || 'Inbound Caller'}</div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">{call.customer?.phone}</div>
                     {call.customer?.company && (
-                      <div className="text-[10px] text-slate-400 dark:text-slate-500 truncate max-w-[150px]">
-                        {call.customer.company}
-                      </div>
+                      <div className="text-[10px] text-slate-400 dark:text-slate-500">{call.customer.company}</div>
                     )}
                   </td>
                   <td className="py-3 px-4">
                     <IntentBadge intent={call.primary_intent} />
                   </td>
                   <td className="py-3 px-4 max-w-xs">
-                    {call.facts.route_from ? (
+                    {call.facts?.route_from ? (
                       <div>
-                        <span className="text-slate-700 dark:text-slate-300 font-medium">{call.facts.route_from}</span>
-                        <span className="text-slate-400"> &rarr; </span>
-                        <span className="text-slate-700 dark:text-slate-300 font-medium">{call.facts.route_to}</span>
-                        <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                          {call.facts.weight} • {call.facts.vehicle_type}
+                        <div className="font-medium text-slate-800 dark:text-slate-200">
+                          {call.facts.route_from} &rarr; {call.facts.route_to}
                         </div>
                         {call.facts.quoted_amount && (
-                          <div className="text-emerald-600 dark:text-emerald-400 font-bold font-mono text-[11px]">
-                            ₹{call.facts.quoted_amount.toLocaleString('en-IN')} ({call.facts.quote_type})
+                          <div className="text-emerald-600 dark:text-emerald-400 font-semibold font-mono text-[11px]">
+                            {formatCurrencyINR(call.facts.quoted_amount)} ({call.facts.quote_type || 'ESTIMATE'})
                           </div>
                         )}
                       </div>
-                    ) : call.facts.tracking_id ? (
-                      <div>
-                        <span className="text-sky-600 dark:text-sky-400 font-mono font-bold">LR #{call.facts.tracking_id}</span>
-                        <span className="block text-[11px] text-slate-500 dark:text-slate-400">{call.facts.route_from} &rarr; {call.facts.route_to}</span>
-                      </div>
+                    ) : call.facts?.tracking_id ? (
+                      <div className="font-mono text-sky-600 dark:text-sky-400 font-medium">LR #{call.facts.tracking_id}</div>
                     ) : (
-                      <span className="text-slate-400 dark:text-slate-500 italic">General inquiry / No freight facts</span>
+                      <div className="text-slate-400 dark:text-slate-500 truncate">{call.summary?.slice(0, 45) || 'General Inquiry'}</div>
                     )}
                   </td>
                   <td className="py-3 px-4">
                     <OutcomeBadge outcome={call.outcome} />
-                    {call.escalation_status?.is_escalated && (
-                      <span className="block text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
-                        &rarr; {call.escalation_status.target_role}
-                      </span>
-                    )}
                   </td>
                   <td className="py-3 px-4">
                     <TemperatureBadge temperature={call.lead_temperature} />
@@ -255,8 +314,9 @@ export default function CallsPage() {
                   </td>
                   <td className="py-3 px-4 text-right space-x-1.5 whitespace-nowrap">
                     <button
+                      type="button"
                       onClick={() => setSelectedCall(call)}
-                      className="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-sky-700 dark:text-sky-400 text-xs font-medium transition-colors border border-slate-200 dark:border-slate-700"
+                      className="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-sky-700 dark:text-sky-400 text-xs font-medium transition-colors border border-slate-200 dark:border-slate-700 cursor-pointer"
                     >
                       Quick View
                     </button>
@@ -280,13 +340,13 @@ export default function CallsPage() {
         isOpen={!!selectedCall}
         onClose={() => setSelectedCall(null)}
         title={`Call Audit — ${selectedCall?.id}`}
-        subtitle={`Caller: ${selectedCall?.customer?.name} (${selectedCall?.customer?.phone})`}
+        subtitle={`Caller: ${selectedCall?.customer?.name || 'Inbound Caller'} (${selectedCall?.customer?.phone || 'Unknown'})`}
       >
         {selectedCall && (
           <div className="space-y-6 text-xs">
             <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2">
               <div className="flex justify-between items-center">
-                <span className="text-slate-900 dark:text-white font-semibold text-sm">{selectedCall.customer?.name}</span>
+                <span className="text-slate-900 dark:text-white font-semibold text-sm">{selectedCall.customer?.name || 'Inbound Caller'}</span>
                 <TemperatureBadge temperature={selectedCall.lead_temperature} />
               </div>
               <div className="flex justify-between text-slate-500 dark:text-slate-400">
@@ -310,24 +370,30 @@ export default function CallsPage() {
               <div className="space-y-2 min-w-0 max-w-full">
                 <h3 className="font-semibold text-slate-900 dark:text-white uppercase text-[11px] tracking-wider">Transcript Excerpt</h3>
                 <div className="space-y-2 max-h-64 overflow-y-auto pr-1 min-w-0 max-w-full">
-                  {selectedCall.transcript.map((t, idx) => (
-                    <div
-                      key={idx}
-                      className={`p-3 rounded-lg border text-xs leading-relaxed min-w-0 max-w-full ${
-                        t.speaker === 'agent'
-                          ? 'bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-900/30 text-sky-950 dark:text-sky-200 ml-2 sm:ml-4'
-                          : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 mr-2 sm:mr-4'
-                      }`}
-                    >
-                      <div className="flex justify-between text-[10px] text-slate-500 dark:text-slate-400 mb-1 gap-2 flex-wrap">
-                        <span className="font-bold uppercase text-slate-700 dark:text-slate-300 truncate">
-                          {t.speaker === 'agent' ? 'LogiVoice AI' : 'Caller'}
-                        </span>
-                        <span className="font-mono shrink-0">{t.timestamp}</span>
+                  {Array.isArray(selectedCall.transcript) ? (
+                    selectedCall.transcript.map((t, idx) => (
+                      <div
+                        key={idx}
+                        className={`p-3 rounded-lg border text-xs leading-relaxed min-w-0 max-w-full ${
+                          t.speaker === 'agent'
+                            ? 'bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-900/30 text-sky-950 dark:text-sky-200 ml-2 sm:ml-4'
+                            : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 mr-2 sm:mr-4'
+                        }`}
+                      >
+                        <div className="flex justify-between text-[10px] text-slate-500 dark:text-slate-400 mb-1 gap-2 flex-wrap">
+                          <span className="font-bold uppercase text-slate-700 dark:text-slate-300 truncate">
+                            {t.speaker === 'agent' ? 'LogiVoice AI' : 'Caller'}
+                          </span>
+                          <span className="font-mono shrink-0">{t.timestamp}</span>
+                        </div>
+                        <p className="break-words">{t.text}</p>
                       </div>
-                      <p className="break-words">{t.text}</p>
-                    </div>
-                  ))}
+                    ))
+                  ) : (
+                    <p className="p-3 bg-slate-50 dark:bg-slate-900 rounded-lg text-slate-700 dark:text-slate-300 font-mono text-[11px]">
+                      {String(selectedCall.transcript)}
+                    </p>
+                  )}
                 </div>
               </div>
             )}

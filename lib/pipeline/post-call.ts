@@ -14,6 +14,7 @@
  */
 
 import { db, DEFAULT_TENANT_ID } from '@/lib/db';
+import { getTenantConfig } from '@/lib/config/tenant';
 import { Call, CallIntent, CallFacts, TranscriptTurn, CallOutcome, Lead } from '@/types/logivoice';
 import { computeLeadTemperature } from '@/lib/rules/lead-temperature';
 import { syncCallToGoogleSheets } from '@/lib/integrations/google-sheets';
@@ -64,21 +65,19 @@ export async function processPostCallPipeline(
   const correlation = createCorrelationContext(tenantId, undefined, 'POST_CALL_PIPELINE');
   logTrace(correlation, 'POST_CALL_STARTED', { external_call_id: payload.external_call_id });
 
-  // 1. Idempotency Check: Prevent duplicate pipeline execution
-  if (processedCallIds.has(payload.external_call_id)) {
-    const existing = await db.getCallByExternalId(payload.external_call_id, tenantId);
-    if (existing) {
-      logTrace(correlation, 'POST_CALL_IDEMPOTENT_SKIP', { external_call_id: payload.external_call_id });
-      return {
-        success: true,
-        call_id: existing.id,
-        external_call_id: payload.external_call_id,
-        lead_temperature: existing.lead_temperature,
-        sheets_status: 'SKIPPED_DUPLICATE',
-        followup_status: existing.followup_state?.status || 'ALREADY_PROCESSED',
-        message: 'Idempotent replay: Call outcome already processed.',
-      };
-    }
+  // 1. Idempotency Check: Prevent duplicate pipeline execution (Durable DB + In-Memory)
+  const existing = await db.getCallByExternalId(payload.external_call_id, tenantId);
+  if (existing && (processedCallIds.has(payload.external_call_id) || (existing.outcome === 'COMPLETED' && existing.followup_state))) {
+    logTrace(correlation, 'POST_CALL_IDEMPOTENT_SKIP', { external_call_id: payload.external_call_id });
+    return {
+      success: true,
+      call_id: existing.id,
+      external_call_id: payload.external_call_id,
+      lead_temperature: existing.lead_temperature,
+      sheets_status: 'SKIPPED_DUPLICATE',
+      followup_status: existing.followup_state?.status || 'ALREADY_PROCESSED',
+      message: 'Idempotent replay: Call outcome already processed.',
+    };
   }
 
   try {
@@ -209,13 +208,19 @@ export async function processPostCallPipeline(
       (leadTemperature === 'HOT' || leadTemperature === 'WARM' || Boolean(payload.facts?.quoted_amount));
 
     if (isEligibleForFollowup && customer?.phone) {
+      const tenantConfig = await getTenantConfig(tenantId);
+      const brand = tenantConfig.brand_name || tenantConfig.business_name || 'LogiVoice';
+      const bookingNotice = tenantConfig.booking_url
+        ? ` Booking confirmation link: ${tenantConfig.booking_url}`
+        : ' Booking confirmation ke liye is number par reply karein.';
+
       let messageSnippet = '';
       if (payload.facts?.quoted_amount) {
-        messageSnippet = `Namaste! Aaj aapne ${payload.facts.route_from || 'route'} se ${payload.facts.route_to || 'destination'} ke liye freight rate poocha tha. Quoted amount: ₹${payload.facts.quoted_amount.toLocaleString('en-IN')}. Booking confirmation ke liye yahan reply karein: https://logivoice.in/book`;
+        messageSnippet = `Namaste! Aaj aapne ${payload.facts.route_from || 'route'} se ${payload.facts.route_to || 'destination'} ke liye freight rate poocha tha. Quoted amount: ₹${payload.facts.quoted_amount.toLocaleString('en-IN')}.${bookingNotice}`;
       } else if (payload.facts?.tracking_id) {
-        messageSnippet = `Namaste! Aapke consignment ${payload.facts.tracking_id} ka status update WhatsApp par share kar diya gaya hai. Sahayata ke liye Apex Logistics se judey rahein.`;
+        messageSnippet = `Namaste! Aapke consignment ${payload.facts.tracking_id} ka status update WhatsApp par share kar diya gaya hai. Sahayata ke liye ${brand} se judey rahein.`;
       } else {
-        messageSnippet = `Namaste! Apex Logistics se call karne ke liye dhanyawad. Aapke requirement ka context dispatch team ko assign ho gaya hai.`;
+        messageSnippet = `Namaste! ${brand} se call karne ke liye dhanyawad. Aapke requirement ka context dispatch team ko assign ho gaya hai.`;
       }
 
       const msgResult = await sendFollowupMessage({
@@ -294,6 +299,8 @@ export async function processPostCallPipeline(
       sheets_status: sheetsResult.status,
       followup_status: followupStatus,
     });
+
+    processedCallIds.add(payload.external_call_id);
 
     return {
       success: true,

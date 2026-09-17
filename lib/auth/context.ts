@@ -2,10 +2,18 @@
  * LOGIVOICE V1 — AUTHENTICATION, AUTHORIZATION & TENANT CONTEXT
  * Enforces server-side tenant isolation, role-based access control (RBAC),
  * session validation, and cryptographic webhook signature verification.
+ *
+ * Security Architecture:
+ * - USER AUTH: Supabase Auth session via Bearer JWT or SSR Cookies.
+ * - RETELL AUTH: Dedicated server-to-server API key granting strictly VOICE_GATEWAY role.
+ * - INTERNAL SERVICE AUTH: System role for internal background processing.
+ * - ZERO CLIENT SPOOFING: x-user-role and x-tenant-id headers are never trusted for elevation.
+ * - PRODUCTION HARDENED: Dev/test tokens are strictly forbidden in production.
  */
 
 import crypto from 'crypto';
 import { NextRequest } from 'next/server';
+import { createServerClient } from '@supabase/ssr';
 import { createAdminClient } from '@/lib/supabase/server';
 import { DEFAULT_TENANT_ID } from '@/lib/db';
 
@@ -49,12 +57,16 @@ export function verifyRetellWebhookSignature(rawBody: string, signature: string 
 
 /**
  * Resolves the authenticated user, role, and tenant context from a Next.js request.
- * Prevents client-side spoofing by resolving the tenant strictly from the verified session or trusted server token.
+ * Strictly enforces that client-controlled headers cannot escalate privileges or override tenant boundaries.
  */
-export async function getAuthContext(req?: NextRequest): Promise<AuthContext> {
+export async function getAuthContext(
+  req?: NextRequest | Request | Headers | { headers: Headers; cookies?: { get?: (name: string) => { value: string } | undefined; getAll?: () => Array<{ name: string; value: string }> } }
+): Promise<AuthContext> {
+  const isProduction = process.env.NODE_ENV === 'production';
+
   if (!req) {
-    // Server-internal invocation (background task / test helper)
-    if (process.env.NODE_ENV === 'production') {
+    // Server-internal invocation (background worker or script)
+    if (isProduction) {
       return {
         userId: 'system',
         tenantId: DEFAULT_TENANT_ID,
@@ -72,49 +84,69 @@ export async function getAuthContext(req?: NextRequest): Promise<AuthContext> {
     };
   }
 
-  const authHeader = req.headers.get('authorization');
-  const apiKey = req.headers.get('x-api-key');
-  const customRole = req.headers.get('x-user-role') as UserRole | null;
-  const customTenant = req.headers.get('x-tenant-id');
+  const headers: Headers =
+    req instanceof Headers
+      ? req
+      : 'headers' in req && req.headers
+      ? (req.headers as Headers)
+      : new Headers();
 
-  // 1. Direct Server-to-Server API token (Retell API Key or internal service secret)
+  // Explicit test header to simulate unauthenticated requests in test suites
+  if (headers.get('x-test-unauthenticated') === 'true') {
+    return {
+      userId: 'anonymous',
+      tenantId: '',
+      role: 'DISPATCHER',
+      isAuthenticated: false,
+      source: 'UNAUTHENTICATED',
+    };
+  }
+
+  const authHeader = headers.get('authorization');
+  const apiKey = headers.get('x-api-key');
+
+  // 1. Server-to-Server Retell API Key Verification
+  // Strictly bound to VOICE_GATEWAY role and DEFAULT_TENANT_ID; ignores any header override attempts.
   const serverKey = process.env.RETELL_API_KEY;
   if (apiKey && serverKey && apiKey === serverKey) {
     return {
       userId: 'voice-api-caller',
-      tenantId: customTenant || DEFAULT_TENANT_ID,
-      role: customRole || 'VOICE_GATEWAY',
+      tenantId: DEFAULT_TENANT_ID,
+      role: 'VOICE_GATEWAY',
       isAuthenticated: true,
       source: 'API_TOKEN',
     };
   }
 
-  // 2. Bearer token check
+  // 2. Authorization Bearer Token
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.replace('Bearer ', '').trim();
 
-    // Development / Test fixture token support
-    if (token === 'dev-dispatcher-token' || (process.env.NODE_ENV !== 'production' && token === 'test-token')) {
-      return {
-        userId: 'dispatcher-local-01',
-        tenantId: customTenant || DEFAULT_TENANT_ID,
-        role: customRole || 'DISPATCHER',
-        isAuthenticated: true,
-        source: 'DEV_SESSION',
-      };
+    // Dev/Test tokens ONLY permitted in non-production environments
+    if (!isProduction) {
+      if (token === 'dev-dispatcher-token' || token === 'test-token') {
+        const testTenant = headers.get('x-test-tenant-override') || DEFAULT_TENANT_ID;
+        return {
+          userId: 'dispatcher-local-01',
+          tenantId: testTenant,
+          role: 'DISPATCHER',
+          isAuthenticated: true,
+          source: 'DEV_SESSION',
+        };
+      }
+
+      if (token === 'admin-test-token') {
+        return {
+          userId: 'admin-local-01',
+          tenantId: DEFAULT_TENANT_ID,
+          role: 'ADMIN',
+          isAuthenticated: true,
+          source: 'API_TOKEN',
+        };
+      }
     }
 
-    if (token === 'admin-test-token') {
-      return {
-        userId: 'admin-local-01',
-        tenantId: customTenant || DEFAULT_TENANT_ID,
-        role: 'ADMIN',
-        isAuthenticated: true,
-        source: 'API_TOKEN',
-      };
-    }
-
-    // Live Supabase JWT validation
+    // Authoritative Supabase JWT validation
     try {
       const client = createAdminClient();
       const { data: { user }, error } = await client.auth.getUser(token);
@@ -130,37 +162,68 @@ export async function getAuthContext(req?: NextRequest): Promise<AuthContext> {
         };
       }
     } catch (err) {
-      console.warn('[Auth] Token validation error:', err);
+      console.warn('[AuthContext] JWT token validation failed:', err instanceof Error ? err.message : err);
     }
   }
 
-  // 3. Browser-based internal dashboard session in development mode
-  // Allows the completed Next.js frontend pages to query local APIs without broken cookies
-  if (process.env.NODE_ENV !== 'production') {
-    const referer = req.headers.get('referer');
-    const isInternalBrowserDashboard = referer && (referer.includes('/admin') || referer.includes('localhost'));
-    const isExplicitTestDirectCall = req.headers.get('x-test-unauthenticated') === 'true';
+  // 3. Supabase SSR Session via Cookies (for browser-initiated API calls)
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '';
+  const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_SECRET_KEY || '';
 
-    if (isInternalBrowserDashboard && !isExplicitTestDirectCall) {
+  if (supabaseUrl && supabaseKey && 'cookies' in req && req.cookies && typeof req.cookies.getAll === 'function') {
+    try {
+      const cookiesObj = req.cookies;
+      const supabase = createServerClient(supabaseUrl, supabaseKey, {
+        cookies: {
+          getAll() {
+            return cookiesObj.getAll ? cookiesObj.getAll() : [];
+          },
+          setAll() {},
+        },
+      });
+
+      const { data: { user }, error } = await supabase.auth.getUser();
+      if (!error && user) {
+        const tenantId = (user.app_metadata?.tenant_id as string) || DEFAULT_TENANT_ID;
+        const role = (user.app_metadata?.role as UserRole) || 'DISPATCHER';
+        return {
+          userId: user.id,
+          tenantId,
+          role,
+          isAuthenticated: true,
+          source: 'SUPABASE_SESSION',
+        };
+      }
+    } catch {
+      // Cookie session verification failed or unavailable
+    }
+  }
+
+  // 4. Non-Production Dev Session Cookie (allows local UI exploration when configured)
+  if (!isProduction && 'cookies' in req && req.cookies && typeof req.cookies.get === 'function') {
+    const devCookie = req.cookies.get('logivoice_dev_session')?.value;
+    if (devCookie === 'true') {
       return {
         userId: 'dispatcher-local-01',
-        tenantId: customTenant || DEFAULT_TENANT_ID,
-        role: customRole || 'DISPATCHER',
+        tenantId: DEFAULT_TENANT_ID,
+        role: 'DISPATCHER',
         isAuthenticated: true,
         source: 'DEV_SESSION',
       };
     }
   }
 
-  // 4. Default for unauthenticated requests
+  // 5. Default Unauthenticated Fallback
   return {
     userId: 'anonymous',
-    tenantId: customTenant || '',
+    tenantId: '',
     role: 'DISPATCHER',
     isAuthenticated: false,
     source: 'UNAUTHENTICATED',
   };
 }
+
+export const resolveAuthContext = getAuthContext;
 
 /**
  * Enforces that the request has an authenticated identity.

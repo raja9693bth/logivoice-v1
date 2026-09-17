@@ -12,27 +12,44 @@ import {
   Server,
   Zap,
 } from 'lucide-react';
-import { MOCK_AUDIT_EVENTS } from '@/lib/mock/logivoice-data';
-import { formatDateTime } from '@/lib/utils';
 import { Drawer } from '@/components/ui/Drawer';
+import { EmptyState } from '@/components/ui/EmptyState';
+import { formatDateTime } from '@/lib/utils';
 import { AuditEvent, AuditSeverity } from '@/types/logivoice';
 
 export default function SystemAuditPage() {
-  const [events, setEvents] = useState<AuditEvent[]>(MOCK_AUDIT_EVENTS);
+  const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [severityFilter, setSeverityFilter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedEvent, setSelectedEvent] = useState<AuditEvent | null>(null);
 
-  React.useEffect(() => {
+  const fetchAuditEvents = React.useCallback(() => {
+    setLoading(true);
+    setError(null);
     fetch('/api/audit')
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
       .then((data) => {
-        if (data?.events && Array.isArray(data.events) && data.events.length > 0) {
+        if (data?.events && Array.isArray(data.events)) {
           setEvents(data.events);
+        } else {
+          setEvents([]);
         }
       })
-      .catch((err) => console.warn('[AuditPage] API fetch error:', err));
+      .catch((err) => {
+        console.error('[AuditPage] API fetch error:', err);
+        setError('Failed to fetch system audit logs from server.');
+      })
+      .finally(() => setLoading(false));
   }, []);
+
+  React.useEffect(() => {
+    fetchAuditEvents();
+  }, [fetchAuditEvents]);
 
   const filteredEvents = useMemo(() => {
     return events.filter((ev) => {
@@ -135,58 +152,85 @@ export default function SystemAuditPage() {
         </div>
       </div>
 
+      {/* Error Alert */}
+      {error && (
+        <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-lg text-amber-800 dark:text-amber-200 text-xs flex items-center justify-between">
+          <span>{error}</span>
+          <button onClick={() => fetchAuditEvents()} className="underline font-semibold hover:text-amber-900">
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Audit Log Table */}
-      <div className="table-container bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 shadow-xs">
-        <table className="w-full text-left border-collapse text-xs">
-          <thead>
-            <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-100/80 dark:bg-slate-950/80 text-slate-600 dark:text-slate-400 uppercase text-[11px] tracking-wider">
-              <th className="py-3 px-4">Timestamp</th>
-              <th className="py-3 px-4">Event Type</th>
-              <th className="py-3 px-4">Actor</th>
-              <th className="py-3 px-4">Call ID</th>
-              <th className="py-3 px-4">Tool / Action</th>
-              <th className="py-3 px-4">Severity</th>
-              <th className="py-3 px-4">Details Summary</th>
-              <th className="py-3 px-4 text-right">Action</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-200 dark:divide-slate-800/60">
-            {filteredEvents.map((ev) => (
-              <tr key={ev.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
-                <td className="py-3 px-4 font-mono text-slate-500 dark:text-slate-400">{formatDateTime(ev.timestamp)}</td>
-                <td className="py-3 px-4 font-mono font-semibold text-slate-900 dark:text-white">{ev.event_type}</td>
-                <td className="py-3 px-4 text-slate-700 dark:text-slate-300">{ev.actor}</td>
-                <td className="py-3 px-4 font-mono text-sky-600 dark:text-sky-400">{ev.call_id || '—'}</td>
-                <td className="py-3 px-4 text-slate-700 dark:text-slate-300 font-mono text-[11px]">{ev.tool_name || 'system'}</td>
-                <td className="py-3 px-4">
-                  <span
-                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded border uppercase ${
-                      ev.severity === 'INFO'
-                        ? 'bg-sky-50 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-800'
-                        : ev.severity === 'WARNING'
-                        ? 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800'
-                        : 'bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800'
-                    }`}
-                  >
-                    {ev.severity}
-                  </span>
-                </td>
-                <td className="py-3 px-4 max-w-xs truncate font-mono text-slate-500 dark:text-slate-400 text-[11px]">
-                  {JSON.stringify(ev.details)}
-                </td>
-                <td className="py-3 px-4 text-right">
-                  <button
-                    onClick={() => setSelectedEvent(ev)}
-                    className="px-2.5 py-1 rounded-md bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-sky-600 dark:text-sky-400 hover:text-sky-700 dark:hover:text-sky-300 text-xs font-medium transition-colors border border-slate-300 dark:border-slate-700"
-                  >
-                    Inspect
-                  </button>
-                </td>
+      {loading ? (
+        <div className="p-8 text-center text-xs text-slate-500 bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 rounded-xl">
+          <div className="inline-block w-6 h-6 border-2 border-sky-500 border-t-transparent rounded-full animate-spin mb-2"></div>
+          <p>Loading system audit logs from database...</p>
+        </div>
+      ) : filteredEvents.length === 0 ? (
+        <EmptyState
+          title="No audit events found"
+          description="Try changing severity filter or search parameters."
+          actionLabel="Clear Filters"
+          onAction={() => {
+            setSeverityFilter('ALL');
+            setSearchQuery('');
+          }}
+        />
+      ) : (
+        <div className="table-container bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 shadow-xs">
+          <table className="w-full text-left border-collapse text-xs">
+            <thead>
+              <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-100/80 dark:bg-slate-950/80 text-slate-600 dark:text-slate-400 uppercase text-[11px] tracking-wider">
+                <th className="py-3 px-4">Timestamp</th>
+                <th className="py-3 px-4">Event Type</th>
+                <th className="py-3 px-4">Actor</th>
+                <th className="py-3 px-4">Call ID</th>
+                <th className="py-3 px-4">Tool / Action</th>
+                <th className="py-3 px-4">Severity</th>
+                <th className="py-3 px-4">Details Summary</th>
+                <th className="py-3 px-4 text-right">Action</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody className="divide-y divide-slate-200 dark:divide-slate-800/60">
+              {filteredEvents.map((ev) => (
+                <tr key={ev.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
+                  <td className="py-3 px-4 font-mono text-slate-500 dark:text-slate-400">{formatDateTime(ev.timestamp)}</td>
+                  <td className="py-3 px-4 font-mono font-semibold text-slate-900 dark:text-white">{ev.event_type}</td>
+                  <td className="py-3 px-4 text-slate-700 dark:text-slate-300">{ev.actor}</td>
+                  <td className="py-3 px-4 font-mono text-sky-600 dark:text-sky-400">{ev.call_id || '—'}</td>
+                  <td className="py-3 px-4 text-slate-700 dark:text-slate-300 font-mono text-[11px]">{ev.tool_name || 'system'}</td>
+                  <td className="py-3 px-4">
+                    <span
+                      className={`text-[10px] font-bold px-1.5 py-0.5 rounded border uppercase ${
+                        ev.severity === 'INFO'
+                          ? 'bg-sky-50 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-800'
+                          : ev.severity === 'WARNING'
+                          ? 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800'
+                          : 'bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800'
+                      }`}
+                    >
+                      {ev.severity}
+                    </span>
+                  </td>
+                  <td className="py-3 px-4 max-w-xs truncate font-mono text-slate-500 dark:text-slate-400 text-[11px]">
+                    {JSON.stringify(ev.details)}
+                  </td>
+                  <td className="py-3 px-4 text-right">
+                    <button
+                      onClick={() => setSelectedEvent(ev)}
+                      className="px-2.5 py-1 rounded-md bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-sky-600 dark:text-sky-400 hover:text-sky-700 dark:hover:text-sky-300 text-xs font-medium transition-colors border border-slate-300 dark:border-slate-700"
+                    >
+                      Inspect
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* Audit Detail Drawer */}
       <Drawer

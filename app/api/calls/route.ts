@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthContext, requireRole, AuthorizationError } from '@/lib/auth/context';
 import { db } from '@/lib/db';
 import { CallIntent, CallOutcome } from '@/types/logivoice';
+import { CreateCallApiSchema } from '@/lib/schemas/api';
 
 export async function GET(req: NextRequest) {
   try {
@@ -36,8 +37,42 @@ export async function POST(req: NextRequest) {
     const authContext = await getAuthContext(req);
     requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'SYSTEM']);
 
-    const body = await req.json();
-    const newCall = await db.createCall(body, authContext.tenantId);
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ error: 'Malformed JSON payload' }, { status: 400 });
+    }
+
+    const parseResult = CreateCallApiSchema.safeParse(body);
+    if (!parseResult.success) {
+      return NextResponse.json(
+        { error: 'Validation failed', details: parseResult.error.flatten() },
+        { status: 400 }
+      );
+    }
+
+    const validated = parseResult.data;
+    const newCall = await db.createCall(
+      {
+        external_call_id: validated.external_call_id,
+        tenant_id: authContext.tenantId,
+        customer_id: validated.customer_id || 'cust-unknown',
+        started_at: validated.started_at || new Date().toISOString(),
+        ended_at: validated.ended_at,
+        duration_seconds: validated.duration_seconds,
+        primary_intent: validated.primary_intent,
+        sentiment: validated.sentiment,
+        outcome: validated.outcome,
+        lead_temperature: 'WARM',
+        summary: validated.summary,
+        facts: validated.facts ? { call_id: '', ...validated.facts } : { call_id: '' },
+        escalation_status: validated.escalation_status,
+        agent_version: validated.agent_version,
+      },
+      authContext.tenantId
+    );
+
     return NextResponse.json({ call: newCall }, { status: 201 });
   } catch (error) {
     if (error instanceof AuthorizationError) {

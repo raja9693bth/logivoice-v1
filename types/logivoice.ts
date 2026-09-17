@@ -34,11 +34,11 @@ export type RequestStatus =
 
 export type RequestPriority = 'URGENT' | 'HIGH' | 'NORMAL' | 'LOW';
 
-export type RequestType = 'BOOKING_REQUEST' | 'SUPPORT_TICKET' | 'CALLBACK_REQUEST';
+export type RequestType = 'BOOKING_REQUEST' | 'SUPPORT_TICKET' | 'CALLBACK_REQUEST' | 'RATE_REQUEST';
 
 export type FollowupChannel = 'WHATSAPP' | 'SMS' | 'EMAIL';
 
-export type FollowupStatus = 'PENDING' | 'SENT' | 'DELIVERED' | 'FAILED' | 'SUPPRESSED' | 'UNCONFIGURED' | 'MOCK';
+export type FollowupStatus = 'PENDING' | 'SENT' | 'DELIVERED' | 'FAILED' | 'SUPPRESSED' | 'UNCONFIGURED' | 'MOCK' | 'COMPLETED' | 'SKIPPED_NOT_ELIGIBLE';
 
 export type AuditSeverity = 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
 
@@ -137,6 +137,9 @@ export interface OperationsRequest {
   priority: RequestPriority;
   summary: string;
   details: Record<string, unknown>;
+  payload?: Record<string, unknown>;
+  notes?: string;
+  resolution_notes?: string;
   assigned_to?: string;
   created_at: string;
   updated_at: string;
@@ -150,7 +153,7 @@ export interface Lead {
   phone: string;
   company?: string;
   source: string;
-  status: 'NEW' | 'CONTACTED' | 'QUALIFIED' | 'CONVERTED' | 'LOST';
+  status: 'NEW' | 'CONTACTED' | 'QUALIFIED' | 'CONVERTED' | 'LOST' | 'WON';
   temperature: LeadTemperature;
   route?: string;
   vehicle_type?: string;
@@ -187,10 +190,19 @@ export interface RateCard {
 export interface KnowledgeItem {
   id: string;
   tenant_id: string;
-  category: 'RATE_POLICY' | 'TRACKING_POLICY' | 'SERVICE_AREA' | 'BOOKING_RULES' | 'OPERATIONAL_FAQ' | 'ESCALATION_RULES';
+  category:
+    | 'RATE_POLICY'
+    | 'TRACKING_POLICY'
+    | 'SERVICE_AREA'
+    | 'BOOKING_RULES'
+    | 'OPERATIONAL_FAQ'
+    | 'ESCALATION_RULES'
+    | 'SERVICE_RULE'
+    | 'SURCHARGE_POLICY'
+    | 'COMMERCIAL_CLAUSE';
   title: string;
   content: string;
-  status: 'APPROVED' | 'DRAFT' | 'UNDER_REVIEW';
+  status: 'APPROVED' | 'DRAFT' | 'UNDER_REVIEW' | 'ARCHIVED';
   last_updated: string;
   version: string;
 }

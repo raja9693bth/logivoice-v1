@@ -26,7 +26,14 @@ import {
   assertTenantAccess,
   AuthorizationError,
   verifyRetellWebhookSignature,
+  resolveAuthContext,
 } from '../lib/auth/context';
+import {
+  CreateRateCardApiSchema,
+  UpdateRateCardApiSchema,
+  UpdateRequestApiSchema,
+  UpdateSettingsApiSchema,
+} from '../lib/schemas/api';
 import { retrieveRelevantKnowledge } from '../lib/knowledge/retrieval';
 import { computeLeadTemperature } from '../lib/rules/lead-temperature';
 import { processPostCallPipeline, resetPostCallPipelineIdempotency } from '../lib/pipeline/post-call';
@@ -790,6 +797,104 @@ async function runAllTests() {
       if (e instanceof AuthorizationError && e.statusCode === 403) blocked = true;
     }
     assert(blocked, 'J10: Cross-tenant access strictly prevented with 403');
+  }
+
+  // J11: REAL FRONTEND API DATA (CALLS, REQUESTS, LEADS)
+  console.log('\nJOURNEY 11 (J11) — Real Frontend API Data Verification:');
+  {
+    const calls = await db.listCalls(DEFAULT_TENANT_ID);
+    const requests = await db.listRequests(DEFAULT_TENANT_ID);
+    const leads = await db.listLeads(DEFAULT_TENANT_ID);
+
+    assert(Array.isArray(calls) && calls.length > 0, 'J11: Calls API data returned from authoritative database store');
+    assert(Array.isArray(requests) && requests.length > 0, 'J11: Requests API data returned with valid state');
+    assert(Array.isArray(leads) && leads.length > 0, 'J11: Leads API data returned with assigned temperatures');
+    assert(calls.every((c) => c.tenant_id === DEFAULT_TENANT_ID), 'J11: All returned calls are tenant-isolated');
+  }
+
+  // J12: LOGIN / SESSION AUTHENTICATION
+  console.log('\nJOURNEY 12 (J12) — Login / Session Authentication:');
+  {
+    const devAuth = await resolveAuthContext({ headers: new Headers({ authorization: 'Bearer dev-dispatcher-token' }) });
+    assert(devAuth.isAuthenticated && devAuth.role === 'DISPATCHER', 'J12: Dispatcher token resolves valid session');
+    assert(devAuth.tenantId === DEFAULT_TENANT_ID, 'J12: Session is bound to authoritative tenant');
+
+    const anonAuth = await resolveAuthContext({ headers: new Headers({}) });
+    assert(!anonAuth.isAuthenticated && anonAuth.source === 'UNAUTHENTICATED', 'J12: Missing credentials correctly resolves unauthenticated state');
+  }
+
+  // J13: LOGOUT / SESSION EXPIRY
+  console.log('\nJOURNEY 13 (J13) — Logout / Session Expiry Handling:');
+  {
+    const expiredAuth = await resolveAuthContext({ headers: new Headers({ authorization: 'Bearer invalid-or-expired-token' }) });
+    assert(!expiredAuth.isAuthenticated, 'J13: Expired or invalid token is rejected');
+
+    let rejected = false;
+    try {
+      requireAuth(expiredAuth);
+    } catch (e) {
+      if (e instanceof AuthorizationError && e.statusCode === 401) rejected = true;
+    }
+    assert(rejected, 'J13: Unauthenticated access throws 401 Unauthorized');
+  }
+
+  // J14: SETTINGS UPDATE VIA STRICT SCHEMA
+  console.log('\nJOURNEY 14 (J14) — Settings Update via Strict Schema:');
+  {
+    const parsed = UpdateSettingsApiSchema.parse({
+      business_name: 'Apex Logistics Northern Hub',
+      brand_name: 'Apex Express',
+    });
+    const updated = await db.updateSettings(DEFAULT_TENANT_ID, parsed);
+    assert(updated.business_name === 'Apex Logistics Northern Hub', 'J14: Settings mutation persisted to database');
+  }
+
+  // J15: RATE CARD CREATION & UPDATE
+  console.log('\nJOURNEY 15 (J15) — Rate Card Creation & Update:');
+  {
+    const validCardInput = CreateRateCardApiSchema.parse({
+      origin: 'Kolkata',
+      destination: 'Patna',
+      vehicle_type: 'Tata 407',
+      weight_min_tons: 1,
+      weight_max_tons: 2.5,
+      price_inr: 16500,
+      minimum_charge_inr: 14000,
+      effective_from: '2026-09-01',
+      status: 'ACTIVE',
+      transit_time_hours: 18,
+      quote_type: 'ESTIMATE',
+      supports_confirmed_quote: false,
+    });
+    const created = await db.createRateCard(validCardInput, DEFAULT_TENANT_ID);
+    assert(Boolean(created.id), 'J15: Rate card created via authoritative DB method');
+
+    const updateInput = UpdateRateCardApiSchema.parse({
+      id: created.id,
+      price_inr: 17200,
+    });
+    const updated = await db.updateRateCard(updateInput.id, { price_inr: updateInput.price_inr }, DEFAULT_TENANT_ID);
+    assert(Boolean(updated && updated.price_inr === 17200), 'J15: Rate card price updated and persisted');
+  }
+
+  // J16: REQUEST STATUS UPDATE VIA PATCH
+  console.log('\nJOURNEY 16 (J16) — Request Status Update:');
+  {
+    const requests = await db.listRequests(DEFAULT_TENANT_ID);
+    const targetReq = requests[0];
+    assert(Boolean(targetReq), 'J16: Existing request found for status update test');
+
+    const validStatusUpdate = UpdateRequestApiSchema.parse({
+      id: targetReq.id,
+      status: 'CONFIRMED',
+      resolution_notes: 'Confirmed by logistics coordinator after capacity check.',
+    });
+    const updated = await db.updateRequest(validStatusUpdate.id, {
+      status: validStatusUpdate.status,
+      resolution_notes: validStatusUpdate.resolution_notes,
+    }, DEFAULT_TENANT_ID);
+    assert(Boolean(updated && updated.status === 'CONFIRMED'), 'J16: Request status transitioned to CONFIRMED');
+    assert(Boolean(updated && updated.resolution_notes?.includes('capacity check')), 'J16: Resolution notes persisted');
   }
 
   console.log('\n==================================================');

@@ -69,6 +69,7 @@ export interface ClientConfig {
   primary_language: string;
   secondary_language: string;
   inbound_phone_number?: string;
+  booking_url?: string;
   escalation_contacts: Array<{
     role: string;
     name: string;
@@ -739,6 +740,14 @@ export const db = {
     return globalStore.client_config;
   },
 
+  async getSettings(tenantId: string = DEFAULT_TENANT_ID): Promise<ClientConfig> {
+    return this.getClientConfig(tenantId);
+  },
+
+  async updateSettings(tenantId: string = DEFAULT_TENANT_ID, updates: Partial<ClientConfig>): Promise<ClientConfig> {
+    return this.updateClientConfig(tenantId, updates);
+  },
+
   // -----------------------------------------------------------------------
   // CUSTOMERS
   // -----------------------------------------------------------------------
@@ -962,6 +971,34 @@ export const db = {
     return newLead;
   },
 
+  async updateLead(
+    id: string,
+    updates: Partial<Lead>,
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<Lead | null> {
+    const now = new Date().toISOString();
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client
+        .from('leads')
+        .update({ ...updates, updated_at: now })
+        .eq('id', id)
+        .eq('tenant_id', tenantId)
+        .select()
+        .single();
+      if (!error && data) return data as Lead;
+    }
+    assertProductionDbReady();
+    const idx = globalStore.leads.findIndex((l) => l.id === id && l.tenant_id === tenantId);
+    if (idx === -1) return null;
+    globalStore.leads[idx] = {
+      ...globalStore.leads[idx],
+      ...updates,
+      updated_at: now,
+    };
+    return globalStore.leads[idx];
+  },
+
   // -----------------------------------------------------------------------
   // OPERATIONS REQUESTS
   // -----------------------------------------------------------------------
@@ -1010,6 +1047,34 @@ export const db = {
     return newReq;
   },
 
+  async updateRequest(
+    id: string,
+    updates: Partial<OperationsRequest>,
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<OperationsRequest | null> {
+    const now = new Date().toISOString();
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client
+        .from('operations_requests')
+        .update({ ...updates, updated_at: now })
+        .eq('id', id)
+        .eq('tenant_id', tenantId)
+        .select()
+        .single();
+      if (!error && data) return data as OperationsRequest;
+    }
+    assertProductionDbReady();
+    const idx = globalStore.operations_requests.findIndex((r) => r.id === id && r.tenant_id === tenantId);
+    if (idx === -1) return null;
+    globalStore.operations_requests[idx] = {
+      ...globalStore.operations_requests[idx],
+      ...updates,
+      updated_at: now,
+    };
+    return globalStore.operations_requests[idx];
+  },
+
   // -----------------------------------------------------------------------
   // RATE CARDS
   // -----------------------------------------------------------------------
@@ -1056,6 +1121,53 @@ export const db = {
     return routeMatch || null;
   },
 
+  async createRateCard(
+    rateCardData: Omit<RateCard, 'id' | 'tenant_id' | 'source_version'> & { tenant_id?: string; source_version?: string },
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<RateCard> {
+    const id = `rc-${Date.now()}`;
+    const newCard: RateCard = {
+      ...rateCardData,
+      id,
+      tenant_id: rateCardData.tenant_id || tenantId,
+      source_version: rateCardData.source_version || 'v1.0',
+    };
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client.from('rate_cards').insert([newCard]).select().single();
+      if (!error && data) return data as RateCard;
+    }
+    assertProductionDbReady();
+    globalStore.rate_cards.unshift(newCard);
+    return newCard;
+  },
+
+  async updateRateCard(
+    id: string,
+    updates: Partial<RateCard>,
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<RateCard | null> {
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client
+        .from('rate_cards')
+        .update(updates)
+        .eq('id', id)
+        .eq('tenant_id', tenantId)
+        .select()
+        .single();
+      if (!error && data) return data as RateCard;
+    }
+    assertProductionDbReady();
+    const idx = globalStore.rate_cards.findIndex((rc) => rc.id === id && rc.tenant_id === tenantId);
+    if (idx === -1) return null;
+    globalStore.rate_cards[idx] = {
+      ...globalStore.rate_cards[idx],
+      ...updates,
+    };
+    return globalStore.rate_cards[idx];
+  },
+
   // -----------------------------------------------------------------------
   // TRACKING RECORDS
   // -----------------------------------------------------------------------
@@ -1100,6 +1212,56 @@ export const db = {
     let items = globalStore.knowledge_items.filter((k) => k.tenant_id === tenantId);
     if (category) items = items.filter((k) => k.category === category);
     return items;
+  },
+
+  async createKnowledgeItem(
+    itemData: Omit<KnowledgeItem, 'id' | 'last_updated'>,
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<KnowledgeItem> {
+    const now = new Date().toISOString().split('T')[0];
+    const id = `kb-${Date.now()}`;
+    const newItem: KnowledgeItem = {
+      ...itemData,
+      id,
+      tenant_id: tenantId,
+      last_updated: now,
+    };
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client.from('knowledge_items').insert([newItem]).select().single();
+      if (!error && data) return data as KnowledgeItem;
+    }
+    assertProductionDbReady();
+    globalStore.knowledge_items.unshift(newItem);
+    return newItem;
+  },
+
+  async updateKnowledgeItem(
+    id: string,
+    updates: Partial<KnowledgeItem>,
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<KnowledgeItem | null> {
+    const now = new Date().toISOString().split('T')[0];
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client
+        .from('knowledge_items')
+        .update({ ...updates, last_updated: now })
+        .eq('id', id)
+        .eq('tenant_id', tenantId)
+        .select()
+        .single();
+      if (!error && data) return data as KnowledgeItem;
+    }
+    assertProductionDbReady();
+    const idx = globalStore.knowledge_items.findIndex((k) => k.id === id && k.tenant_id === tenantId);
+    if (idx === -1) return null;
+    globalStore.knowledge_items[idx] = {
+      ...globalStore.knowledge_items[idx],
+      ...updates,
+      last_updated: now,
+    };
+    return globalStore.knowledge_items[idx];
   },
 
   // -----------------------------------------------------------------------

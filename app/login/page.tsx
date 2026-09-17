@@ -1,9 +1,10 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { Truck, Lock, Mail, ArrowRight, AlertCircle, Loader2 } from 'lucide-react';
+import { Truck, Lock, Mail, ArrowRight, AlertCircle, Loader2, CheckCircle2 } from 'lucide-react';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
+import { createClient } from '@/lib/supabase/client';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -11,22 +12,68 @@ export default function LoginPage() {
   const [password, setPassword] = useState('LogiVoice@2026');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [successNotice, setSuccessNotice] = useState<string | null>(null);
+  const [isDev, setIsDev] = useState(false);
+
+  useEffect(() => {
+    setIsDev(process.env.NODE_ENV !== 'production');
+  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setError(null);
+    setSuccessNotice(null);
 
-    // Simulate session authentication verification
-    setTimeout(() => {
+    try {
+      const supabase = createClient();
+      const { data, error: authError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (authError) {
+        // Authentic Supabase Auth error
+        setError(authError.message || 'Invalid operational credentials. Please verify email and password.');
+        setIsLoading(false);
+        return;
+      }
+
+      if (data.session) {
+        setSuccessNotice('Session authenticated. Accessing Operations Console...');
+        // Set dev cookie if in non-production to ensure seamless navigation across SSR routes
+        if (process.env.NODE_ENV !== 'production') {
+          document.cookie = 'logivoice_dev_session=true; path=/; max-age=86400; SameSite=Lax';
+        }
+        setTimeout(() => {
+          router.push('/admin');
+        }, 300);
+      }
+    } catch (err) {
+      console.warn('[LoginPage] Supabase client authentication exception:', err);
+      // If network fails to reach remote Supabase in local development, provide honest error
+      if (process.env.NODE_ENV !== 'production') {
+        setError('Authentication service unreachable. In development mode, you may use local evaluation session.');
+      } else {
+        setError('Authentication service temporarily unavailable. Please contact the system administrator.');
+      }
       setIsLoading(false);
-      router.push('/admin');
-    }, 600);
+    }
   };
 
   const handleDemoFill = () => {
     setEmail('dispatcher@logivoice.local');
     setPassword('LogiVoice@2026');
+    setError(null);
+  };
+
+  const handleDevBypass = () => {
+    if (process.env.NODE_ENV === 'production') return;
+    document.cookie = 'logivoice_dev_session=true; path=/; max-age=86400; SameSite=Lax';
+    setSuccessNotice('Local development session granted.');
+    setTimeout(() => {
+      router.push('/admin');
+    }, 200);
   };
 
   return (
@@ -50,13 +97,22 @@ export default function LoginPage() {
         <div className="bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
           <div className="border-b border-slate-200 dark:border-slate-800/80 pb-4">
             <h2 className="text-sm font-semibold text-slate-900 dark:text-white">Dispatcher Sign In</h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Enter authorized operational credentials</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Enter verified Supabase credentials for operational access
+            </p>
           </div>
 
           {error && (
             <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
               <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 dark:text-rose-400" />
               <span>{error}</span>
+            </div>
+          )}
+
+          {successNotice && (
+            <div className="p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 text-xs text-emerald-700 dark:text-emerald-300 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+              <span>{successNotice}</span>
             </div>
           )}
 
@@ -73,7 +129,7 @@ export default function LoginPage() {
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="dispatcher@company.com"
+                  placeholder="dispatcher@logivoice.local"
                   className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg pl-9 pr-3 py-2 text-xs text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-hidden focus:border-sky-500 focus:ring-1 focus:ring-sky-500/30 transition-all"
                 />
               </div>
@@ -105,7 +161,7 @@ export default function LoginPage() {
               {isLoading ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  Verifying Session...
+                  Verifying Supabase Session...
                 </>
               ) : (
                 <>
@@ -116,22 +172,36 @@ export default function LoginPage() {
             </button>
           </form>
 
-          {/* Quick Demo Fill Helper */}
-          <div className="pt-2 border-t border-slate-200 dark:border-slate-800/60 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
-            <span>Development Evaluation?</span>
-            <button
-              type="button"
-              onClick={handleDemoFill}
-              className="text-sky-600 dark:text-sky-400 hover:text-sky-700 dark:hover:text-sky-300 underline font-medium focus:outline-hidden cursor-pointer"
-            >
-              Autofill Demo Account
-            </button>
-          </div>
+          {/* Development / Demo Autofill Helper */}
+          {isDev && (
+            <div className="pt-2 border-t border-slate-200 dark:border-slate-800/60 flex flex-col gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+              <div className="flex items-center justify-between">
+                <span>Development Evaluation?</span>
+                <button
+                  type="button"
+                  onClick={handleDemoFill}
+                  className="text-sky-600 dark:text-sky-400 hover:text-sky-700 dark:hover:text-sky-300 underline font-medium focus:outline-hidden cursor-pointer"
+                >
+                  Autofill Credentials
+                </button>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Offline / Local Dev Mode:</span>
+                <button
+                  type="button"
+                  onClick={handleDevBypass}
+                  className="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 underline font-medium focus:outline-hidden cursor-pointer"
+                >
+                  Enter Dev Session
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Security & Telecom Note */}
         <p className="text-center text-[11px] text-slate-500 dark:text-slate-400 mt-6 max-w-xs mx-auto">
-          Authorized personnel only. Sessions are encrypted and audited under LogiVoice tenant boundaries.
+          Authorized personnel only. Sessions are cryptographically verified and audited under LogiVoice tenant boundaries.
         </p>
       </div>
     </div>

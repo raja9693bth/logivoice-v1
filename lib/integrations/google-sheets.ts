@@ -8,6 +8,7 @@
  */
 
 import { Call, Lead } from '@/types/logivoice';
+import { db, DEFAULT_TENANT_ID } from '@/lib/db';
 
 export const DEFAULT_SPREADSHEET_ID = '1bvfGYB8btM_Ce7QWTg7JdLVEKl4yJSX0goocyTzLADE';
 
@@ -127,6 +128,28 @@ export async function syncCallToGoogleSheets(
     };
   }
 
+  // Durable DB idempotency check: query audit trail to ensure no duplicate sync across restarts
+  try {
+    const tenantId = call.tenant_id || DEFAULT_TENANT_ID;
+    const existingEvents = await db.listAuditEvents(tenantId, 50);
+    const alreadySynced = existingEvents.some(
+      (e) =>
+        e.event_type === 'SHEETS_SYNC' &&
+        (e.call_id === call.id || (e.details as Record<string, unknown>)?.external_call_id === call.external_call_id)
+    );
+    if (alreadySynced) {
+      syncedCallIds.add(call.external_call_id);
+      return {
+        synced: true,
+        status: 'SKIPPED',
+        provider: 'DB_IDEMPOTENCY_GUARD',
+        spreadsheet_id: spreadsheetId,
+      };
+    }
+  } catch {
+    // Fallback gracefully if DB not ready
+  }
+
   // 1. Live Google Sheets REST API integration (Requires OAuth credentials)
   const hasCredentials = Boolean(
     process.env.GOOGLE_CLIENT_ID &&
@@ -194,6 +217,27 @@ export async function syncCallToGoogleSheets(
       }
 
       syncedCallIds.add(call.external_call_id);
+      try {
+        const tenantId = call.tenant_id || DEFAULT_TENANT_ID;
+        await db.logAuditEvent(
+          {
+            tenant_id: tenantId,
+            call_id: call.id,
+            event_type: 'SHEETS_SYNC',
+            actor: 'SYSTEM',
+            actor_type: 'SYSTEM',
+            severity: 'INFO',
+            details: {
+              external_call_id: call.external_call_id,
+              spreadsheet_id: spreadsheetId,
+              status: 'SYNCED',
+            },
+          },
+          tenantId
+        );
+      } catch {
+        // Audit log failure must not break sheets result
+      }
       return {
         synced: true,
         status: 'SYNCED',

@@ -927,7 +927,7 @@ async function runAllTests() {
 
   // 1. UUID database inserts
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const testCustomer = await db.createCustomer({ phone: '+91 91234 56789', name: 'UUID Test Customer' }, DEFAULT_TENANT_ID);
+  const testCustomer = await db.createCustomer({ tenant_id: DEFAULT_TENANT_ID, phone: '+91 91234 56789', name: 'UUID Test Customer' }, DEFAULT_TENANT_ID);
   assert(uuidRegex.test(testCustomer.id), 'REGRESSION 1: Database customer inserts use valid UUIDs');
 
   const testCall = await db.createCall({
@@ -936,12 +936,13 @@ async function runAllTests() {
     customer_id: testCustomer.id,
     started_at: new Date().toISOString(),
     duration_seconds: 45,
+    agent_version: 'v1.2',
     primary_intent: 'GENERAL',
     sentiment: 'NEUTRAL',
     outcome: 'COMPLETED',
     lead_temperature: 'COLD',
     summary: 'UUID regression test call',
-    facts: {},
+    facts: { call_id: `uuid-call-${Date.now()}` },
   }, DEFAULT_TENANT_ID);
   assert(uuidRegex.test(testCall.id), 'REGRESSION 1: Database call inserts use valid UUIDs');
 
@@ -954,21 +955,21 @@ async function runAllTests() {
 
   // 4. Production mock fallback disabled
   const prevEnv = process.env.NODE_ENV;
-  process.env.NODE_ENV = 'production';
+  (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
   let mockFallbackBlocked = false;
   try {
     assertProductionDbReady();
   } catch (err) {
     mockFallbackBlocked = err instanceof DatabaseUnavailableError;
   }
-  process.env.NODE_ENV = prevEnv;
+  (process.env as Record<string, string | undefined>).NODE_ENV = prevEnv;
   assert(mockFallbackBlocked, 'REGRESSION 4: In-memory fallback strictly disabled in production (fails closed)');
 
   // 5. Production token rejection
-  process.env.NODE_ENV = 'production';
+  (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
   const prodTestToken = await resolveAuthContext({ headers: new Headers({ authorization: 'Bearer admin-test-token' }) });
   const prodDevToken = await resolveAuthContext({ headers: new Headers({ authorization: 'Bearer dev-dispatcher-token' }) });
-  process.env.NODE_ENV = prevEnv;
+  (process.env as Record<string, string | undefined>).NODE_ENV = prevEnv;
   assert(!prodTestToken.isAuthenticated && !prodDevToken.isAuthenticated, 'REGRESSION 5: Production rejects test and dev tokens');
 
   // 6. Tenant metadata missing fails closed
@@ -978,7 +979,7 @@ async function runAllTests() {
   // 7. Cross-tenant read
   let crossTenantReadBlocked = false;
   try {
-    assertTenantAccess({ tenant_id: 'tenant-aaa', role: 'DISPATCHER', user_id: 'u1' }, 'tenant-bbb');
+    assertTenantAccess({ tenantId: 'tenant-aaa', role: 'DISPATCHER', userId: 'u1', isAuthenticated: true, source: 'SUPABASE_SESSION' }, 'tenant-bbb');
   } catch (err) {
     crossTenantReadBlocked = err instanceof AuthorizationError;
   }
@@ -1059,36 +1060,14 @@ async function runAllTests() {
   assert(existingFollowup === null || Boolean(existingFollowup.id), 'REGRESSION 15: Followup idempotency check by call ID operates reliably');
 
   // 16. Google Sheets API failure
-  const sheetsRes = await syncCallToGoogleSheets({
-    call_id: testCall.id,
-    external_call_id: testCall.external_call_id,
-    timestamp: testCall.started_at,
-    from_number: '+91 91234 56789',
-    customer_name: 'Test Customer',
-    intent: 'GENERAL',
-    summary: 'Test summary',
-    duration_seconds: 45,
-    lead_temperature: 'COLD',
-    outcome: 'COMPLETED',
-  });
+  const sheetsRes = await syncCallToGoogleSheets(testCall);
   assert(sheetsRes.status === 'UNCONFIGURED' || sheetsRes.status === 'FAILED', 'REGRESSION 16: Google Sheets without credentials returns explicit UNCONFIGURED, never fake SYNCED');
 
   // 17. Google Sheets API structure
   assert(sheetsRes.provider === 'GOOGLE_SHEETS_API_V4', 'REGRESSION 17: Google Sheets uses real API v4 client contract');
 
   // 18. Google Sheets duplicate prevention
-  const sheetsRes2 = await syncCallToGoogleSheets({
-    call_id: testCall.id,
-    external_call_id: testCall.external_call_id,
-    timestamp: testCall.started_at,
-    from_number: '+91 91234 56789',
-    customer_name: 'Test Customer',
-    intent: 'GENERAL',
-    summary: 'Test summary repeat',
-    duration_seconds: 45,
-    lead_temperature: 'COLD',
-    outcome: 'COMPLETED',
-  });
+  const sheetsRes2 = await syncCallToGoogleSheets(testCall);
   assert(sheetsRes2.synced === sheetsRes.synced, 'REGRESSION 18: Google Sheets sync prevents duplicate appends');
 
   // 19. Transfer unavailable
@@ -1141,12 +1120,12 @@ async function runAllTests() {
   assert(typeof kpis.avg_response_latency_ms === 'number' && typeof kpis.tool_success_rate_percent === 'number', 'REGRESSION 25: Telemetry KPIs are strictly computed from actual data, not hardcoded constants');
 
   // 26. Production mock detection
-  process.env.NODE_ENV = 'production';
+  (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
   const prodTracking = await dispatchTool({
     tool_name: 'get_tracking_status',
     arguments: { tracking_reference: 'LR-99214' },
   }, auth);
-  process.env.NODE_ENV = prevEnv;
+  (process.env as Record<string, string | undefined>).NODE_ENV = prevEnv;
   assert(prodTracking.status === 'PROVIDER_UNAVAILABLE', 'REGRESSION 26: Production blocks MOCK_TMS and fails closed with PROVIDER_UNAVAILABLE');
 
   console.log('\n==================================================');

@@ -1,11 +1,11 @@
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
 export function createAdminClient() {
-  const supabaseUrl = process.env.SUPABASE_URL || 'https://izfcoyyimxmcltxfopvi.supabase.co';
+  const supabaseUrl = process.env.SUPABASE_URL || '';
   const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY || '';
 
-  if (!supabaseSecretKey) {
-    console.warn('[Supabase Server] SUPABASE_SECRET_KEY is not configured.');
+  if (!supabaseSecretKey && process.env.NODE_ENV === 'production') {
+    throw new Error('[Supabase Server] SUPABASE_SECRET_KEY is required in production.');
   }
 
   return createSupabaseClient(supabaseUrl, supabaseSecretKey, {

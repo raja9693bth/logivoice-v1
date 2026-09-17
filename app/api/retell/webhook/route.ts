@@ -11,41 +11,61 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthContext } from '@/lib/auth/context';
+import { verifyRetellWebhookSignature } from '@/lib/auth/context';
 import { processPostCallPipeline } from '@/lib/pipeline/post-call';
-import { db } from '@/lib/db';
+import { db, DEFAULT_TENANT_ID } from '@/lib/db';
 import { createCorrelationContext, logTrace, logError } from '@/lib/observability/correlation';
 import { CallIntent } from '@/types/logivoice';
 
 export async function POST(req: NextRequest) {
-  const authContext = await getAuthContext(req);
-  const correlation = createCorrelationContext(authContext.tenantId, undefined, 'RETELL_WEBHOOK');
+  const correlation = createCorrelationContext(DEFAULT_TENANT_ID, undefined, 'RETELL_WEBHOOK');
 
   try {
-    const rawBody = await req.json();
+    const rawBodyText = await req.text();
+    const signature = req.headers.get('x-retell-signature');
+    const isTestBypass = process.env.NODE_ENV === 'test' && req.headers.get('x-test-bypass-sig') === 'true';
+
+    // Verify cryptographic Retell signature using the exact raw HTTP request body bytes
+    const hasValidSignature = isTestBypass || verifyRetellWebhookSignature(rawBodyText, signature);
+
+    if (!hasValidSignature && (process.env.NODE_ENV === 'production' || process.env.RETELL_API_KEY)) {
+      logError(correlation, 'RETELL_WEBHOOK_SIGNATURE_INVALID', { hasSignature: Boolean(signature) });
+      return NextResponse.json(
+        { error: 'Unauthorized: Invalid or missing X-Retell-Signature' },
+        { status: 401 }
+      );
+    }
+
+    let rawBody: any;
+    try {
+      rawBody = JSON.parse(rawBodyText);
+    } catch {
+      return NextResponse.json({ error: 'Malformed JSON payload' }, { status: 400 });
+    }
+
     const event = rawBody.event;
     const callData = rawBody.call || rawBody;
-
     const externalCallId = callData.call_id || rawBody.call_id;
 
     if (!externalCallId) {
       return NextResponse.json({ error: 'Missing call_id in webhook payload' }, { status: 400 });
     }
 
+    const tenantId = rawBody.tenant_id || callData.tenant_id || DEFAULT_TENANT_ID;
     logTrace(correlation, 'RETELL_WEBHOOK_RECEIVED', { event, external_call_id: externalCallId });
 
     // 1. Lifecycle Event: call_started
     if (event === 'call_started') {
-      const existing = await db.getCallByExternalId(externalCallId, authContext.tenantId);
+      const existing = await db.getCallByExternalId(externalCallId, tenantId);
       if (!existing) {
         let customer = callData.from_number
-          ? await db.getCustomerByPhone(callData.from_number, authContext.tenantId)
+          ? await db.getCustomerByPhone(callData.from_number, tenantId)
           : null;
 
         await db.createCall(
           {
             external_call_id: externalCallId,
-            tenant_id: authContext.tenantId,
+            tenant_id: tenantId,
             customer_id: customer ? customer.id : 'cust-unknown',
             started_at: callData.start_timestamp ? new Date(callData.start_timestamp).toISOString() : new Date().toISOString(),
             duration_seconds: 0,
@@ -57,7 +77,7 @@ export async function POST(req: NextRequest) {
             facts: { call_id: '' },
             agent_version: 'v1.0.0',
           },
-          authContext.tenantId
+          tenantId
         );
       }
 
@@ -107,7 +127,7 @@ export async function POST(req: NextRequest) {
         facts: customData.facts || {},
         is_escalated: customData.is_escalated || false,
         escalation_reason: customData.escalation_reason,
-        tenant_id: authContext.tenantId,
+        tenant_id: tenantId,
       });
 
       return NextResponse.json({

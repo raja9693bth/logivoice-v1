@@ -171,6 +171,8 @@ CREATE TABLE IF NOT EXISTS public.rate_cards (
     transit_time_hours INTEGER,
     surcharge_notes TEXT,
     source_version TEXT NOT NULL DEFAULT 'v1.0',
+    quote_type TEXT NOT NULL DEFAULT 'ESTIMATE' CHECK (quote_type IN ('ESTIMATE', 'CONFIRMED')),
+    supports_confirmed_quote BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -206,7 +208,7 @@ CREATE TABLE IF NOT EXISTS public.followups (
     call_id UUID NOT NULL REFERENCES public.calls(id) ON DELETE CASCADE,
     customer_id UUID NOT NULL REFERENCES public.customers(id) ON DELETE CASCADE,
     channel TEXT NOT NULL CHECK (channel IN ('WHATSAPP', 'SMS', 'EMAIL')),
-    status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'SENT', 'DELIVERED', 'FAILED', 'SUPPRESSED')),
+    status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'SENT', 'DELIVERED', 'FAILED', 'SUPPRESSED', 'UNCONFIGURED', 'MOCK')),
     recipient TEXT NOT NULL,
     template_id TEXT,
     message_snippet TEXT NOT NULL,
@@ -322,3 +324,39 @@ CREATE POLICY "tenant_isolation_rates" ON public.rate_cards
     FOR ALL TO authenticated
     USING (tenant_id = (current_setting('app.current_tenant_id', true))::uuid)
     WITH CHECK (tenant_id = (current_setting('app.current_tenant_id', true))::uuid);
+
+CREATE POLICY "tenant_isolation_call_facts" ON public.call_facts
+    FOR ALL TO authenticated
+    USING (tenant_id = (current_setting('app.current_tenant_id', true))::uuid)
+    WITH CHECK (tenant_id = (current_setting('app.current_tenant_id', true))::uuid);
+
+CREATE POLICY "tenant_isolation_transcript" ON public.transcript_segments
+    FOR ALL TO authenticated
+    USING (tenant_id = (current_setting('app.current_tenant_id', true))::uuid)
+    WITH CHECK (tenant_id = (current_setting('app.current_tenant_id', true))::uuid);
+
+CREATE POLICY "tenant_isolation_tracking" ON public.tracking_records
+    FOR ALL TO authenticated
+    USING (tenant_id = (current_setting('app.current_tenant_id', true))::uuid)
+    WITH CHECK (tenant_id = (current_setting('app.current_tenant_id', true))::uuid);
+
+CREATE POLICY "tenant_isolation_followups" ON public.followups
+    FOR ALL TO authenticated
+    USING (tenant_id = (current_setting('app.current_tenant_id', true))::uuid)
+    WITH CHECK (tenant_id = (current_setting('app.current_tenant_id', true))::uuid);
+
+CREATE POLICY "tenant_isolation_audit" ON public.audit_events
+    FOR ALL TO authenticated
+    USING (tenant_id = (current_setting('app.current_tenant_id', true))::uuid)
+    WITH CHECK (tenant_id = (current_setting('app.current_tenant_id', true))::uuid);
+
+CREATE POLICY "tenant_isolation_configs" ON public.client_configs
+    FOR ALL TO authenticated
+    USING (tenant_id = (current_setting('app.current_tenant_id', true))::uuid)
+    WITH CHECK (tenant_id = (current_setting('app.current_tenant_id', true))::uuid);
+
+CREATE POLICY "tenant_isolation_knowledge" ON public.knowledge_items
+    FOR ALL TO authenticated
+    USING (tenant_id = (current_setting('app.current_tenant_id', true))::uuid)
+    WITH CHECK (tenant_id = (current_setting('app.current_tenant_id', true))::uuid);
+

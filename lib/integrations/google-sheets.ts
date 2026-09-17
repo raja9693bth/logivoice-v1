@@ -30,7 +30,7 @@ export interface SheetRowData {
 
 export interface SheetSyncResult {
   synced: boolean;
-  status: 'SYNCED' | 'SKIPPED' | 'MOCK_SYNCED' | 'FAILED';
+  status: 'SYNCED' | 'SKIPPED' | 'MOCK_SYNCED' | 'FAILED' | 'UNCONFIGURED';
   spreadsheet_id?: string;
   row_index?: number;
   provider: string;
@@ -39,6 +39,10 @@ export interface SheetSyncResult {
 
 // In-memory set of synced call IDs to prevent duplicate row append
 const syncedCallIds = new Set<string>();
+
+export function resetSheetsSyncIdempotency(): void {
+  syncedCallIds.clear();
+}
 
 export async function syncCallToGoogleSheets(
   call: Call,
@@ -100,7 +104,19 @@ export async function syncCallToGoogleSheets(
     }
   }
 
-  // 2. Deterministic Development Mock Sync
+  // 2. Unconfigured credentials check
+  if (!spreadsheetId || !process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_REFRESH_TOKEN) {
+    if (process.env.NODE_ENV === 'production' || process.env.ENABLE_MOCK_INTEGRATIONS !== 'true') {
+      return {
+        synced: false,
+        status: 'UNCONFIGURED',
+        provider: 'GOOGLE_SHEETS_API_V4',
+        error: 'Google Sheets credentials not configured. Authoritative record preserved in Supabase.',
+      };
+    }
+  }
+
+  // 3. Explicit Mock Sync for development/testing
   syncedCallIds.add(call.external_call_id);
   return {
     synced: true,

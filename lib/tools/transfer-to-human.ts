@@ -19,16 +19,11 @@ export async function executeTransferToHuman(
     // Find requested or top-priority escalation contact
     const targetContact =
       contacts.find((c) => c.role.toLowerCase().includes(input.target_role.toLowerCase())) ||
-      contacts[0] || {
-        role: 'Primary Dispatcher',
-        name: 'Vikas Sharma',
-        phone: '+91 98111 22334',
-        channel: 'PHONE',
-      };
+      contacts[0];
 
     // Check if live SIP / PSTN transfer is available or if fallback callback is needed
-    // Live transfer is available when phone number is configured and within business hours
-    const isLiveTransferAvailable = Boolean(targetContact.phone);
+    // Live transfer is available only when an actual escalation contact with a phone number exists
+    const isLiveTransferAvailable = Boolean(targetContact?.phone);
 
     if (isLiveTransferAvailable) {
       // Audit log

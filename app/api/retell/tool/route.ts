@@ -6,24 +6,63 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthContext } from '@/lib/auth/context';
+import { verifyRetellWebhookSignature, AuthContext } from '@/lib/auth/context';
 import { dispatchTool } from '@/lib/tools/gateway';
+import { DEFAULT_TENANT_ID } from '@/lib/db';
 import { createCorrelationContext, logTrace, logError } from '@/lib/observability/correlation';
 
+const ALLOWED_TOOLS = [
+  'lookup_customer',
+  'get_rate_quote',
+  'get_tracking_status',
+  'create_booking_request',
+  'create_support_ticket',
+  'transfer_to_human',
+  'save_call_outcome',
+  'send_followup',
+];
+
 export async function POST(req: NextRequest) {
-  const authContext = await getAuthContext(req);
-  const correlation = createCorrelationContext(authContext.tenantId, undefined, 'RETELL_TOOL_ENDPOINT');
+  const correlation = createCorrelationContext(DEFAULT_TENANT_ID, undefined, 'RETELL_TOOL_ENDPOINT');
 
   try {
-    const body = await req.json();
+    const rawBodyText = await req.text();
+    const signature = req.headers.get('x-retell-signature');
+    const authHeader = req.headers.get('authorization');
+    const apiKey = req.headers.get('x-api-key');
+
+    const expectedKey = process.env.RETELL_API_KEY;
+    const isTestBypass = process.env.NODE_ENV === 'test' && req.headers.get('x-test-bypass-sig') === 'true';
+
+    const hasValidSignature = isTestBypass || verifyRetellWebhookSignature(rawBodyText, signature);
+    const hasValidKey =
+      Boolean(expectedKey) &&
+      (apiKey === expectedKey || authHeader?.replace('Bearer ', '').trim() === expectedKey);
+
+    if (!hasValidSignature && !hasValidKey && (process.env.NODE_ENV === 'production' || expectedKey)) {
+      logError(correlation, 'RETELL_TOOL_AUTH_FAILED', { hasSignature: Boolean(signature), hasKey: Boolean(apiKey || authHeader) });
+      return NextResponse.json(
+        { error: 'Unauthorized: Invalid or missing Retell authentication credentials' },
+        { status: 401 }
+      );
+    }
+
+    let body: any;
+    try {
+      body = JSON.parse(rawBodyText);
+    } catch {
+      return NextResponse.json({ error: 'Malformed JSON payload' }, { status: 400 });
+    }
+
     logTrace(correlation, 'RETELL_TOOL_INVOKED', { body });
 
-    // Handle both Retell payloads formats:
-    // Format A: { name: 'get_rate_quote', args: { origin: 'Delhi', destination: 'Mumbai' }, call: { call_id: '...' } }
+    // Handle both Retell payload formats:
+    // Format A: { name: 'get_rate_quote', args: { ... }, call: { call_id: '...' } }
     // Format B: { tool_name: 'get_rate_quote', arguments: { ... }, call_id: '...' }
     const toolName = body.name || body.tool_name;
     const args = body.args || body.arguments || {};
     const callId = body.call?.call_id || body.call_id;
+    const tenantId = body.tenant_id || DEFAULT_TENANT_ID;
 
     if (!toolName) {
       return NextResponse.json(
@@ -31,6 +70,23 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
+
+    // Strict allowlist: never allow arbitrary tool invocations or raw SQL
+    if (!ALLOWED_TOOLS.includes(toolName)) {
+      logError(correlation, 'UNAUTHORIZED_TOOL_REJECTED', { toolName });
+      return NextResponse.json(
+        { error: `Tool '${toolName}' is not an authorized LogiVoice tool`, allowed_tools: ALLOWED_TOOLS },
+        { status: 400 }
+      );
+    }
+
+    const authContext: AuthContext = {
+      userId: 'retell-voice-server',
+      tenantId,
+      role: 'VOICE_GATEWAY',
+      isAuthenticated: true,
+      source: hasValidSignature ? 'WEBHOOK_SIGNATURE' : 'API_TOKEN',
+    };
 
     const response = await dispatchTool(
       {

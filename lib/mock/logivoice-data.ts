@@ -623,6 +623,7 @@ export const MOCK_RATE_CARDS: RateCard[] = [
 export const MOCK_KNOWLEDGE_ITEMS: KnowledgeItem[] = [
   {
     id: 'kb-01',
+    tenant_id: '00000000-0000-0000-0000-000000000001',
     category: 'RATE_POLICY',
     title: 'Estimate vs. Confirmed Quote Guidelines',
     content: 'An estimate is an indicative reference returned for exploratory queries. A confirmed commercial quote requires explicit origin, destination, vehicle type, and cargo weight. Once confirmed, quotes remain valid for 24 hours. Agents must repeat route, weight, vehicle, and exact amount before quoting.',
@@ -632,6 +633,7 @@ export const MOCK_KNOWLEDGE_ITEMS: KnowledgeItem[] = [
   },
   {
     id: 'kb-02',
+    tenant_id: '00000000-0000-0000-0000-000000000001',
     category: 'OPERATIONAL_FAQ',
     title: 'Detention & Waiting Charges',
     content: 'Free waiting time at loading/unloading points is 4 hours for vehicles up to 5 tons, and 6 hours for multi-axle trailers. Beyond free time, detention is charged at ₹1,200 per day for small vehicles and ₹2,500 per day for trailers.',
@@ -641,6 +643,7 @@ export const MOCK_KNOWLEDGE_ITEMS: KnowledgeItem[] = [
   },
   {
     id: 'kb-03',
+    tenant_id: '00000000-0000-0000-0000-000000000001',
     category: 'SERVICE_AREA',
     title: 'North & Western Corridor Coverage Hubs',
     content: 'Primary serviceable hubs: Delhi-NCR (Sanjay Gandhi Transport Nagar, Okhla, Ghaziabad), Rajasthan (Jaipur VKI, Jodhpur, Bhiwadi), Gujarat (Ahmedabad GIDC, Surat, Vadodara), Maharashtra (Bhiwandi, Nhava Sheva, Pune Bhosari).',
@@ -650,6 +653,7 @@ export const MOCK_KNOWLEDGE_ITEMS: KnowledgeItem[] = [
   },
   {
     id: 'kb-04',
+    tenant_id: '00000000-0000-0000-0000-000000000001',
     category: 'BOOKING_RULES',
     title: 'Advance Payment & Documentation Checklist',
     content: 'Consignments require GST invoice, e-Way Bill, and consignor declaration before truck loading. For spot bookings, 20% advance is mandatory upon vehicle reporting, balance 80% on delivery proof (POD).',
@@ -659,6 +663,7 @@ export const MOCK_KNOWLEDGE_ITEMS: KnowledgeItem[] = [
   },
   {
     id: 'kb-05',
+    tenant_id: '00000000-0000-0000-0000-000000000001',
     category: 'ESCALATION_RULES',
     title: 'Immediate Human Escalation Protocol',
     content: 'Voice agent MUST transfer immediately without further questions if: 1) Caller explicitly asks for a manager or human; 2) Roadside emergency or breakdown is reported; 3) Rate cannot be calculated automatically; 4) Repeated misunderstanding occurs after 2 attempts.',

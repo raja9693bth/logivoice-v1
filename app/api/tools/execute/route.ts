@@ -2,20 +2,21 @@
  * LOGIVOICE V1 — GENERAL TOOL EXECUTION ENDPOINT
  * POST /api/tools/execute
  *
- * Secure gateway for testing, voice orchestrators, and internal integrations
- * to execute the 8 core controlled tools.
+ * Secure gateway for voice orchestrators, dispatch dashboard, and internal services.
+ * Enforces strict authentication and role authorization.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthContext } from '@/lib/auth/context';
+import { getAuthContext, requireRole, AuthorizationError } from '@/lib/auth/context';
 import { dispatchTool } from '@/lib/tools/gateway';
 import { createCorrelationContext, logTrace, logError } from '@/lib/observability/correlation';
 
 export async function POST(req: NextRequest) {
-  const authContext = await getAuthContext(req);
-  const correlation = createCorrelationContext(authContext.tenantId, undefined, 'TOOL_EXECUTE_API');
-
   try {
+    const authContext = await getAuthContext(req);
+    requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'VOICE_GATEWAY', 'SYSTEM']);
+
+    const correlation = createCorrelationContext(authContext.tenantId, undefined, 'TOOL_EXECUTE_API');
     const body = await req.json();
     const { tool_name, arguments: args, call_id } = body;
 
@@ -39,7 +40,9 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json(result);
   } catch (error) {
-    logError(correlation, 'TOOL_EXECUTE_ERROR', error);
+    if (error instanceof AuthorizationError) {
+      return NextResponse.json({ error: error.message }, { status: error.statusCode });
+    }
     return NextResponse.json(
       {
         success: false,

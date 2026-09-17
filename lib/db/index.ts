@@ -339,6 +339,8 @@ class Store {
       transit_time_hours: 48,
       surcharge_notes: 'Includes toll taxes. Loading/unloading free for first 4 hours.',
       source_version: 'v1.0',
+      supports_confirmed_quote: false,
+      quote_type: 'ESTIMATE',
     },
     {
       id: 'rc-02',
@@ -355,6 +357,8 @@ class Store {
       transit_time_hours: 36,
       surcharge_notes: 'Standard tarp cover included.',
       source_version: 'v1.0',
+      supports_confirmed_quote: false,
+      quote_type: 'ESTIMATE',
     },
     {
       id: 'rc-03',
@@ -370,6 +374,8 @@ class Store {
       status: 'ACTIVE',
       transit_time_hours: 32,
       source_version: 'v1.0',
+      supports_confirmed_quote: false,
+      quote_type: 'ESTIMATE',
     },
     {
       id: 'rc-04',
@@ -385,6 +391,8 @@ class Store {
       status: 'ACTIVE',
       transit_time_hours: 18,
       source_version: 'v1.0',
+      supports_confirmed_quote: false,
+      quote_type: 'ESTIMATE',
     },
     {
       id: 'rc-05',
@@ -400,6 +408,43 @@ class Store {
       status: 'ACTIVE',
       transit_time_hours: 8,
       source_version: 'v1.0',
+      supports_confirmed_quote: false,
+      quote_type: 'ESTIMATE',
+    },
+    {
+      id: 'rc-06',
+      tenant_id: DEFAULT_TENANT_ID,
+      origin: 'Mumbai',
+      destination: 'Pune',
+      vehicle_type: 'Tata Ace',
+      weight_min_tons: 0.5,
+      weight_max_tons: 1.5,
+      price_inr: 4500,
+      minimum_charge_inr: 4000,
+      effective_from: '2026-01-01',
+      status: 'ACTIVE',
+      transit_time_hours: 4,
+      source_version: 'v1.0',
+      supports_confirmed_quote: true,
+      quote_type: 'CONFIRMED',
+    },
+    {
+      id: 'rc-07',
+      tenant_id: DEFAULT_TENANT_ID,
+      origin: 'Delhi',
+      destination: 'Chandigarh',
+      vehicle_type: '14ft Closed',
+      weight_min_tons: 2.0,
+      weight_max_tons: 4.5,
+      price_inr: 8500,
+      minimum_charge_inr: 7500,
+      effective_from: '2024-01-01',
+      effective_to: '2024-12-31',
+      status: 'ACTIVE',
+      transit_time_hours: 6,
+      source_version: 'v0.9',
+      supports_confirmed_quote: false,
+      quote_type: 'ESTIMATE',
     },
   ];
 
@@ -436,11 +481,23 @@ class Store {
       source: 'MOCK_TMS',
       last_synced_at: new Date().toISOString(),
     },
+    {
+      id: 'trk-04',
+      tenant_id: DEFAULT_TENANT_ID,
+      tracking_reference: 'LR-66501',
+      status: 'DELAYED',
+      current_location: 'Bhiwandi Bypass, Maharashtra',
+      status_timestamp: new Date(Date.now() - 3 * 3600000).toISOString(),
+      exception_reason: 'Vehicle breakdown at Bhiwandi bypass',
+      source: 'MOCK_TMS',
+      last_synced_at: new Date().toISOString(),
+    },
   ];
 
   knowledge_items: KnowledgeItem[] = [
     {
       id: 'kb-01',
+      tenant_id: DEFAULT_TENANT_ID,
       category: 'SERVICE_AREA',
       title: 'Active Freight Corridors & Serviceable Regions',
       content: 'Apex Logistics operates scheduled full-truckload (FTL) and express part-truckload (PTL) across Delhi NCR, Mumbai, Ahmedabad, Bengaluru, Pune, and Jaipur hubs. Inbound/outbound logistics between these cities are served daily.',
@@ -450,6 +507,7 @@ class Store {
     },
     {
       id: 'kb-02',
+      tenant_id: DEFAULT_TENANT_ID,
       category: 'RATE_POLICY',
       title: 'Commercial Pricing & Surcharge Governance',
       content: 'Rates provided via phone are classified as ESTIMATE unless confirmed by the operations desk. All standard rates include highway tolls. Loading/unloading allows 4 hours free time; detention thereafter is ₹1,500/day.',
@@ -459,6 +517,7 @@ class Store {
     },
     {
       id: 'kb-03',
+      tenant_id: DEFAULT_TENANT_ID,
       category: 'BOOKING_RULES',
       title: 'Booking Notice & Vehicle Placement SLA',
       content: 'Standard vehicle placement requires 24 hours notice. Same-day urgent bookings must be locked by 12:00 PM IST. Cargo insurance copy and GST invoice are mandatory before loading.',
@@ -468,6 +527,7 @@ class Store {
     },
     {
       id: 'kb-04',
+      tenant_id: DEFAULT_TENANT_ID,
       category: 'ESCALATION_RULES',
       title: 'Human Transfer Protocol',
       content: 'When caller explicitly requests human escalation, or expresses anger/severe dissatisfaction, or has a commercial inquiry outside standard matrix, transfer context immediately to Primary Dispatcher (+91 98111 22334). If unavailable, log callback request with URGENT priority.',
@@ -477,6 +537,7 @@ class Store {
     },
     {
       id: 'kb-05',
+      tenant_id: DEFAULT_TENANT_ID,
       category: 'TRACKING_POLICY',
       title: 'Shipment Tracking & LR Verification Protocol',
       content: 'Consignment location updates are pulled from connected GPS and toll plaza FASTag checkpoints. Status is shared only for verified LR numbers or docket references. Handoff to dispatcher is triggered if delay exceeds 12 hours.',
@@ -486,6 +547,7 @@ class Store {
     },
     {
       id: 'kb-06',
+      tenant_id: DEFAULT_TENANT_ID,
       category: 'OPERATIONAL_FAQ',
       title: 'General Operations & Cargo Insurance FAQs',
       content: 'All booked freight shipments travel under carrier risk with mandatory e-way bill verification. Commercial tax invoices and transit permits must be handed to driver before vehicle departure.',
@@ -578,10 +640,39 @@ class Store {
 // Global persistent instance in Node runtime
 const globalStore = new Store();
 
+export class DatabaseUnavailableError extends Error {
+  constructor(message: string = 'Authoritative database is unavailable or remote schema pending. In-memory mock fallback is strictly disabled in production.') {
+    super(message);
+    this.name = 'DatabaseUnavailableError';
+  }
+}
+
+let simulatedDbFailure: boolean = false;
+
+export function setSimulatedDbFailure(fail: boolean) {
+  simulatedDbFailure = fail;
+}
+
+export function getRuntimeMode(): 'PRODUCTION' | 'DEVELOPMENT' | 'TEST' {
+  if (process.env.NODE_ENV === 'test') return 'TEST';
+  if (process.env.NODE_ENV === 'production') return 'PRODUCTION';
+  return 'DEVELOPMENT';
+}
+
+export function assertProductionDbReady() {
+  if (simulatedDbFailure) {
+    throw new DatabaseUnavailableError('Simulated database outage triggered.');
+  }
+  if (getRuntimeMode() === 'PRODUCTION' && process.env.ALLOW_IN_MEMORY_DEV_STORE !== 'true') {
+    throw new DatabaseUnavailableError();
+  }
+}
+
 // Helper to check whether live Supabase tables are ready to query
 let supabaseLiveStatus: boolean | null = null;
 
-async function isSupabaseLive(): Promise<boolean> {
+export async function isSupabaseLive(): Promise<boolean> {
+  if (simulatedDbFailure) return false;
   if (supabaseLiveStatus !== null) return supabaseLiveStatus;
   try {
     const client = createAdminClient();
@@ -591,7 +682,7 @@ async function isSupabaseLive(): Promise<boolean> {
       return true;
     }
   } catch {
-    // Falls back to deterministic local store
+    // Database connection or table cache issue
   }
   supabaseLiveStatus = false;
   return false;
@@ -611,6 +702,7 @@ export const db = {
       const { data, error } = await client.from('tenants').select('*').eq('id', tenantId).single();
       if (!error && data) return data;
     }
+    assertProductionDbReady();
     return { id: DEFAULT_TENANT_ID, name: 'Apex Logistics India', slug: 'apex-logistics' };
   },
 
@@ -623,6 +715,7 @@ export const db = {
       const { data, error } = await client.from('client_configs').select('*').eq('tenant_id', tenantId).single();
       if (!error && data) return data as ClientConfig;
     }
+    assertProductionDbReady();
     return globalStore.client_config;
   },
 
@@ -637,6 +730,7 @@ export const db = {
         .single();
       if (!error && data) return data as ClientConfig;
     }
+    assertProductionDbReady();
     globalStore.client_config = {
       ...globalStore.client_config,
       ...updates,
@@ -659,6 +753,7 @@ export const db = {
         .single();
       if (!error && data) return data as Customer;
     }
+    assertProductionDbReady();
     return globalStore.customers.find((c) => c.id === customerId && c.tenant_id === tenantId) || null;
   },
 
@@ -675,6 +770,7 @@ export const db = {
         .single();
       if (!error && data) return data as Customer;
     }
+    assertProductionDbReady();
     return (
       globalStore.customers.find(
         (c) => c.tenant_id === tenantId && c.phone.replace(/[\s-]/g, '').endsWith(cleanPhone.slice(-10))
@@ -702,7 +798,7 @@ export const db = {
       const { data, error } = await client.from('customers').insert([newCustomer]).select().single();
       if (!error && data) return data as Customer;
     }
-
+    assertProductionDbReady();
     globalStore.customers.push(newCustomer);
     return newCustomer;
   },
@@ -721,6 +817,7 @@ export const db = {
         .single();
       if (!error && data) return data as Call;
     }
+    assertProductionDbReady();
     const call = globalStore.calls.find((c) => c.id === callId && c.tenant_id === tenantId);
     if (!call) return null;
     const customer = globalStore.customers.find((c) => c.id === call.customer_id);
@@ -738,6 +835,7 @@ export const db = {
         .single();
       if (!error && data) return data as Call;
     }
+    assertProductionDbReady();
     const call = globalStore.calls.find((c) => c.external_call_id === externalCallId && c.tenant_id === tenantId);
     if (!call) return null;
     const customer = globalStore.customers.find((c) => c.id === call.customer_id);
@@ -756,7 +854,7 @@ export const db = {
       const { data, error } = await query;
       if (!error && data) return data as Call[];
     }
-
+    assertProductionDbReady();
     let calls = globalStore.calls.filter((c) => c.tenant_id === tenantId);
     if (filters?.intent) calls = calls.filter((c) => c.primary_intent === filters.intent);
     if (filters?.outcome) calls = calls.filter((c) => c.outcome === filters.outcome);
@@ -789,7 +887,7 @@ export const db = {
       const { data, error } = await client.from('calls').insert([newCall]).select().single();
       if (!error && data) return data as Call;
     }
-
+    assertProductionDbReady();
     globalStore.calls.unshift(newCall);
     return newCall;
   },
@@ -806,7 +904,7 @@ export const db = {
         .single();
       if (!error && data) return data as Call;
     }
-
+    assertProductionDbReady();
     const idx = globalStore.calls.findIndex((c) => c.id === callId && c.tenant_id === tenantId);
     if (idx === -1) return null;
     globalStore.calls[idx] = { ...globalStore.calls[idx], ...updates };
@@ -827,7 +925,7 @@ export const db = {
       const { data, error } = await query;
       if (!error && data) return data as Lead[];
     }
-
+    assertProductionDbReady();
     let leads = globalStore.leads.filter((l) => l.tenant_id === tenantId);
     if (filters?.temperature) leads = leads.filter((l) => l.temperature === filters.temperature);
     if (filters?.search) {
@@ -859,7 +957,7 @@ export const db = {
       const { data, error } = await client.from('leads').insert([newLead]).select().single();
       if (!error && data) return data as Lead;
     }
-
+    assertProductionDbReady();
     globalStore.leads.unshift(newLead);
     return newLead;
   },
@@ -880,7 +978,7 @@ export const db = {
       const { data, error } = await query;
       if (!error && data) return data as OperationsRequest[];
     }
-
+    assertProductionDbReady();
     let reqs = globalStore.operations_requests.filter((r) => r.tenant_id === tenantId);
     if (filters?.status) reqs = reqs.filter((r) => r.status === filters.status);
     if (filters?.priority) reqs = reqs.filter((r) => r.priority === filters.priority);
@@ -907,7 +1005,7 @@ export const db = {
       const { data, error } = await client.from('operations_requests').insert([newReq]).select().single();
       if (!error && data) return data as OperationsRequest;
     }
-
+    assertProductionDbReady();
     globalStore.operations_requests.unshift(newReq);
     return newReq;
   },
@@ -921,6 +1019,7 @@ export const db = {
       const { data, error } = await client.from('rate_cards').select('*').eq('tenant_id', tenantId);
       if (!error && data) return data as RateCard[];
     }
+    assertProductionDbReady();
     return globalStore.rate_cards.filter((rc) => rc.tenant_id === tenantId);
   },
 
@@ -975,6 +1074,7 @@ export const db = {
         .single();
       if (!error && data) return data as TrackingRecord;
     }
+    assertProductionDbReady();
     return (
       globalStore.tracking_records.find(
         (t) => t.tenant_id === tenantId && t.tracking_reference.toUpperCase() === ref
@@ -996,7 +1096,8 @@ export const db = {
       const { data, error } = await query;
       if (!error && data) return data as KnowledgeItem[];
     }
-    let items = globalStore.knowledge_items;
+    assertProductionDbReady();
+    let items = globalStore.knowledge_items.filter((k) => k.tenant_id === tenantId);
     if (category) items = items.filter((k) => k.category === category);
     return items;
   },
@@ -1034,7 +1135,7 @@ export const db = {
         },
       ]);
     }
-
+    assertProductionDbReady();
     globalStore.audit_events.unshift(newEvent);
     return newEvent;
   },
@@ -1064,6 +1165,7 @@ export const db = {
         })) as AuditEvent[];
       }
     }
+    assertProductionDbReady();
     return globalStore.audit_events.slice(0, limit);
   },
 

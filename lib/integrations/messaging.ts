@@ -1,7 +1,7 @@
 /**
  * LOGIVOICE V1 — MESSAGING PROVIDER ADAPTERS
  * Supports WhatsApp, SMS, and Email with suppression/opt-out rules
- * and deterministic mock/real provider dispatch.
+ * and explicit truth in provider statuses (SENT, UNCONFIGURED, MOCK, FAILED, OPTED_OUT).
  */
 
 export interface MessagePayload {
@@ -13,7 +13,7 @@ export interface MessagePayload {
 
 export interface MessageResult {
   success: boolean;
-  status: 'SENT' | 'DELIVERED' | 'FAILED' | 'SUPPRESSED' | 'OPTED_OUT';
+  status: 'SENT' | 'DELIVERED' | 'FAILED' | 'SUPPRESSED' | 'OPTED_OUT' | 'UNCONFIGURED' | 'MOCK';
   providerMessageId?: string;
   provider: string;
   error?: string;
@@ -85,13 +85,22 @@ export async function sendFollowupMessage(payload: MessagePayload): Promise<Mess
     }
   }
 
-  // 3. Deterministic Development Mock Adapter
-  // Used when production credentials are deployment-gated
+  // 3. Unconfigured check: Never return false 'SENT'
+  if (process.env.NODE_ENV === 'production' || process.env.ENABLE_MOCK_INTEGRATIONS !== 'true') {
+    return {
+      success: false,
+      status: 'UNCONFIGURED',
+      provider: payload.channel === 'WHATSAPP' ? 'META_WHATSAPP_CLOUD_API' : 'SMS_GATEWAY',
+      error: `${payload.channel} provider credentials not configured. Message delivery withheld.`,
+    };
+  }
+
+  // 4. Deterministic Development Mock Adapter (Explicitly gated)
   const mockMessageId = `mock-msg-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
   return {
     success: true,
-    status: 'SENT',
+    status: 'MOCK',
     providerMessageId: mockMessageId,
     provider: 'DETERMINISTIC_MOCK_ADAPTER',
   };

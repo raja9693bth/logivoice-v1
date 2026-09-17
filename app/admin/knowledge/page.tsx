@@ -92,6 +92,7 @@ export default function KnowledgeBasePage() {
     } else {
       const newItem: KnowledgeItem = {
         id: `kb-${Date.now()}`,
+        tenant_id: '00000000-0000-0000-0000-000000000001',
         category: formCategory,
         title: formTitle,
         content: formContent,

@@ -53,6 +53,10 @@ export interface PostCallResult {
 // In-memory set of processed call IDs to ensure idempotency across webhook retries
 const processedCallIds = new Set<string>();
 
+export function resetPostCallPipelineIdempotency(): void {
+  processedCallIds.clear();
+}
+
 export async function processPostCallPipeline(
   payload: PostCallPayload
 ): Promise<PostCallResult> {
@@ -228,7 +232,16 @@ export async function processPostCallPipeline(
           followup_state: {
             eligible: true,
             channel: 'WHATSAPP',
-            status: msgResult.status === 'SENT' ? 'SENT' : 'SUPPRESSED',
+            status:
+              msgResult.status === 'SENT'
+                ? 'SENT'
+                : msgResult.status === 'MOCK'
+                ? 'MOCK'
+                : msgResult.status === 'UNCONFIGURED'
+                ? 'UNCONFIGURED'
+                : msgResult.status === 'OPTED_OUT'
+                ? 'SUPPRESSED'
+                : 'FAILED',
             message_snippet: messageSnippet.slice(0, 100),
             sent_at: msgResult.status === 'SENT' ? new Date().toISOString() : undefined,
             suppression_reason: msgResult.error,

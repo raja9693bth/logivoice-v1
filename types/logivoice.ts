@@ -38,7 +38,7 @@ export type RequestType = 'BOOKING_REQUEST' | 'SUPPORT_TICKET' | 'CALLBACK_REQUE
 
 export type FollowupChannel = 'WHATSAPP' | 'SMS' | 'EMAIL';
 
-export type FollowupStatus = 'PENDING' | 'SENT' | 'DELIVERED' | 'FAILED' | 'SUPPRESSED';
+export type FollowupStatus = 'PENDING' | 'SENT' | 'DELIVERED' | 'FAILED' | 'SUPPRESSED' | 'UNCONFIGURED' | 'MOCK';
 
 export type AuditSeverity = 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
 
@@ -180,10 +180,13 @@ export interface RateCard {
   transit_time_hours?: number;
   surcharge_notes?: string;
   source_version: string;
+  quote_type?: 'ESTIMATE' | 'CONFIRMED';
+  supports_confirmed_quote?: boolean;
 }
 
 export interface KnowledgeItem {
   id: string;
+  tenant_id: string;
   category: 'RATE_POLICY' | 'TRACKING_POLICY' | 'SERVICE_AREA' | 'BOOKING_RULES' | 'OPERATIONAL_FAQ' | 'ESCALATION_RULES';
   title: string;
   content: string;

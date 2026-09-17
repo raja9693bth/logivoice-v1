@@ -49,8 +49,18 @@ export async function executeGetRateQuote(
     }
 
     // Determine whether this is an ESTIMATE or CONFIRMED QUOTE
-    // In V1 telephony, phone quotes from approved standard matrix are ESTIMATES until confirmed with pickup specs
-    const quoteType: 'ESTIMATE' | 'CONFIRMED' = vehicle_type && weight_tons ? 'CONFIRMED' : 'ESTIMATE';
+    // SSOT & Knowledge Base Rule: Standard tariff matrix rates are indicative ESTIMATES.
+    // Complete route, vehicle, and weight inputs do NOT automatically prove commercial confirmation.
+    // A quote is strictly an ESTIMATE unless the approved rate card explicitly authorizes
+    // commercial confirmation (quote_type === 'CONFIRMED' or supports_confirmed_quote === true).
+    const isExplicitlyConfirmable =
+      matchedCard.quote_type === 'CONFIRMED' || matchedCard.supports_confirmed_quote === true;
+    const quoteType: 'ESTIMATE' | 'CONFIRMED' = isExplicitlyConfirmable ? 'CONFIRMED' : 'ESTIMATE';
+
+    const statusExplanation =
+      quoteType === 'CONFIRMED'
+        ? 'Pre-authorized commercial tariff, valid for 24 hours.'
+        : 'Indicative estimate from approved tariff matrix. Formal commercial confirmation finalized upon vehicle placement.';
 
     return {
       status: 'QUOTED',
@@ -62,7 +72,7 @@ export async function executeGetRateQuote(
       vehicle_type: matchedCard.vehicle_type,
       source_version: matchedCard.source_version,
       surcharge_notes: matchedCard.surcharge_notes,
-      message: `Approved rate: ₹${matchedCard.price_inr.toLocaleString('en-IN')} (${quoteType}) for ${matchedCard.origin} to ${matchedCard.destination} via ${matchedCard.vehicle_type}.${matchedCard.transit_time_hours ? ` Estimated transit: ~${matchedCard.transit_time_hours} hours.` : ''}`,
+      message: `Approved rate: ₹${matchedCard.price_inr.toLocaleString('en-IN')} (${quoteType}) for ${matchedCard.origin} to ${matchedCard.destination} via ${matchedCard.vehicle_type}.${matchedCard.transit_time_hours ? ` Estimated transit: ~${matchedCard.transit_time_hours} hours.` : ''} ${statusExplanation}`,
     };
   } catch (error) {
     return {

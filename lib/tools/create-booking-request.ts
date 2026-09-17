@@ -3,6 +3,7 @@
  * Validated booking intake with idempotency and explicit status boundaries.
  */
 
+import crypto from 'crypto';
 import { db, DEFAULT_TENANT_ID } from '@/lib/db';
 import { CreateBookingRequestInput, CreateBookingRequestOutput } from '@/lib/schemas/tools';
 
@@ -40,10 +41,10 @@ export async function executeCreateBookingRequest(
       );
     }
 
-    // 3. Generate Reference Number
+    // 3. Collision-Safe Reference Number Generation with Crypto Entropy
     const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const randSuffix = Math.floor(1000 + Math.random() * 9000);
-    const referenceNo = `BKG-${dateStr}-${randSuffix}`;
+    const entropy = crypto.randomBytes(4).toString('hex').toUpperCase();
+    const referenceNo = `BKG-${dateStr}-${entropy}`;
 
     // 4. Determine status:
     // If confirmation is true, it is REQUEST_CREATED (pending dispatcher vehicle assignment)
@@ -77,10 +78,11 @@ export async function executeCreateBookingRequest(
       tenantId
     );
 
-    // 5. Also create or update commercial Lead record
+    // 5. Also create or update commercial Lead record (preserving call_id)
     await db.createLead(
       {
         tenant_id: tenantId,
+        call_id: input.call_id || undefined,
         customer_id: customer.id,
         customer_name: customer.name,
         phone: customer.phone,
@@ -91,7 +93,7 @@ export async function executeCreateBookingRequest(
         vehicle_type: input.vehicle_type,
         weight: input.weight,
         requirement: `Booking ${referenceNo}: ${input.material_type || 'Commercial Freight'} on ${input.pickup_date}`,
-        next_action: 'Dispatcher vehicle assignment & WhatsApp confirmation dispatch',
+        next_action: 'Operations desk review & vehicle placement confirmation',
         assigned_to: undefined,
         followup_status: 'PENDING',
         last_call_at: new Date().toISOString(),

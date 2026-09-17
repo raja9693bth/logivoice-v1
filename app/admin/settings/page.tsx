@@ -1,23 +1,32 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
-  Settings,
   Building,
-  Clock,
   Mic,
   PhoneForwarded,
   ShieldCheck,
   Save,
   CheckCircle2,
   AlertCircle,
-  Key,
   Lock,
 } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 
+type IntegrationStatus = 'VERIFIED' | 'CONFIGURED_NOT_VERIFIED' | 'UNCONFIGURED' | 'DEPLOYMENT_GATED' | 'UNAVAILABLE';
+
+interface IntegrationStatuses {
+  supabase: IntegrationStatus;
+  retell: IntegrationStatus;
+  google_sheets: IntegrationStatus;
+  messaging: IntegrationStatus;
+  telephony: IntegrationStatus;
+  tracking: IntegrationStatus;
+}
+
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<'PROFILE' | 'VOICE' | 'ESCALATION' | 'INTEGRATIONS'>('PROFILE');
+  const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -38,46 +47,118 @@ export default function SettingsPage() {
   const [voicePersona, setVoicePersona] = useState('Warm, professional Indian business voice with natural turn-taking');
   const [bargeInEnabled, setBargeInEnabled] = useState(true);
 
-  // Escalation State
-  const [primaryDispatcher, setPrimaryDispatcher] = useState('+91 98111 22334 (Vikas Sharma - Senior Fleet Desk)');
-  const [opsManager, setOpsManager] = useState('+91 98222 33445 (Rohan Verma - Hub Head)');
-  const [breakdownEmergency, setBreakdownEmergency] = useState('+91 98333 44556 (24/7 Roadside Rescue Line)');
+  // Escalation Directory State (Section 32, Section 47: Neutral non-demo names)
+  const [dispatcherName, setDispatcherName] = useState('Fleet Operations Dispatch Desk');
+  const [dispatcherPhone, setDispatcherPhone] = useState('+91 98111 00000');
+  const [opsManagerName, setOpsManagerName] = useState('Regional Operations Hub Head');
+  const [opsManagerPhone, setOpsManagerPhone] = useState('+91 98222 00000');
+  const [emergencyName, setEmergencyName] = useState('24/7 Roadside Rescue Line');
+  const [emergencyPhone, setEmergencyPhone] = useState('+91 98333 00000');
 
-  const loadSettings = () => {
-    fetch('/api/settings')
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((data) => {
-        if (data?.config) {
-          const cfg = data.config;
-          if (cfg.brand_name) setBrandName(cfg.brand_name);
-          if (cfg.business_name) setLegalName(cfg.business_name);
-          if (cfg.primary_operating_cities) setOperatingRegions(cfg.primary_operating_cities.join(', '));
-          if (cfg.ai_disclosure_wording) setDisclosureWording(cfg.ai_disclosure_wording);
+  // Integration Status State (Section 34: Truthful dynamic model)
+  const [integrationStatus, setIntegrationStatus] = useState<IntegrationStatuses>({
+    supabase: 'UNCONFIGURED',
+    retell: 'UNCONFIGURED',
+    google_sheets: 'UNCONFIGURED',
+    messaging: 'UNCONFIGURED',
+    telephony: 'DEPLOYMENT_GATED',
+    tracking: 'DEPLOYMENT_GATED',
+  });
+
+  const loadSettings = async () => {
+    try {
+      const res = await fetch('/api/settings');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      if (data?.config) {
+        const cfg = data.config;
+        if (cfg.brand_name) setBrandName(cfg.brand_name);
+        if (cfg.business_name) setLegalName(cfg.business_name);
+        if (Array.isArray(cfg.primary_operating_cities)) {
+          setOperatingRegions(cfg.primary_operating_cities.join(', '));
         }
-      })
-      .catch((err) => console.warn('[SettingsPage] API fetch error:', err));
+        if (cfg.ai_disclosure_wording) setDisclosureWording(cfg.ai_disclosure_wording);
+        if (cfg.primary_language) setPrimaryLang(cfg.primary_language);
+        if (cfg.timezone) setTimezone(cfg.timezone);
+        if (cfg.business_hours) {
+          setWorkingHours(`${cfg.business_hours.start} – ${cfg.business_hours.end} (${cfg.business_hours.days})`);
+        }
+        if (Array.isArray(cfg.escalation_contacts)) {
+          const d = cfg.escalation_contacts.find((c: { role: string }) => c.role === 'DISPATCHER');
+          if (d) {
+            setDispatcherName(d.name || 'Fleet Operations Dispatch Desk');
+            setDispatcherPhone(d.phone || '+91 98111 00000');
+          }
+          const m = cfg.escalation_contacts.find((c: { role: string }) => c.role === 'OPS_MANAGER');
+          if (m) {
+            setOpsManagerName(m.name || 'Regional Operations Hub Head');
+            setOpsManagerPhone(m.phone || '+91 98222 00000');
+          }
+          const e = cfg.escalation_contacts.find((c: { role: string }) => c.role === 'EMERGENCY');
+          if (e) {
+            setEmergencyName(e.name || '24/7 Roadside Rescue Line');
+            setEmergencyPhone(e.phone || '+91 98333 00000');
+          }
+        }
+      }
+
+      if (data?.integration_status) {
+        setIntegrationStatus(data.integration_status);
+      }
+    } catch (err) {
+      console.warn('[SettingsPage] API fetch error:', err);
+    }
   };
 
-  React.useEffect(() => {
+  useEffect(() => {
     loadSettings();
   }, []);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaveError(null);
+    setIsSaving(true);
     try {
+      const payload = {
+        brand_name: brandName,
+        business_name: legalName,
+        primary_operating_cities: operatingRegions
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+        ai_disclosure_wording: disclosureWording,
+        primary_language: primaryLang,
+        timezone: timezone.split(' ')[0] || 'Asia/Kolkata',
+        escalation_contacts: [
+          {
+            role: 'DISPATCHER',
+            name: dispatcherName,
+            phone: dispatcherPhone,
+            channel: 'PHONE',
+            priority: 1,
+          },
+          {
+            role: 'OPS_MANAGER',
+            name: opsManagerName,
+            phone: opsManagerPhone,
+            channel: 'PHONE',
+            priority: 2,
+          },
+          {
+            role: 'EMERGENCY',
+            name: emergencyName,
+            phone: emergencyPhone,
+            channel: 'PHONE',
+            priority: 3,
+          },
+        ],
+      };
+
       const res = await fetch('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          brand_name: brandName,
-          business_name: legalName,
-          primary_operating_cities: operatingRegions.split(',').map((s) => s.trim()),
-          ai_disclosure_wording: disclosureWording,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!res.ok) {
@@ -85,19 +166,47 @@ export default function SettingsPage() {
         throw new Error(data.error || `Failed to save configuration (HTTP ${res.status})`);
       }
 
-      const data = await res.json();
-      if (data?.config) {
-        if (data.config.brand_name) setBrandName(data.config.brand_name);
-        if (data.config.business_name) setLegalName(data.config.business_name);
-        if (data.config.primary_operating_cities) setOperatingRegions(data.config.primary_operating_cities.join(', '));
-        if (data.config.ai_disclosure_wording) setDisclosureWording(data.config.ai_disclosure_wording);
-      }
+      // Section 32: After save, re-fetch from server to verify actual persistence
+      await loadSettings();
 
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
     } catch (err) {
+      // Section 32: Never show success in catch; show explicit error
       setSaveError(err instanceof Error ? err.message : 'Save operation failed');
       setTimeout(() => setSaveError(null), 5000);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const renderStatusBadge = (status: IntegrationStatus) => {
+    switch (status) {
+      case 'VERIFIED':
+        return (
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-800">
+            VERIFIED
+          </span>
+        );
+      case 'CONFIGURED_NOT_VERIFIED':
+        return (
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-sky-50 dark:bg-sky-950 text-sky-700 dark:text-sky-400 border border-sky-300 dark:border-sky-800">
+            CONFIGURED (UNVERIFIED)
+          </span>
+        );
+      case 'DEPLOYMENT_GATED':
+        return (
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-400 border border-amber-300 dark:border-amber-800">
+            DEPLOYMENT-GATED
+          </span>
+        );
+      case 'UNCONFIGURED':
+      default:
+        return (
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-700">
+            UNCONFIGURED
+          </span>
+        );
     }
   };
 
@@ -119,7 +228,7 @@ export default function SettingsPage() {
         {saveSuccess && (
           <div className="px-3 py-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/80 border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 text-xs font-medium flex items-center gap-1.5 animate-in fade-in">
             <CheckCircle2 className="w-3.5 h-3.5" />
-            <span>Settings Saved Successfully</span>
+            <span>Settings Saved &amp; Verified</span>
           </div>
         )}
         {saveError && (
@@ -133,6 +242,7 @@ export default function SettingsPage() {
       {/* Tabs */}
       <div className="flex items-center gap-2 border-b border-slate-200 dark:border-slate-800 pb-2 overflow-x-auto">
         <button
+          type="button"
           onClick={() => setActiveTab('PROFILE')}
           className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 shrink-0 ${
             activeTab === 'PROFILE'
@@ -144,6 +254,7 @@ export default function SettingsPage() {
           <span>Business Profile</span>
         </button>
         <button
+          type="button"
           onClick={() => setActiveTab('VOICE')}
           className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 shrink-0 ${
             activeTab === 'VOICE'
@@ -155,6 +266,7 @@ export default function SettingsPage() {
           <span>Voice &amp; Language</span>
         </button>
         <button
+          type="button"
           onClick={() => setActiveTab('ESCALATION')}
           className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 shrink-0 ${
             activeTab === 'ESCALATION'
@@ -166,6 +278,7 @@ export default function SettingsPage() {
           <span>Escalation Directory</span>
         </button>
         <button
+          type="button"
           onClick={() => setActiveTab('INTEGRATIONS')}
           className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 shrink-0 ${
             activeTab === 'INTEGRATIONS'
@@ -212,7 +325,7 @@ export default function SettingsPage() {
                 />
               </div>
               <div>
-                <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Primary Operating Regions</label>
+                <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Primary Operating Regions (Comma Separated)</label>
                 <input
                   type="text"
                   value={operatingRegions}
@@ -319,33 +432,65 @@ export default function SettingsPage() {
             <p className="text-xs text-slate-500 dark:text-slate-400">
               Approved phone numbers for warm/cold live transfer when AI encounters high-risk or roadside breakdown scenarios
             </p>
-            <div className="space-y-3 text-xs">
-              <div>
-                <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Primary Operations Dispatcher</label>
-                <input
-                  type="text"
-                  value={primaryDispatcher}
-                  onChange={(e) => setPrimaryDispatcher(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
-                />
+            <div className="space-y-4 text-xs">
+              <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2">
+                <div className="font-medium text-slate-800 dark:text-slate-200">Primary Operations Dispatcher</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <input
+                    type="text"
+                    placeholder="Contact Title/Name"
+                    value={dispatcherName}
+                    onChange={(e) => setDispatcherName(e.target.value)}
+                    className="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded p-1.5 text-slate-900 dark:text-white"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Phone (+91...)"
+                    value={dispatcherPhone}
+                    onChange={(e) => setDispatcherPhone(e.target.value)}
+                    className="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded p-1.5 text-slate-900 dark:text-white"
+                  />
+                </div>
               </div>
-              <div>
-                <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Hub Operations Manager</label>
-                <input
-                  type="text"
-                  value={opsManager}
-                  onChange={(e) => setOpsManager(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
-                />
+
+              <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2">
+                <div className="font-medium text-slate-800 dark:text-slate-200">Hub Operations Manager</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <input
+                    type="text"
+                    placeholder="Contact Title/Name"
+                    value={opsManagerName}
+                    onChange={(e) => setOpsManagerName(e.target.value)}
+                    className="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded p-1.5 text-slate-900 dark:text-white"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Phone (+91...)"
+                    value={opsManagerPhone}
+                    onChange={(e) => setOpsManagerPhone(e.target.value)}
+                    className="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded p-1.5 text-slate-900 dark:text-white"
+                  />
+                </div>
               </div>
-              <div>
-                <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Roadside Emergency &amp; Breakdown Line</label>
-                <input
-                  type="text"
-                  value={breakdownEmergency}
-                  onChange={(e) => setBreakdownEmergency(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
-                />
+
+              <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2">
+                <div className="font-medium text-slate-800 dark:text-slate-200">Roadside Emergency &amp; Breakdown Line</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <input
+                    type="text"
+                    placeholder="Contact Title/Name"
+                    value={emergencyName}
+                    onChange={(e) => setEmergencyName(e.target.value)}
+                    className="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded p-1.5 text-slate-900 dark:text-white"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Phone (+91...)"
+                    value={emergencyPhone}
+                    onChange={(e) => setEmergencyPhone(e.target.value)}
+                    className="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded p-1.5 text-slate-900 dark:text-white"
+                  />
+                </div>
               </div>
             </div>
           </Card>
@@ -371,45 +516,55 @@ export default function SettingsPage() {
               <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2 shadow-xs">
                 <div className="flex justify-between items-center">
                   <span className="font-semibold text-slate-900 dark:text-white">Retell AI Voice Gateway</span>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-800">
-                    CONNECTED
-                  </span>
+                  {renderStatusBadge(integrationStatus.retell)}
                 </div>
                 <p className="text-slate-600 dark:text-slate-400 text-[11px]">Primary voice streaming, real-time audio pipeline, bilingual Hindi/English.</p>
-                <div className="text-slate-500 font-mono text-[10px]">Configured in .env.local (RETELL_API_KEY)</div>
+                <div className="text-slate-500 font-mono text-[10px]">Authoritative Retell Agent ID mapped server-side</div>
               </div>
 
               <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2 shadow-xs">
                 <div className="flex justify-between items-center">
                   <span className="font-semibold text-slate-900 dark:text-white">Supabase PostgreSQL</span>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-800">
-                    CONFIGURED
-                  </span>
+                  {renderStatusBadge(integrationStatus.supabase)}
                 </div>
                 <p className="text-slate-600 dark:text-slate-400 text-[11px]">Master operational database, tenant isolation &amp; RLS policies.</p>
-                <div className="text-slate-500 font-mono text-[10px]">SUPABASE_URL &amp; SUPABASE_SECRET_KEY verified</div>
+                <div className="text-slate-500 font-mono text-[10px]">Validated through live Supabase connectivity health check</div>
               </div>
 
               <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2 shadow-xs">
                 <div className="flex justify-between items-center">
                   <span className="font-semibold text-slate-900 dark:text-white">India Telephony (TRAI 1601 series)</span>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-400 border border-amber-300 dark:border-amber-800">
-                    DEPLOYMENT-GATED
-                  </span>
+                  {renderStatusBadge(integrationStatus.telephony)}
                 </div>
                 <p className="text-slate-600 dark:text-slate-400 text-[11px]">TRAI logistics numbering direction compliance &amp; Indian SIP bridge.</p>
-                <div className="text-slate-500 font-mono text-[10px]">Mock mode active for development &amp; scripted testing</div>
+                <div className="text-slate-500 font-mono text-[10px]">Live telephony transfer gating active</div>
               </div>
 
               <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2 shadow-xs">
                 <div className="flex justify-between items-center">
                   <span className="font-semibold text-slate-900 dark:text-white">Google Sheets Operations Sync</span>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-700">
-                    GATED
-                  </span>
+                  {renderStatusBadge(integrationStatus.google_sheets)}
                 </div>
                 <p className="text-slate-600 dark:text-slate-400 text-[11px]">Automatic append of call summaries and quotes to client spreadsheets.</p>
-                <div className="text-slate-500 font-mono text-[10px]">GOOGLE_SHEETS_SPREADSHEET_ID placeholder ready</div>
+                <div className="text-slate-500 font-mono text-[10px]">Approved tenant spreadsheet configuration required</div>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2 shadow-xs">
+                <div className="flex justify-between items-center">
+                  <span className="font-semibold text-slate-900 dark:text-white">WhatsApp &amp; SMS Messaging</span>
+                  {renderStatusBadge(integrationStatus.messaging)}
+                </div>
+                <p className="text-slate-600 dark:text-slate-400 text-[11px]">Post-call confirmation and quotes via WhatsApp Cloud API / Twilio.</p>
+                <div className="text-slate-500 font-mono text-[10px]">Strict E.164 normalization &amp; suppression handling</div>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2 shadow-xs">
+                <div className="flex justify-between items-center">
+                  <span className="font-semibold text-slate-900 dark:text-white">Live Consignment Tracking</span>
+                  {renderStatusBadge(integrationStatus.tracking)}
+                </div>
+                <p className="text-slate-600 dark:text-slate-400 text-[11px]">Enterprise TMS &amp; GPS tracking provider integration.</p>
+                <div className="text-slate-500 font-mono text-[10px]">Mock sources blocked in production</div>
               </div>
             </div>
           </Card>
@@ -419,10 +574,11 @@ export default function SettingsPage() {
         <div className="flex justify-end pt-2">
           <button
             type="submit"
-            className="px-5 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold tracking-wide transition-colors flex items-center gap-1.5 shadow-xs"
+            disabled={isSaving}
+            className="px-5 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold tracking-wide transition-colors flex items-center gap-1.5 shadow-xs disabled:opacity-50 cursor-pointer"
           >
             <Save className="w-4 h-4" />
-            <span>Save Configuration</span>
+            <span>{isSaving ? 'Saving...' : 'Save Configuration'}</span>
           </button>
         </div>
       </form>

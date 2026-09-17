@@ -85,6 +85,11 @@ export default function DashboardPage() {
       setLeads(fetchedLeads);
 
       // Compute authoritative KPIs dynamically from live data
+      const todayDateStr = new Date().toISOString().slice(0, 10);
+      const callsTodayCount = fetchedCalls.filter(
+        (c) => (c.started_at || '').slice(0, 10) === todayDateStr
+      ).length;
+
       const missed = fetchedCalls.filter((c) => c.outcome === 'MISSED' || c.outcome === 'FAILED').length;
       const escalated = fetchedCalls.filter(
         (c) => c.outcome === 'TRANSFERRED' || c.escalation_status?.is_escalated
@@ -101,8 +106,8 @@ export default function DashboardPage() {
       const avgDurationSec = fetchedCalls.length > 0 ? Math.round(totalDuration / fetchedCalls.length) : 0;
 
       setKpis({
-        calls_today: fetchedCalls.length,
-        calls_trend: fetchedCalls.length > 0 ? `${fetchedCalls.length} recorded` : 'No calls',
+        calls_today: callsTodayCount,
+        calls_trend: '',
         missed_calls: missed,
         escalated_calls: escalated,
         open_requests: openReqs,
@@ -190,9 +195,9 @@ export default function DashboardPage() {
         <BentoCard
           title="Missed Calls"
           value={isLoading ? '...' : kpis?.missed_calls ?? 0}
-          subtitle="100% answered"
-          badgeText="Zero Missed"
-          badgeVariant="success"
+          subtitle={(kpis?.missed_calls ?? 0) > 0 ? 'Requires attention' : 'No missed calls'}
+          badgeText={(kpis?.missed_calls ?? 0) > 0 ? `${kpis?.missed_calls} Missed` : 'Zero Missed'}
+          badgeVariant={(kpis?.missed_calls ?? 0) > 0 ? 'danger' : 'success'}
           icon={PhoneOff}
         />
         <BentoCard

@@ -22,13 +22,15 @@ export async function executeGetRateQuote(
       };
     }
 
-    // Lookup in approved active rate cards
+    // Lookup in approved active rate cards with pickup_date
     const matchedCard = await db.findApprovedRate(
       {
         origin,
         destination,
         vehicleType: vehicle_type,
         weightTons: weight_tons,
+        date: input.pickup_date,
+        includeExpired: true,
       },
       tenantId
     );
@@ -40,11 +42,12 @@ export async function executeGetRateQuote(
       };
     }
 
-    // Check expiry
-    if (matchedCard.effective_to && new Date(matchedCard.effective_to) < new Date()) {
+    // Check expiry against requested pickup date
+    const targetDate = input.pickup_date ? new Date(input.pickup_date) : new Date();
+    if (matchedCard.effective_to && new Date(matchedCard.effective_to) < targetDate) {
       return {
         status: 'EXPIRED',
-        message: `The rate card for ${matchedCard.origin} to ${matchedCard.destination} has expired. Please connect to a human dispatcher.`,
+        message: `The rate card for ${matchedCard.origin} to ${matchedCard.destination} has expired for requested pickup date ${input.pickup_date || 'today'}. Please connect to a human dispatcher.`,
       };
     }
 

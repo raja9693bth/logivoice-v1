@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthContext, requireRole, AuthorizationError } from '@/lib/auth/context';
 import { db } from '@/lib/db';
 import { RequestStatus, RequestPriority, RequestType } from '@/types/logivoice';
-import { CreateRequestApiSchema, UpdateRequestApiSchema } from '@/lib/schemas/api';
+import { CreateRequestApiSchema, UpdateRequestApiSchema, ListRequestsQuerySchema } from '@/lib/schemas/api';
 
 export async function GET(req: NextRequest) {
   try {
@@ -10,14 +10,28 @@ export async function GET(req: NextRequest) {
     requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'SYSTEM']);
 
     const { searchParams } = new URL(req.url);
-    const status = searchParams.get('status') as RequestStatus | null;
-    const priority = searchParams.get('priority') as RequestPriority | null;
-    const type = searchParams.get('type') as RequestType | null;
+    const rawQuery = {
+      status: searchParams.get('status') || undefined,
+      priority: searchParams.get('priority') || undefined,
+      type: searchParams.get('type') || undefined,
+      limit: searchParams.get('limit') || undefined,
+      offset: searchParams.get('offset') || undefined,
+    };
+
+    const parsedQuery = ListRequestsQuerySchema.safeParse(rawQuery);
+    if (!parsedQuery.success) {
+      return NextResponse.json(
+        { error: 'Invalid query parameters', details: parsedQuery.error.flatten() },
+        { status: 400 }
+      );
+    }
+
+    const { status, priority, type } = parsedQuery.data;
 
     const requests = await db.listRequests(authContext.tenantId, {
-      status: status || undefined,
-      priority: priority || undefined,
-      type: type || undefined,
+      status,
+      priority,
+      type,
     });
 
     return NextResponse.json({ requests });

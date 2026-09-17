@@ -55,21 +55,48 @@ export interface PostCallResult {
 
 // In-memory set of processed call IDs to ensure idempotency across webhook retries
 const processedCallIds = new Set<string>();
+const inFlightPipelines = new Map<string, Promise<PostCallResult>>();
 
 export function resetPostCallPipelineIdempotency(): void {
   processedCallIds.clear();
+  inFlightPipelines.clear();
 }
 
 export async function processPostCallPipeline(
   payload: PostCallPayload
 ): Promise<PostCallResult> {
   const tenantId = payload.tenant_id || DEFAULT_TENANT_ID;
+  const flightKey = `${tenantId}:${payload.external_call_id}`;
+
+  const existingFlight = inFlightPipelines.get(flightKey);
+  if (existingFlight) {
+    return existingFlight;
+  }
+
+  const execution = executePostCallPipeline(payload, tenantId);
+  inFlightPipelines.set(flightKey, execution);
+  try {
+    const result = await execution;
+    return result;
+  } finally {
+    inFlightPipelines.delete(flightKey);
+  }
+}
+
+async function executePostCallPipeline(
+  payload: PostCallPayload,
+  tenantId: string
+): Promise<PostCallResult> {
   const correlation = createCorrelationContext(tenantId, undefined, 'POST_CALL_PIPELINE');
   logTrace(correlation, 'POST_CALL_STARTED', { external_call_id: payload.external_call_id });
 
   // 1. Idempotency Check: Prevent duplicate pipeline execution (Durable DB + In-Memory)
+  // Only terminal follow-up states (SENT, DELIVERED, SUPPRESSED, OPTED_OUT, SKIPPED_NOT_ELIGIBLE) block retry
+  const TERMINAL_FOLLOWUP_STATUSES = ['SENT', 'DELIVERED', 'SUPPRESSED', 'OPTED_OUT', 'SKIPPED_NOT_ELIGIBLE'];
   const existing = await db.getCallByExternalId(payload.external_call_id, tenantId);
-  if (existing && (processedCallIds.has(payload.external_call_id) || (existing.outcome !== 'IN_PROGRESS' && existing.followup_state))) {
+  const isTerminal = existing?.followup_state && TERMINAL_FOLLOWUP_STATUSES.includes(existing.followup_state.status);
+
+  if (existing && (processedCallIds.has(payload.external_call_id) || (existing.outcome !== 'IN_PROGRESS' && isTerminal))) {
     logTrace(correlation, 'POST_CALL_IDEMPOTENT_SKIP', { external_call_id: payload.external_call_id });
     return {
       success: true,
@@ -264,22 +291,38 @@ export async function processPostCallPipeline(
 
         followupStatus = mappedStatus;
 
-        // Persist follow-up to authoritative followups table
-        await db.createFollowup(
-          {
-            tenant_id: tenantId,
-            call_id: call.id,
-            customer_id: customer?.id,
-            channel: 'WHATSAPP',
-            status: mappedStatus,
-            recipient: customer.phone,
-            message_content: messageSnippet,
-            provider_message_id: msgResult.providerMessageId,
-            suppression_reason: msgResult.error,
-            sent_at: mappedStatus === 'SENT' ? new Date().toISOString() : undefined,
-          },
-          tenantId
-        );
+        // Persist or update follow-up in authoritative followups table
+        const existingFollowup = await db.getFollowupByCallId(call.id, tenantId);
+        if (existingFollowup) {
+          await db.updateFollowup(
+            existingFollowup.id,
+            {
+              status: mappedStatus,
+              recipient: customer.phone,
+              message_content: messageSnippet,
+              provider_message_id: msgResult.providerMessageId,
+              suppression_reason: msgResult.error,
+              sent_at: mappedStatus === 'SENT' ? new Date().toISOString() : undefined,
+            },
+            tenantId
+          );
+        } else {
+          await db.createFollowup(
+            {
+              tenant_id: tenantId,
+              call_id: call.id,
+              customer_id: customer?.id,
+              channel: 'WHATSAPP',
+              status: mappedStatus,
+              recipient: customer.phone,
+              message_content: messageSnippet,
+              provider_message_id: msgResult.providerMessageId,
+              suppression_reason: msgResult.error,
+              sent_at: mappedStatus === 'SENT' ? new Date().toISOString() : undefined,
+            },
+            tenantId
+          );
+        }
 
         await db.updateCall(
           call.id,
@@ -302,20 +345,34 @@ export async function processPostCallPipeline(
           ? 'Caller phone number missing'
           : 'Lead temperature / intent not eligible for automated messaging';
 
-        // Persist suppression state to followups table
-        await db.createFollowup(
-          {
-            tenant_id: tenantId,
-            call_id: call.id,
-            customer_id: customer?.id,
-            channel: 'WHATSAPP',
-            status: 'SUPPRESSED',
-            recipient: customer?.phone || 'NO_PHONE',
-            message_content: '',
-            suppression_reason: suppressionReason,
-          },
-          tenantId
-        );
+        // Persist or update suppression state in followups table without synthetic recipient
+        const existingFollowup = await db.getFollowupByCallId(call.id, tenantId);
+        if (existingFollowup) {
+          await db.updateFollowup(
+            existingFollowup.id,
+            {
+              status: 'SUPPRESSED',
+              recipient: customer?.phone || '',
+              message_content: '',
+              suppression_reason: suppressionReason,
+            },
+            tenantId
+          );
+        } else {
+          await db.createFollowup(
+            {
+              tenant_id: tenantId,
+              call_id: call.id,
+              customer_id: customer?.id,
+              channel: 'WHATSAPP',
+              status: 'SUPPRESSED',
+              recipient: customer?.phone || '',
+              message_content: '',
+              suppression_reason: suppressionReason,
+            },
+            tenantId
+          );
+        }
 
         await db.updateCall(
           call.id,
@@ -331,8 +388,10 @@ export async function processPostCallPipeline(
       }
     }
 
-    // 9. Mark call as processed in idempotency set
-    processedCallIds.add(payload.external_call_id);
+    // 9. Mark call as processed in idempotency set if reached terminal outcome or terminal followup
+    if (TERMINAL_FOLLOWUP_STATUSES.includes(followupStatus)) {
+      processedCallIds.add(payload.external_call_id);
+    }
 
     // 10. Persist Pipeline Audit Log
     await db.logAuditEvent(

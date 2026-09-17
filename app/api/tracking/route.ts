@@ -22,6 +22,17 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    if (process.env.NODE_ENV === 'production' && record.source === 'MOCK_TMS') {
+      return NextResponse.json(
+        {
+          found: false,
+          status: 'PROVIDER_UNAVAILABLE',
+          error: 'Live TMS provider integration is unconfigured in production environment.',
+        },
+        { status: 503 }
+      );
+    }
+
     return NextResponse.json({ found: true, record });
   } catch (error) {
     if (error instanceof AuthorizationError) {

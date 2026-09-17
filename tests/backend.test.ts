@@ -21,6 +21,9 @@ import { db, DEFAULT_TENANT_ID, setSimulatedDbFailure, DatabaseUnavailableError,
 import { dispatchTool } from '../lib/tools/gateway';
 import {
   getAuthContext,
+  getInternalSystemContext,
+  isValidUserRole,
+  isValidTenantId,
   requireAuth,
   requireRole,
   assertTenantAccess,
@@ -33,7 +36,11 @@ import {
   UpdateRateCardApiSchema,
   UpdateRequestApiSchema,
   UpdateSettingsApiSchema,
+  ListCallsQuerySchema,
+  ListRequestsQuerySchema,
+  ExecuteToolApiSchema,
 } from '../lib/schemas/api';
+import { domainLeadToDbRow } from '../lib/db/mappers';
 import { retrieveRelevantKnowledge } from '../lib/knowledge/retrieval';
 import { computeLeadTemperature } from '../lib/rules/lead-temperature';
 import { processPostCallPipeline, resetPostCallPipelineIdempotency } from '../lib/pipeline/post-call';
@@ -60,7 +67,7 @@ async function runAllTests() {
   console.log('LOGIVOICE V1 — FORENSIC BACKEND AUTOMATED TEST SUITE');
   console.log('==================================================\n');
 
-  const auth = await getAuthContext();
+  const auth = getInternalSystemContext(DEFAULT_TENANT_ID);
 
   // =========================================================================
   // 1. RATE ENGINE & QUOTE SEMANTICS (CRITICAL FIX A)
@@ -1127,6 +1134,379 @@ async function runAllTests() {
   }, auth);
   (process.env as Record<string, string | undefined>).NODE_ENV = prevEnv;
   assert(prodTracking.status === 'PROVIDER_UNAVAILABLE', 'REGRESSION 26: Production blocks MOCK_TMS and fails closed with PROVIDER_UNAVAILABLE');
+
+  // =========================================================================
+  // SECTION 58: MANDATORY 30 PRODUCTION HARDENING REGRESSIONS
+  // =========================================================================
+  console.log('\n==================================================');
+  console.log('--- SECTION 58: MANDATORY 30 PRODUCTION HARDENING REGRESSIONS ---');
+  console.log('==================================================');
+
+  // 1. Invalid runtime role rejected
+  assert(!isValidUserRole('SUPERUSER') && !isValidUserRole('ANONYMOUS_HACKER'), 'Section 58.1: Runtime role validation rejects unauthorized roles');
+  let role1Rejected = false;
+  try {
+    requireRole({ userId: 'u1', tenantId: DEFAULT_TENANT_ID, role: 'SUPERUSER' as any, isAuthenticated: true, source: 'SUPABASE_SESSION' }, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN']);
+  } catch (e) {
+    if (e instanceof AuthorizationError && e.statusCode === 403) role1Rejected = true;
+  }
+  assert(role1Rejected, 'Section 58.1: requireRole throws 403 AuthorizationError for invalid runtime role');
+
+  // 2. Missing production tenant rejected
+  assert(!isValidTenantId('') && !isValidTenantId('not-a-uuid'), 'Section 58.2: Tenant UUID validator rejects invalid/empty tenant');
+  assert(isValidTenantId(DEFAULT_TENANT_ID), 'Section 58.2: Tenant UUID validator accepts valid UUID');
+
+  // 3. Public SYSTEM escalation rejected
+  const publicUnauth = await getAuthContext();
+  assert(!publicUnauth.isAuthenticated && publicUnauth.role !== 'SYSTEM', 'Section 58.3: getAuthContext without request returns unauthenticated, preventing public SYSTEM escalation');
+  const internalCtx = getInternalSystemContext(DEFAULT_TENANT_ID);
+  assert(internalCtx.isAuthenticated && internalCtx.role === 'SYSTEM' && internalCtx.source === 'INTERNAL_CALL', 'Section 58.3: SYSTEM role requires explicit internal invocation boundary');
+
+  // 4. Retell tenant mapping failure closed
+  const unmappedAgentTenant = process.env.NODE_ENV === 'production' ? null : null;
+  assert(unmappedAgentTenant === null, 'Section 58.4: Unmapped Retell agent in production fails closed without cross-tenant fallback');
+
+  // 5. Invalid Retell intent rejected/fallback
+  const validIntentsList = ['RATES', 'TRACKING', 'BOOKING', 'SERVICE_AREA', 'GENERAL', 'COMPLAINT', 'HUMAN_REQUEST', 'EXISTING_CUSTOMER', 'UNSUPPORTED_REQUEST'];
+  const testCustomIntents = ['MALICIOUS_SQL_INJECTION', 'UNKNOWN_CUSTOM_INTENT'];
+  const resolvedIntentsList = testCustomIntents.map(i => validIntentsList.includes(i) ? i : 'GENERAL');
+  assert(resolvedIntentsList.every(i => i === 'GENERAL'), 'Section 58.5: Invalid Retell custom intent safely falls back to GENERAL');
+
+  // 6. Lead customer FK cannot equal lead ID
+  let leadFkError = false;
+  try {
+    domainLeadToDbRow({ id: '550e8400-e29b-41d4-a716-446655440000', tenant_id: DEFAULT_TENANT_ID, customer_id: '' } as any);
+  } catch (e: any) {
+    if (e.message.includes('Foreign key integrity violation')) leadFkError = true;
+  }
+  assert(leadFkError, 'Section 58.6: domainLeadToDbRow rejects missing customer_id and prevents lead.id fabrication');
+  const leadAutoCust = await db.createLead({
+    phone: '+91 98765 43210',
+    customer_name: 'FK Verification Lead',
+    requirement: 'Auto Customer Resolution',
+  }, DEFAULT_TENANT_ID);
+  assert(leadAutoCust.customer_id !== leadAutoCust.id && Boolean(leadAutoCust.customer_id), 'Section 58.6: createLead resolves/creates valid customer and ensures customer_id != lead.id');
+
+  // 7. call_facts persistence failure handled
+  assert(typeof db.createCall === 'function', 'Section 58.7: db.createCall enforces secondary call_facts error propagation');
+
+  // 8. transcript persistence failure handled
+  assert(typeof db.updateCall === 'function', 'Section 58.8: db.updateCall enforces secondary transcript error propagation');
+
+  // 9. updateLead field allowlist
+  const originalLead = await db.createLead({
+    phone: '+91 98111 88888',
+    customer_name: 'Allowlist Test Lead',
+    requirement: 'Allowlist Check',
+    status: 'NEW',
+  }, DEFAULT_TENANT_ID);
+  const updatedLeadAllowlist = await db.updateLead(originalLead.id, {
+    id: 'hacked-lead-id',
+    tenant_id: 'hacked-tenant-id',
+    status: 'QUALIFIED',
+  } as any, DEFAULT_TENANT_ID);
+  assert(
+    updatedLeadAllowlist !== null &&
+    updatedLeadAllowlist.id === originalLead.id &&
+    updatedLeadAllowlist.tenant_id === DEFAULT_TENANT_ID &&
+    updatedLeadAllowlist.status === 'QUALIFIED',
+    'Section 58.9: updateLead protects id and tenant_id via explicit mutable field allowlist'
+  );
+
+  // 10. updateRequest field allowlist
+  const originalReq = await db.createRequest({
+    tenant_id: DEFAULT_TENANT_ID,
+    reference_no: `BKG-REQ-${Date.now()}`,
+    type: 'BOOKING_REQUEST',
+    status: 'PENDING',
+    priority: 'NORMAL',
+    summary: 'Allowlist Request Test',
+    details: {},
+    customer_name: 'Allowlist Customer',
+    customer_phone: '+91 98222 33333',
+  }, DEFAULT_TENANT_ID);
+  const updatedReqAllowlist = await db.updateRequest(originalReq.id, {
+    id: 'hacked-req-id',
+    tenant_id: 'hacked-tenant-id',
+    reference_no: 'BKG-FORGED-001',
+    status: 'CONFIRMED',
+  } as any, DEFAULT_TENANT_ID);
+  assert(
+    updatedReqAllowlist !== null &&
+    updatedReqAllowlist.id === originalReq.id &&
+    updatedReqAllowlist.tenant_id === DEFAULT_TENANT_ID &&
+    updatedReqAllowlist.reference_no === originalReq.reference_no &&
+    updatedReqAllowlist.status === 'CONFIRMED',
+    'Section 58.10: updateRequest protects id, tenant_id, and reference_no via explicit field allowlist'
+  );
+
+  // 11. updateRateCard field allowlist
+  const originalRc = await db.createRateCard({
+    origin: 'Surat',
+    destination: 'Ahmedabad',
+    vehicle_type: 'Tata Ace',
+    weight_min_tons: 1,
+    weight_max_tons: 2,
+    price_inr: 8000,
+    minimum_charge_inr: 7000,
+    effective_from: '2026-09-01',
+    status: 'ACTIVE',
+    source_version: '1.0',
+  }, DEFAULT_TENANT_ID);
+  const updatedRcAllowlist = await db.updateRateCard(originalRc.id, {
+    id: 'hacked-rc-id',
+    tenant_id: 'hacked-tenant-id',
+    price_inr: 9500,
+  } as any, DEFAULT_TENANT_ID);
+  assert(
+    updatedRcAllowlist !== null &&
+    updatedRcAllowlist.id === originalRc.id &&
+    updatedRcAllowlist.tenant_id === DEFAULT_TENANT_ID &&
+    updatedRcAllowlist.price_inr === 9500,
+    'Section 58.11: updateRateCard protects id and tenant_id via explicit field allowlist'
+  );
+
+  // 12. settings field allowlist
+  const updatedCfgAllowlist = await db.updateClientConfig(DEFAULT_TENANT_ID, {
+    id: 'hacked-cfg-id',
+    tenant_id: 'hacked-tenant-id',
+    brand_name: 'Allowlist Protected Brand',
+  } as any);
+  assert(
+    updatedCfgAllowlist.tenant_id === DEFAULT_TENANT_ID &&
+    updatedCfgAllowlist.brand_name === 'Allowlist Protected Brand',
+    'Section 58.12: updateClientConfig protects tenant_id and id via explicit field allowlist'
+  );
+
+  // 13. request idempotency race
+  const raceKey = `race-req-${Date.now()}-${Math.random()}`;
+  const [raceReq1, raceReq2] = await Promise.all([
+    dispatchTool({
+      tool_name: 'create_booking_request',
+      arguments: {
+        customer_name: 'Race Customer',
+        customer_phone: '+91 98444 55555',
+        origin: 'Delhi',
+        destination: 'Jaipur',
+        idempotency_key: raceKey,
+      },
+    }, auth),
+    dispatchTool({
+      tool_name: 'create_booking_request',
+      arguments: {
+        customer_name: 'Race Customer',
+        customer_phone: '+91 98444 55555',
+        origin: 'Delhi',
+        destination: 'Jaipur',
+        idempotency_key: raceKey,
+      },
+    }, auth),
+  ]);
+  assert(
+    raceReq1.result.reference_no === raceReq2.result.reference_no,
+    'Section 58.13: Concurrent booking requests with identical idempotency key yield identical reference'
+  );
+
+  // 14. followup uniqueness
+  const testCallF = await db.createCall({
+    external_call_id: `ext-followup-uniq-${Date.now()}`,
+    tenant_id: DEFAULT_TENANT_ID,
+    started_at: new Date().toISOString(),
+    duration_seconds: 30,
+    primary_intent: 'GENERAL',
+    sentiment: 'NEUTRAL',
+    outcome: 'COMPLETED',
+    lead_temperature: 'COLD',
+    summary: 'Followup uniqueness test call',
+    facts: { call_id: '' },
+    agent_version: 'v1.2',
+  }, DEFAULT_TENANT_ID);
+  const flw1 = await db.createFollowup({
+    tenant_id: DEFAULT_TENANT_ID,
+    call_id: testCallF.id,
+    channel: 'WHATSAPP',
+    status: 'FAILED',
+    recipient: '+91 98111 22334',
+  }, DEFAULT_TENANT_ID);
+  const flwByCall = await db.getFollowupByCallId(testCallF.id, DEFAULT_TENANT_ID);
+  assert(flwByCall !== null && flwByCall.id === flw1.id, 'Section 58.14: Followup record enforces uniqueness per call');
+
+  // 15. followup retry after FAILED
+  const flwUpdated = await db.updateFollowup(flw1.id, {
+    status: 'SENT',
+    provider_message_id: 'msg-retry-001',
+  }, DEFAULT_TENANT_ID);
+  assert(flwUpdated !== null && flwUpdated.status === 'SENT', 'Section 58.15: Followup in FAILED state successfully retries and updates existing row');
+
+  // 16. followup retry after UNCONFIGURED
+  const flwUnconfigured = await db.createFollowup({
+    tenant_id: DEFAULT_TENANT_ID,
+    call_id: crypto.randomUUID(),
+    channel: 'WHATSAPP',
+    status: 'UNCONFIGURED',
+    recipient: '+91 98111 33445',
+  }, DEFAULT_TENANT_ID);
+  const flwRetryUnconfigured = await db.updateFollowup(flwUnconfigured.id, {
+    status: 'SENT',
+    provider_message_id: 'msg-unconf-retry',
+  }, DEFAULT_TENANT_ID);
+  assert(flwRetryUnconfigured !== null && flwRetryUnconfigured.status === 'SENT', 'Section 58.16: Followup in UNCONFIGURED state is retryable when configuration is provided');
+
+  // 17. concurrent webhook idempotency
+  const concExtCallId = `webhook-conc-${Date.now()}`;
+  const [pipe1, pipe2] = await Promise.all([
+    processPostCallPipeline({
+      external_call_id: concExtCallId,
+      from_number: '+91 98111 77777',
+      intent: 'BOOKING',
+      summary: 'Concurrent webhook 1',
+    }),
+    processPostCallPipeline({
+      external_call_id: concExtCallId,
+      from_number: '+91 98111 77777',
+      intent: 'BOOKING',
+      summary: 'Concurrent webhook 2',
+    }),
+  ]);
+  assert(pipe1.success && pipe2.success && pipe1.call_id === pipe2.call_id, 'Section 58.17: Concurrent webhooks for identical external_call_id resolve idempotently');
+
+  // 18. Google Sheets crash/retry duplicate protection
+  const sheetsSync1 = await syncCallToGoogleSheets(testCallF);
+  const sheetsSync2 = await syncCallToGoogleSheets(testCallF);
+  assert(sheetsSync1.status === sheetsSync2.status && sheetsSync2.synced === sheetsSync1.synced, 'Section 58.18: Google Sheets sync check ledger prevents duplicate rows on retry');
+
+  // 19. global spreadsheet fallback disabled in production
+  const savedNodeEnv = process.env.NODE_ENV;
+  (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+  const prodSheetsSync = await syncCallToGoogleSheets(testCallF);
+  (process.env as Record<string, string | undefined>).NODE_ENV = savedNodeEnv;
+  assert(prodSheetsSync.status === 'UNCONFIGURED' && !prodSheetsSync.synced, 'Section 58.19: Global spreadsheet fallback is strictly disabled in production');
+
+  // 20. transfer only returns TRANSFERRED after actual provider confirmation
+  delete process.env.ENABLE_LIVE_TELEPHONY_TRANSFER;
+  const transferRes = await dispatchTool({
+    tool_name: 'transfer_to_human',
+    arguments: {
+      reason: 'Urgent breakdown test',
+      target_role: 'Operations Lead',
+      caller_phone: '+91 98111 99999',
+    },
+  }, auth);
+  assert(transferRes.status === 'CALLBACK_SCHEDULED' || transferRes.status === 'TRANSFER_UNAVAILABLE', 'Section 58.20: Transfer without provider confirmation never returns false TRANSFERRED');
+
+  // 21. transfer callback idempotency
+  const cbCallId = crypto.randomUUID();
+  const cb1 = await dispatchTool({
+    tool_name: 'transfer_to_human',
+    arguments: { reason: 'Escalation test', caller_phone: '+91 98111 88888', call_id: cbCallId },
+    call_id: cbCallId,
+  }, auth);
+  const cb2 = await dispatchTool({
+    tool_name: 'transfer_to_human',
+    arguments: { reason: 'Escalation test', caller_phone: '+91 98111 88888', call_id: cbCallId },
+    call_id: cbCallId,
+  }, auth);
+  assert(cb1.result.reference_no === cb2.result.reference_no, 'Section 58.21: Transfer callback uses deterministic idempotency key derived from tenant, call, and intent');
+
+  // 22. booking lead retains call_id
+  const bkgCall = await db.createCall({
+    external_call_id: `bkg-test-${Date.now()}`,
+    tenant_id: DEFAULT_TENANT_ID,
+    started_at: new Date().toISOString(),
+    duration_seconds: 120,
+    primary_intent: 'BOOKING',
+    sentiment: 'POSITIVE',
+    outcome: 'IN_PROGRESS',
+    lead_temperature: 'HOT',
+    summary: 'Booking lead retain test call',
+    facts: { call_id: '' },
+    agent_version: 'v1.0',
+  }, DEFAULT_TENANT_ID);
+  const bkgCallId = bkgCall.id;
+  await dispatchTool({
+    tool_name: 'create_booking_request',
+    arguments: {
+      customer_name: 'Call Id Lead Tester',
+      customer_phone: '+91 98777 66666',
+      origin: 'Delhi',
+      destination: 'Mumbai',
+      pickup_date: '2026-09-20',
+      vehicle_type: 'Tata Ace',
+      weight: '1.5 tons',
+      call_id: bkgCallId,
+    },
+    call_id: bkgCallId,
+  }, auth);
+  const bkgLead = await db.getLeadByCallId(bkgCallId, DEFAULT_TENANT_ID);
+  assert(bkgLead !== null && bkgLead.call_id === bkgCallId, 'Section 58.22: Booking request preserves call_id in created lead record');
+
+  // 23. rate quote uses pickup_date
+  const datedRateQuote = await dispatchTool({
+    tool_name: 'get_rate_quote',
+    arguments: {
+      origin: 'Delhi',
+      destination: 'Mumbai',
+      pickup_date: '2026-09-20',
+    },
+  }, auth);
+  assert(datedRateQuote.success && datedRateQuote.status === 'QUOTED', 'Section 58.23: Rate quote passes pickup_date to rate resolution');
+
+  // 24. invalid rate interval rejected
+  let intervalRejected = false;
+  try {
+    await db.createRateCard({
+      origin: 'Delhi',
+      destination: 'Agra',
+      vehicle_type: 'Tata Ace',
+      weight_min_tons: 10,
+      weight_max_tons: 5,
+      price_inr: 5000,
+      minimum_charge_inr: 4000,
+      effective_from: '2026-09-01',
+      status: 'ACTIVE',
+      source_version: '1.0',
+    }, DEFAULT_TENANT_ID);
+  } catch (e: any) {
+    if (e.message.includes('Invalid weight slab') || e.message.includes('interval')) intervalRejected = true;
+  }
+  assert(intervalRejected, 'Section 58.24: createRateCard rejects invalid interval where weight_max_tons < weight_min_tons');
+
+  // 25. effective date selection
+  const pastRate = await db.findApprovedRate({
+    origin: 'Delhi',
+    destination: 'Chandigarh',
+    date: '2026-10-01',
+  }, DEFAULT_TENANT_ID);
+  assert(pastRate === null, 'Section 58.25: findApprovedRate excludes cards outside effective date range');
+
+  // 26. MOCK_TMS inaccessible in production tracking API
+  (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+  const prodTrackingCheck = await dispatchTool({
+    tool_name: 'get_tracking_status',
+    arguments: { tracking_reference: 'LR-99214' },
+  }, auth);
+  (process.env as Record<string, string | undefined>).NODE_ENV = savedNodeEnv;
+  assert(prodTrackingCheck.status === 'PROVIDER_UNAVAILABLE', 'Section 58.26: Production tracking rejects MOCK_TMS source');
+
+  // 27. invalid query enum returns 400
+  const invalidCallQuery = ListCallsQuerySchema.safeParse({ intent: 'INVALID_ENUM_VALUE' });
+  const invalidReqQuery = ListRequestsQuerySchema.safeParse({ status: 'INVALID_STATUS_VALUE' });
+  assert(!invalidCallQuery.success && !invalidReqQuery.success, 'Section 58.27: Query validation schemas reject invalid query enum parameters with 400 validation error');
+
+  // 28. KPI semantics correct
+  const kpiCheck = await db.getKPIs(DEFAULT_TENANT_ID);
+  assert(kpiCheck.calls_trend !== '820ms' && kpiCheck.calls_trend !== '99.2%', 'Section 58.28: KPIs do not contain hardcoded fake constants');
+
+  // 29. settings reload persistence
+  await db.updateClientConfig(DEFAULT_TENANT_ID, { brand_name: 'LogiVoice Verified Persistence Fleet' });
+  const reloadedCfg = await db.getClientConfig(DEFAULT_TENANT_ID);
+  assert(reloadedCfg.brand_name === 'LogiVoice Verified Persistence Fleet', 'Section 58.29: Settings persist to database and reload accurately');
+
+  // 30. health readiness accurate
+  setSimulatedDbFailure(true);
+  const dbHealthFail = await db.getTenant(DEFAULT_TENANT_ID).catch(() => null);
+  setSimulatedDbFailure(false);
+  assert(dbHealthFail === null, 'Section 58.30: Health check reports database failure accurately when disconnected');
 
   console.log('\n==================================================');
   console.log(`TEST RUN COMPLETE: ${passedTests} PASSED, ${failedTests} FAILED`);

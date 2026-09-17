@@ -10,6 +10,21 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthContext, requireRole, AuthorizationError } from '@/lib/auth/context';
 import { dispatchTool } from '@/lib/tools/gateway';
 import { createCorrelationContext, logTrace } from '@/lib/observability/correlation';
+import { ExecuteToolApiSchema } from '@/lib/schemas/api';
+
+function redactToolArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const redacted: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (typeof v === 'string' && (k.toLowerCase().includes('phone') || k.toLowerCase().includes('number'))) {
+      redacted[k] = v.length > 5 ? `${v.slice(0, 3)}****${v.slice(-2)}` : '***';
+    } else if (k.toLowerCase().includes('token') || k.toLowerCase().includes('secret') || k.toLowerCase().includes('key') || k.toLowerCase().includes('password')) {
+      redacted[k] = '[REDACTED]';
+    } else {
+      redacted[k] = v;
+    }
+  }
+  return redacted;
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -18,40 +33,33 @@ export async function POST(req: NextRequest) {
 
     const correlation = createCorrelationContext(authContext.tenantId, undefined, 'TOOL_EXECUTE_API');
 
-    let body: any;
+    let body: unknown;
     try {
       body = await req.json();
     } catch {
       return NextResponse.json({ error: 'Malformed JSON payload' }, { status: 400 });
     }
 
-    if (!body || typeof body !== 'object') {
-      return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
-    }
-
-    const { tool_name, arguments: args, call_id } = body;
-
-    if (!tool_name || typeof tool_name !== 'string') {
+    const parseResult = ExecuteToolApiSchema.safeParse(body);
+    if (!parseResult.success) {
       return NextResponse.json(
-        { error: 'Missing or invalid required field: tool_name' },
+        { error: 'Invalid tool execution payload', details: parseResult.error.flatten() },
         { status: 400 }
       );
     }
 
-    if (args && (typeof args !== 'object' || Array.isArray(args))) {
-      return NextResponse.json(
-        { error: 'Invalid arguments field: must be a JSON object' },
-        { status: 400 }
-      );
-    }
+    const { tool_name, arguments: args, call_id } = parseResult.data;
 
-    logTrace(correlation, 'TOOL_EXECUTE_CALLED', { tool_name, args });
+    logTrace(correlation, 'TOOL_EXECUTE_CALLED', {
+      tool_name,
+      args: redactToolArgs(args),
+    });
 
     const result = await dispatchTool(
       {
         tool_name,
-        arguments: args || {},
-        call_id: typeof call_id === 'string' ? call_id : undefined,
+        arguments: args,
+        call_id,
       },
       authContext
     );

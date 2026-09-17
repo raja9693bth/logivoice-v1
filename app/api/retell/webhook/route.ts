@@ -63,16 +63,28 @@ export async function POST(req: NextRequest) {
     }
 
     // Resolve tenant ID securely from trusted server mapping in production
-    let tenantId = DEFAULT_TENANT_ID;
-    if (process.env.NODE_ENV === 'production') {
-      const agentId = callData.agent_id || rawBody.agent_id;
-      const configuredAgentId = process.env.RETELL_AGENT_ID;
+    let tenantId: string;
+    const isProduction = process.env.NODE_ENV === 'production';
+    const agentId = callData.agent_id || rawBody.agent_id;
+    const configuredAgentId = process.env.RETELL_AGENT_ID;
+
+    if (isProduction) {
+      // 1. Unknown / unmapped Retell agent identifier: reject with 400
       if (configuredAgentId && agentId && agentId !== configuredAgentId) {
         logError(correlation, 'RETELL_UNKNOWN_AGENT_ID', { agentId });
-        return NextResponse.json({ error: 'Unknown agent identifier for tenant' }, { status: 400 });
+        return NextResponse.json({ error: 'Unknown or unmapped Retell agent identifier for tenant' }, { status: 400 });
       }
-      // Production tenant resolution
-      tenantId = process.env.AUTHORITATIVE_TENANT_ID || DEFAULT_TENANT_ID;
+
+      // 2. Production tenant resolution MUST come from authoritative server mapping
+      const authoritativeTenantId = process.env.AUTHORITATIVE_TENANT_ID;
+      if (!authoritativeTenantId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(authoritativeTenantId)) {
+        logError(correlation, 'PRODUCTION_TENANT_MAPPING_MISSING', {});
+        return NextResponse.json(
+          { error: 'Authoritative tenant mapping missing or invalid in production configuration' },
+          { status: 403 }
+        );
+      }
+      tenantId = authoritativeTenantId;
     } else {
       tenantId = rawBody.tenant_id || callData.tenant_id || DEFAULT_TENANT_ID;
     }
@@ -118,10 +130,11 @@ export async function POST(req: NextRequest) {
       else if (rawSentiment?.includes('ang')) sentiment = 'ANGRY';
       else if (rawSentiment?.includes('frust')) sentiment = 'FRUSTRATED';
 
-      // Map intent from call_analysis or custom fields
+      // Map intent from call_analysis or custom fields with runtime schema validation
+      const VALID_INTENTS: CallIntent[] = ['RATE_QUOTE', 'TRACKING', 'BOOKING', 'COMPLAINT', 'HUMAN_REQUEST', 'GENERAL'];
       let intent: CallIntent = 'GENERAL';
       const customData = callData.custom_analysis_data || {};
-      if (customData.intent) {
+      if (customData.intent && typeof customData.intent === 'string' && VALID_INTENTS.includes(customData.intent as CallIntent)) {
         intent = customData.intent as CallIntent;
       } else if (callData.call_analysis?.call_summary) {
         const sum = callData.call_analysis.call_summary.toLowerCase();

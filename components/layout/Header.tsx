@@ -15,13 +15,13 @@ interface HeaderProps {
 }
 
 export function Header({
-  userEmail = 'Authenticated Dispatcher',
-  userRole = 'LogiVoice Operations',
+  userEmail,
+  userRole,
 }: HeaderProps) {
   const router = useRouter();
   const { toggleMobile } = useSidebar();
-  const [displayEmail, setDisplayEmail] = useState(userEmail);
-  const [displayRole, setDisplayRole] = useState(userRole);
+  const [displayEmail, setDisplayEmail] = useState(userEmail || 'Loading...');
+  const [displayRole, setDisplayRole] = useState(userRole || 'Operations Desk');
   const [urgentCount, setUrgentCount] = useState(0);
   const [isSigningOut, setIsSigningOut] = useState(false);
 
@@ -31,14 +31,17 @@ export function Header({
       supabase.auth.getUser().then(({ data: { user } }) => {
         if (user) {
           if (user.email) setDisplayEmail(user.email);
-          const role = user.app_metadata?.role;
+          const role = user.app_metadata?.role || user.user_metadata?.role;
           if (role === 'ADMIN') setDisplayRole('Platform Administrator');
           else if (role === 'OPS_MANAGER') setDisplayRole('Operations Hub Head');
-          else if (role === 'DISPATCHER') setDisplayRole('Senior Fleet Dispatcher');
+          else if (role === 'DISPATCHER') setDisplayRole('Fleet Operations Dispatcher');
+          else setDisplayRole('Operations Portal');
+        } else if (!userEmail) {
+          setDisplayEmail('Operations Desk');
         }
       });
     } catch {
-      // Keep defaults
+      if (!userEmail) setDisplayEmail('Operations Desk');
     }
 
     // Fetch actual pending urgent requests for truthful alert notification

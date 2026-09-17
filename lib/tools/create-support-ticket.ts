@@ -3,6 +3,7 @@
  * Support ticket intake with automatic priority ranking and audit logging.
  */
 
+import crypto from 'crypto';
 import { db, DEFAULT_TENANT_ID } from '@/lib/db';
 import { CreateSupportTicketInput, CreateSupportTicketOutput } from '@/lib/schemas/tools';
 
@@ -40,8 +41,8 @@ export async function executeCreateSupportTicket(
     }
 
     const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const randSuffix = Math.floor(1000 + Math.random() * 9000);
-    const referenceNo = `TCK-${dateStr}-${randSuffix}`;
+    const entropy = crypto.randomBytes(4).toString('hex').toUpperCase();
+    const referenceNo = `TCK-${dateStr}-${entropy}`;
 
     const newTicket = await db.createRequest(
       {

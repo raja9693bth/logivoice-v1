@@ -300,10 +300,13 @@ export function domainLeadToDbRow(
   lead: Partial<Lead> & { id: string; tenant_id: string }
 ): LeadsDbRow {
   const now = new Date().toISOString();
+  if (!lead.customer_id) {
+    throw new Error('Foreign key integrity violation: Lead record must have a valid customer_id pointing to a customer.');
+  }
   return {
     id: lead.id,
     tenant_id: lead.tenant_id,
-    customer_id: lead.customer_id || lead.id,
+    customer_id: lead.customer_id,
     call_id: lead.call_id && !lead.call_id.startsWith('call-') ? lead.call_id : null,
     source: lead.source || 'INBOUND_CALL',
     status: lead.status || 'NEW',

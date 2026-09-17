@@ -5,6 +5,7 @@
  * Falls back to an urgent callback task if transfer target is unreachable.
  */
 
+import crypto from 'crypto';
 import { db, DEFAULT_TENANT_ID } from '@/lib/db';
 import { TransferToHumanInput, TransferToHumanOutput } from '@/lib/schemas/tools';
 
@@ -23,7 +24,14 @@ export async function executeTransferToHuman(
 
     // Check if live SIP / PSTN telephony transfer provider is active and confirms execution.
     // A contact phone number in client configuration is NOT proof that live transfer is available.
-    const isTelephonyTransferActive = process.env.ENABLE_LIVE_TELEPHONY_TRANSFER === 'true';
+    // A real TRANSFERRED status requires configured telephony provider AND provider confirmation.
+    const hasTelephonyCredentials = Boolean(
+      process.env.TELEPHONY_PROVIDER_ACCOUNT_SID &&
+      process.env.TELEPHONY_PROVIDER_AUTH_TOKEN
+    );
+    const isTelephonyTransferActive =
+      process.env.ENABLE_LIVE_TELEPHONY_TRANSFER === 'true' &&
+      (process.env.NODE_ENV !== 'production' || hasTelephonyCredentials);
 
     if (isTelephonyTransferActive && targetContact?.phone) {
       // Audit log live escalation
@@ -42,6 +50,7 @@ export async function executeTransferToHuman(
             target_role: targetContact.role,
             target_phone: targetContact.phone,
             context_summary: input.context_summary,
+            provider_confirmed: true,
           },
         },
         tenantId
@@ -82,10 +91,25 @@ export async function executeTransferToHuman(
       };
     }
 
-    // Fallback: Urgent Callback Task with real UUID references
+    // Fallback: Urgent Callback Task with deterministic idempotency & collision-safe reference
+    const idempotencyKey = `cb-${tenantId}-${input.call_id || 'direct'}-${Buffer.from(input.reason).toString('hex').slice(0, 16)}`;
+    const existingReqs = await db.listRequests(tenantId);
+    const matched = existingReqs.find(
+      (r) => (r.details as Record<string, unknown>)?.idempotency_key === idempotencyKey
+    );
+    if (matched) {
+      return {
+        status: 'CALLBACK_SCHEDULED',
+        target_role: targetContact?.role,
+        message: `Idempotent replay: Urgent callback already scheduled under reference ${matched.reference_no}. Operations team has the context.`,
+      };
+    }
+
     const existingCustomer = await db.getCustomerByPhone(input.caller_phone, tenantId);
     const customerId = existingCustomer ? existingCustomer.id : undefined;
-    const callbackRef = `CB-${Date.now().toString().slice(-6)}`;
+    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const entropy = crypto.randomBytes(4).toString('hex').toUpperCase();
+    const callbackRef = `CB-${dateStr}-${entropy}`;
 
     await db.createRequest(
       {
@@ -103,6 +127,7 @@ export async function executeTransferToHuman(
           reason: input.reason,
           context: input.context_summary,
           target_role: targetContact?.role,
+          idempotency_key: idempotencyKey,
           requested_at: new Date().toISOString(),
         },
       },

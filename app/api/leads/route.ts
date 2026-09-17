@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthContext, requireRole, AuthorizationError } from '@/lib/auth/context';
 import { db } from '@/lib/db';
 import { LeadTemperature } from '@/types/logivoice';
-import { CreateLeadApiSchema, UpdateLeadApiSchema } from '@/lib/schemas/api';
+import { CreateLeadApiSchema, UpdateLeadApiSchema, ListLeadsQuerySchema } from '@/lib/schemas/api';
 
 export async function GET(req: NextRequest) {
   try {
@@ -10,11 +10,26 @@ export async function GET(req: NextRequest) {
     requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'SYSTEM']);
 
     const { searchParams } = new URL(req.url);
-    const temperature = searchParams.get('temperature') as LeadTemperature | null;
-    const search = searchParams.get('search') || undefined;
+    const rawQuery = {
+      temperature: searchParams.get('temperature') || undefined,
+      status: searchParams.get('status') || undefined,
+      search: searchParams.get('search') || undefined,
+      limit: searchParams.get('limit') || undefined,
+      offset: searchParams.get('offset') || undefined,
+    };
+
+    const parsedQuery = ListLeadsQuerySchema.safeParse(rawQuery);
+    if (!parsedQuery.success) {
+      return NextResponse.json(
+        { error: 'Invalid query parameters', details: parsedQuery.error.flatten() },
+        { status: 400 }
+      );
+    }
+
+    const { temperature, search } = parsedQuery.data;
 
     const leads = await db.listLeads(authContext.tenantId, {
-      temperature: temperature || undefined,
+      temperature,
       search,
     });
 

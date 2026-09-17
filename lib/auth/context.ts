@@ -24,7 +24,7 @@ export interface AuthContext {
   tenantId: string;
   role: UserRole;
   isAuthenticated: boolean;
-  source: 'SUPABASE_SESSION' | 'API_TOKEN' | 'WEBHOOK_SIGNATURE' | 'DEV_SESSION' | 'UNAUTHENTICATED';
+  source: 'SUPABASE_SESSION' | 'API_TOKEN' | 'WEBHOOK_SIGNATURE' | 'DEV_SESSION' | 'INTERNAL_CALL' | 'UNAUTHENTICATED';
 }
 
 export class AuthorizationError extends Error {
@@ -55,6 +55,32 @@ export function verifyRetellWebhookSignature(rawBody: string, signature: string 
   }
 }
 
+// Role and Tenant UUID Validators (Section 3)
+export const ALLOWED_USER_ROLES: UserRole[] = ['DISPATCHER', 'OPS_MANAGER', 'ADMIN'];
+export const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isValidUserRole(role: unknown): role is 'DISPATCHER' | 'OPS_MANAGER' | 'ADMIN' {
+  return typeof role === 'string' && ALLOWED_USER_ROLES.includes(role as UserRole);
+}
+
+export function isValidTenantId(tenantId: unknown): boolean {
+  return typeof tenantId === 'string' && UUID_REGEX.test(tenantId);
+}
+
+/**
+ * Explicit internal-only system invocation boundary.
+ * Never reachable from a public HTTP request. Must be called explicitly by background scripts or workers.
+ */
+export function getInternalSystemContext(tenantId: string = DEFAULT_TENANT_ID): AuthContext {
+  return {
+    userId: 'system',
+    tenantId,
+    role: 'SYSTEM',
+    isAuthenticated: true,
+    source: 'INTERNAL_CALL',
+  };
+}
+
 /**
  * Resolves the authenticated user, role, and tenant context from a Next.js request.
  * Strictly enforces that client-controlled headers cannot escalate privileges or override tenant boundaries.
@@ -65,22 +91,14 @@ export async function getAuthContext(
   const isProduction = process.env.NODE_ENV === 'production';
 
   if (!req) {
-    // Server-internal invocation (background worker or script)
-    if (isProduction) {
-      return {
-        userId: 'system',
-        tenantId: DEFAULT_TENANT_ID,
-        role: 'SYSTEM',
-        isAuthenticated: true,
-        source: 'API_TOKEN',
-      };
-    }
+    // Calling getAuthContext without an explicit Request NEVER yields SYSTEM privileges.
+    // Any public or uncontrolled route invocation omitting req fails closed as unauthenticated.
     return {
-      userId: 'dispatcher-local-01',
-      tenantId: DEFAULT_TENANT_ID,
+      userId: 'anonymous',
+      tenantId: '',
       role: 'DISPATCHER',
-      isAuthenticated: true,
-      source: 'DEV_SESSION',
+      isAuthenticated: false,
+      source: 'UNAUTHENTICATED',
     };
   }
 
@@ -152,11 +170,12 @@ export async function getAuthContext(
       const { data: { user }, error } = await client.auth.getUser(token);
       if (!error && user) {
         const metadataTenant = user.app_metadata?.tenant_id as string | undefined;
-        const metadataRole = user.app_metadata?.role as UserRole | undefined;
+        const metadataRole = user.app_metadata?.role as unknown;
 
-        // In production, user MUST have explicit tenant_id and supported role in server-validated app_metadata
-        if (isProduction && (!metadataTenant || !metadataRole)) {
-          console.warn('[AuthContext] Production user rejected: missing tenant_id or role in app_metadata');
+        // Strict runtime validation: Role MUST be in ALLOWED_USER_ROLES
+        // SYSTEM and VOICE_GATEWAY can NEVER be granted via user metadata
+        if (!isValidUserRole(metadataRole)) {
+          console.warn('[AuthContext] Rejected user with invalid or forbidden role metadata:', metadataRole);
           return {
             userId: user.id,
             tenantId: '',
@@ -166,8 +185,23 @@ export async function getAuthContext(
           };
         }
 
+        // In production, tenant_id is strictly required and must be a valid UUID
+        // NEVER silently fall back to DEFAULT_TENANT_ID for a production user
+        if (isProduction || metadataTenant) {
+          if (!isValidTenantId(metadataTenant)) {
+            console.warn('[AuthContext] Rejected user with invalid or missing tenant UUID in metadata:', metadataTenant);
+            return {
+              userId: user.id,
+              tenantId: '',
+              role: 'DISPATCHER',
+              isAuthenticated: false,
+              source: 'UNAUTHENTICATED',
+            };
+          }
+        }
+
         const tenantId = metadataTenant || DEFAULT_TENANT_ID;
-        const role = metadataRole || 'DISPATCHER';
+        const role = metadataRole;
         return {
           userId: user.id,
           tenantId,
@@ -200,10 +234,10 @@ export async function getAuthContext(
       const { data: { user }, error } = await supabase.auth.getUser();
       if (!error && user) {
         const metadataTenant = user.app_metadata?.tenant_id as string | undefined;
-        const metadataRole = user.app_metadata?.role as UserRole | undefined;
+        const metadataRole = user.app_metadata?.role as unknown;
 
-        if (isProduction && (!metadataTenant || !metadataRole)) {
-          console.warn('[AuthContext] Production cookie session rejected: missing tenant_id or role in app_metadata');
+        if (!isValidUserRole(metadataRole)) {
+          console.warn('[AuthContext] Rejected cookie session with invalid role metadata:', metadataRole);
           return {
             userId: user.id,
             tenantId: '',
@@ -213,8 +247,21 @@ export async function getAuthContext(
           };
         }
 
+        if (isProduction || metadataTenant) {
+          if (!isValidTenantId(metadataTenant)) {
+            console.warn('[AuthContext] Rejected cookie session with invalid tenant UUID in metadata:', metadataTenant);
+            return {
+              userId: user.id,
+              tenantId: '',
+              role: 'DISPATCHER',
+              isAuthenticated: false,
+              source: 'UNAUTHENTICATED',
+            };
+          }
+        }
+
         const tenantId = metadataTenant || DEFAULT_TENANT_ID;
-        const role = metadataRole || 'DISPATCHER';
+        const role = metadataRole;
         return {
           userId: user.id,
           tenantId,

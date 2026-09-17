@@ -2,8 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthContext, requireRole, AuthorizationError } from '@/lib/auth/context';
 import { db } from '@/lib/db';
 import { retrieveRelevantKnowledge } from '@/lib/knowledge/retrieval';
-import { CallIntent, KnowledgeItem } from '@/types/logivoice';
-import { CreateKnowledgeApiSchema, UpdateKnowledgeApiSchema } from '@/lib/schemas/api';
+import { CreateKnowledgeApiSchema, UpdateKnowledgeApiSchema, ListKnowledgeQuerySchema } from '@/lib/schemas/api';
 
 export async function GET(req: NextRequest) {
   try {
@@ -11,8 +10,20 @@ export async function GET(req: NextRequest) {
     requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'SYSTEM', 'VOICE_GATEWAY']);
 
     const { searchParams } = new URL(req.url);
-    const intent = searchParams.get('intent') as CallIntent | null;
-    const category = searchParams.get('category') as KnowledgeItem['category'] | null;
+    const rawQuery = {
+      intent: searchParams.get('intent') || undefined,
+      category: searchParams.get('category') || undefined,
+    };
+
+    const parsedQuery = ListKnowledgeQuerySchema.safeParse(rawQuery);
+    if (!parsedQuery.success) {
+      return NextResponse.json(
+        { error: 'Invalid query parameters', details: parsedQuery.error.flatten() },
+        { status: 400 }
+      );
+    }
+
+    const { intent, category } = parsedQuery.data;
 
     // Dynamic intent-specific retrieval
     if (intent) {

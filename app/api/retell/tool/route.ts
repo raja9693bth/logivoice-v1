@@ -56,8 +56,21 @@ export async function POST(req: NextRequest) {
 
     const toolName = body.name || body.tool_name;
     const args = body.args || body.arguments || {};
-    const callId = body.call?.call_id || body.call_id;
-    const tenantId = (process.env.NODE_ENV === 'production' && process.env.AUTHORITATIVE_TENANT_ID) || body.tenant_id || DEFAULT_TENANT_ID;
+    const callId = body.call_id || body.callId || args.call_id;
+    let tenantId: string;
+    if (process.env.NODE_ENV === 'production') {
+      const authTenant = process.env.AUTHORITATIVE_TENANT_ID;
+      if (!authTenant || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(authTenant)) {
+        logError(correlation, 'PRODUCTION_TOOL_TENANT_MISSING', {});
+        return NextResponse.json(
+          { error: 'Authoritative tenant mapping missing or invalid in production configuration' },
+          { status: 403 }
+        );
+      }
+      tenantId = authTenant;
+    } else {
+      tenantId = body.tenant_id || DEFAULT_TENANT_ID;
+    }
 
     logTrace(correlation, 'RETELL_TOOL_INVOKED', { toolName, callId });
 

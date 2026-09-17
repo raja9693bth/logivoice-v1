@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthContext, requireRole, AuthorizationError } from '@/lib/auth/context';
 import { db } from '@/lib/db';
 import { CallIntent, CallOutcome } from '@/types/logivoice';
-import { CreateCallApiSchema } from '@/lib/schemas/api';
+import { CreateCallApiSchema, ListCallsQuerySchema } from '@/lib/schemas/api';
 
 export async function GET(req: NextRequest) {
   try {
@@ -10,13 +10,27 @@ export async function GET(req: NextRequest) {
     requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'SYSTEM']);
 
     const { searchParams } = new URL(req.url);
-    const intent = searchParams.get('intent') as CallIntent | null;
-    const outcome = searchParams.get('outcome') as CallOutcome | null;
-    const search = searchParams.get('search') || undefined;
+    const rawQuery = {
+      intent: searchParams.get('intent') || undefined,
+      outcome: searchParams.get('outcome') || undefined,
+      search: searchParams.get('search') || undefined,
+      limit: searchParams.get('limit') || undefined,
+      offset: searchParams.get('offset') || undefined,
+    };
+
+    const parsedQuery = ListCallsQuerySchema.safeParse(rawQuery);
+    if (!parsedQuery.success) {
+      return NextResponse.json(
+        { error: 'Invalid query parameters', details: parsedQuery.error.flatten() },
+        { status: 400 }
+      );
+    }
+
+    const { intent, outcome, search } = parsedQuery.data;
 
     const calls = await db.listCalls(authContext.tenantId, {
-      intent: intent || undefined,
-      outcome: outcome || undefined,
+      intent,
+      outcome,
       search,
     });
 

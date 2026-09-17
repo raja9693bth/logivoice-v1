@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthContext, requireRole, AuthorizationError } from '@/lib/auth/context';
 import { db } from '@/lib/db';
-import { CreateRateCardApiSchema, UpdateRateCardApiSchema } from '@/lib/schemas/api';
+import { CreateRateCardApiSchema, UpdateRateCardApiSchema, GetRateQuoteQuerySchema } from '@/lib/schemas/api';
 
 export async function GET(req: NextRequest) {
   try {
@@ -9,11 +9,23 @@ export async function GET(req: NextRequest) {
     requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'SYSTEM', 'VOICE_GATEWAY']);
 
     const { searchParams } = new URL(req.url);
-    const origin = searchParams.get('origin');
-    const destination = searchParams.get('destination');
-    const vehicle = searchParams.get('vehicle_type') || undefined;
-    const weightStr = searchParams.get('weight_tons');
-    const weightTons = weightStr ? parseFloat(weightStr) : undefined;
+    const rawQuery = {
+      origin: searchParams.get('origin') || undefined,
+      destination: searchParams.get('destination') || undefined,
+      vehicle_type: searchParams.get('vehicle_type') || undefined,
+      weight_tons: searchParams.get('weight_tons') || undefined,
+      pickup_date: searchParams.get('pickup_date') || undefined,
+    };
+
+    const parsedQuery = GetRateQuoteQuerySchema.safeParse(rawQuery);
+    if (!parsedQuery.success) {
+      return NextResponse.json(
+        { error: 'Invalid query parameters', details: parsedQuery.error.flatten() },
+        { status: 400 }
+      );
+    }
+
+    const { origin, destination, vehicle_type, weight_tons, pickup_date } = parsedQuery.data;
 
     // If query parameters for quote are given, run rate search
     if (origin && destination) {
@@ -21,8 +33,9 @@ export async function GET(req: NextRequest) {
         {
           origin,
           destination,
-          vehicleType: vehicle,
-          weightTons,
+          vehicleType: vehicle_type,
+          weightTons: weight_tons,
+          date: pickup_date,
         },
         authContext.tenantId
       );

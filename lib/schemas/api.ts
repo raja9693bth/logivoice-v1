@@ -292,3 +292,114 @@ export const UpdateSettingsApiSchema = z.object({
     })
     .optional(),
 }).strict();
+
+// =========================================================================
+// QUERY PARAMETER VALIDATION SCHEMAS (SECTION 38)
+// =========================================================================
+
+export const ListCallsQuerySchema = z.object({
+  intent: z
+    .enum([
+      'RATE_QUOTE',
+      'TRACKING',
+      'BOOKING',
+      'SERVICE_AREA',
+      'GENERAL',
+      'COMPLAINT',
+      'HUMAN_REQUEST',
+      'EXISTING_CUSTOMER',
+      'UNSUPPORTED_REQUEST',
+    ])
+    .optional(),
+  outcome: z
+    .enum([
+      'IN_PROGRESS',
+      'COMPLETED',
+      'TRANSFERRED',
+      'CALLBACK_SCHEDULED',
+      'MISSED',
+      'FAILED',
+      'ABANDONED',
+    ])
+    .optional(),
+  search: z.string().max(100).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+}).strict();
+
+export const ListRequestsQuerySchema = z.object({
+  status: z
+    .enum(['PENDING', 'CONFIRMED', 'IN_REVIEW', 'COMPLETED', 'REJECTED', 'FAILED'])
+    .optional(),
+  priority: z.enum(['URGENT', 'HIGH', 'NORMAL', 'LOW']).optional(),
+  type: z
+    .enum(['BOOKING_REQUEST', 'SUPPORT_TICKET', 'CALLBACK_REQUEST', 'RATE_REQUEST'])
+    .optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+}).strict();
+
+export const ListLeadsQuerySchema = z.object({
+  temperature: z.enum(['HOT', 'WARM', 'COLD', 'REVIEW']).optional(),
+  status: z.enum(['NEW', 'CONTACTED', 'QUALIFIED', 'CONVERTED', 'LOST', 'WON']).optional(),
+  search: z.string().max(100).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+}).strict();
+
+export const ListKnowledgeQuerySchema = z.object({
+  intent: z
+    .enum([
+      'RATE_QUOTE',
+      'TRACKING',
+      'BOOKING',
+      'SERVICE_AREA',
+      'GENERAL',
+      'COMPLAINT',
+      'HUMAN_REQUEST',
+      'EXISTING_CUSTOMER',
+      'UNSUPPORTED_REQUEST',
+    ])
+    .optional(),
+  category: z
+    .enum([
+      'RATE_POLICY',
+      'TRACKING_POLICY',
+      'SERVICE_AREA',
+      'BOOKING_RULES',
+      'OPERATIONAL_FAQ',
+      'ESCALATION_RULES',
+      'SERVICE_RULE',
+      'SURCHARGE_POLICY',
+      'COMMERCIAL_CLAUSE',
+    ])
+    .optional(),
+}).strict();
+
+export const GetRateQuoteQuerySchema = z.object({
+  origin: z.string().max(100).optional(),
+  destination: z.string().max(100).optional(),
+  vehicle_type: z.string().max(50).optional(),
+  weight_tons: z.coerce.number().positive().max(1000).optional(),
+  pickup_date: z.string().max(50).optional(),
+}).strict();
+
+// =========================================================================
+// TOOL EXECUTION API SCHEMA (SECTION 43)
+// =========================================================================
+
+export const ExecuteToolApiSchema = z.object({
+  tool_name: z.enum([
+    'lookup_customer',
+    'get_rate_quote',
+    'get_tracking_status',
+    'create_booking_request',
+    'create_support_ticket',
+    'transfer_to_human',
+    'save_call_outcome',
+    'send_followup',
+  ]),
+  arguments: z.record(z.string(), z.unknown()).default({}),
+  call_id: z.string().max(128).optional(),
+}).strict();
+

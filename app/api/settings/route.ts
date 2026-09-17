@@ -9,7 +9,23 @@ export async function GET(req: NextRequest) {
     requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'SYSTEM']);
 
     const config = await db.getClientConfig(authContext.tenantId);
-    return NextResponse.json({ config });
+
+    const hasSupabase = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && (process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_SECRET_KEY));
+    const hasRetell = Boolean(process.env.RETELL_API_KEY);
+    const hasGoogleSheets = Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.GOOGLE_REFRESH_TOKEN);
+    const hasMessaging = Boolean(process.env.WHATSAPP_API_TOKEN || process.env.TWILIO_AUTH_TOKEN);
+    const hasTelephony = process.env.ENABLE_LIVE_TELEPHONY_TRANSFER === 'true';
+
+    const integration_status = {
+      supabase: hasSupabase ? 'VERIFIED' : 'UNCONFIGURED',
+      retell: hasRetell ? 'CONFIGURED_NOT_VERIFIED' : 'UNCONFIGURED',
+      google_sheets: hasGoogleSheets ? 'CONFIGURED_NOT_VERIFIED' : 'UNCONFIGURED',
+      messaging: hasMessaging ? 'CONFIGURED_NOT_VERIFIED' : 'UNCONFIGURED',
+      telephony: hasTelephony ? 'CONFIGURED_NOT_VERIFIED' : 'DEPLOYMENT_GATED',
+      tracking: 'DEPLOYMENT_GATED',
+    };
+
+    return NextResponse.json({ config, integration_status });
   } catch (error) {
     if (error instanceof AuthorizationError) {
       return NextResponse.json({ error: error.message }, { status: error.statusCode });
@@ -24,7 +40,8 @@ export async function GET(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   try {
     const authContext = await getAuthContext(req);
-    requireRole(authContext, ['ADMIN', 'OPS_MANAGER', 'DISPATCHER', 'SYSTEM']);
+    // Section 33: Sensitive settings mutations restricted to ADMIN and OPS_MANAGER
+    requireRole(authContext, ['ADMIN', 'OPS_MANAGER', 'SYSTEM']);
 
     let body: unknown;
     try {

@@ -783,11 +783,32 @@ export const db = {
   },
 
   async updateClientConfig(tenantId: string = DEFAULT_TENANT_ID, updates: Partial<ClientConfig>): Promise<ClientConfig> {
+    const sanitizedUpdates: Partial<ClientConfig> = {};
+    if (updates.brand_name !== undefined) sanitizedUpdates.brand_name = updates.brand_name;
+    if (updates.business_name !== undefined) sanitizedUpdates.business_name = updates.business_name;
+    if ((updates as any).legal_business_name !== undefined) sanitizedUpdates.business_name = (updates as any).legal_business_name;
+    if (updates.primary_operating_cities !== undefined) sanitizedUpdates.primary_operating_cities = updates.primary_operating_cities;
+    if ((updates as any).operating_cities !== undefined) sanitizedUpdates.primary_operating_cities = (updates as any).operating_cities;
+    if (updates.business_hours !== undefined) sanitizedUpdates.business_hours = updates.business_hours;
+    if (updates.timezone !== undefined) sanitizedUpdates.timezone = updates.timezone;
+    if (updates.ai_disclosure_wording !== undefined) sanitizedUpdates.ai_disclosure_wording = updates.ai_disclosure_wording;
+    if ((updates as any).call_recording_disclosure !== undefined) sanitizedUpdates.ai_disclosure_wording = (updates as any).call_recording_disclosure;
+    if (updates.primary_language !== undefined) sanitizedUpdates.primary_language = updates.primary_language;
+    if (updates.secondary_language !== undefined) sanitizedUpdates.secondary_language = updates.secondary_language;
+    if (updates.escalation_contacts !== undefined) sanitizedUpdates.escalation_contacts = updates.escalation_contacts;
+    if (updates.inbound_phone_number !== undefined) sanitizedUpdates.inbound_phone_number = updates.inbound_phone_number;
+    if (updates.booking_url !== undefined) sanitizedUpdates.booking_url = updates.booking_url;
+    if ((updates as any).booking_link_base_url !== undefined) sanitizedUpdates.booking_url = (updates as any).booking_link_base_url;
+    if (updates.tracking_config !== undefined) sanitizedUpdates.tracking_config = updates.tracking_config;
+    if (updates.followup_config !== undefined) sanitizedUpdates.followup_config = updates.followup_config;
+    if (updates.sheets_config !== undefined) sanitizedUpdates.sheets_config = updates.sheets_config;
+
+    const now = new Date().toISOString();
     if (await isSupabaseLive()) {
       const client = createAdminClient();
       const { data, error } = await client
         .from('client_configs')
-        .update({ ...updates, updated_at: new Date().toISOString() })
+        .update({ ...sanitizedUpdates, updated_at: now })
         .eq('tenant_id', tenantId)
         .select()
         .single();
@@ -796,8 +817,8 @@ export const db = {
     assertProductionDbReady();
     globalStore.client_config = {
       ...globalStore.client_config,
-      ...updates,
-      updated_at: new Date().toISOString(),
+      ...sanitizedUpdates,
+      updated_at: now,
     };
     return globalStore.client_config;
   },
@@ -992,9 +1013,15 @@ export const db = {
       const client = createAdminClient();
       const { callRow, factsRow } = domainCallToDbRow(newCall);
       const { data, error } = await client.from('calls').insert([callRow]).select().single();
-      if (!error && data) {
+      if (error) {
+        throw new Error(`Failed to persist call record: ${error.message}`);
+      }
+      if (data) {
         if (factsRow) {
-          await client.from('call_facts').upsert([factsRow]);
+          const { error: factsErr } = await client.from('call_facts').upsert([factsRow]);
+          if (factsErr) {
+            throw new Error(`Failed to persist call_facts for call ${id}: ${factsErr.message}`);
+          }
         }
         if (newCall.transcript && newCall.transcript.length > 0) {
           const transcriptRows = newCall.transcript.map((t) => ({
@@ -1007,7 +1034,10 @@ export const db = {
             language: t.language || null,
             created_at: new Date().toISOString(),
           }));
-          await client.from('transcript_segments').insert(transcriptRows);
+          const { error: transcriptErr } = await client.from('transcript_segments').insert(transcriptRows);
+          if (transcriptErr) {
+            throw new Error(`Failed to persist transcript_segments for call ${id}: ${transcriptErr.message}`);
+          }
         }
         return dbCallToDomain(data, factsRow);
       }
@@ -1051,9 +1081,16 @@ export const db = {
         .select()
         .single();
 
-      if (!error && data) {
+      if (error) {
+        throw new Error(`Failed to update call record ${callId}: ${error.message}`);
+      }
+
+      if (data) {
         if (factsRow && updates.facts) {
-          await client.from('call_facts').upsert([factsRow]);
+          const { error: factsErr } = await client.from('call_facts').upsert([factsRow]);
+          if (factsErr) {
+            throw new Error(`Failed to update call_facts for call ${callId}: ${factsErr.message}`);
+          }
         }
         return dbCallToDomain(data, factsRow);
       }
@@ -1061,7 +1098,12 @@ export const db = {
     assertProductionDbReady();
     const idx = globalStore.calls.findIndex((c) => c.id === callId && c.tenant_id === tenantId);
     if (idx === -1) return null;
-    globalStore.calls[idx] = { ...globalStore.calls[idx], ...updates };
+    globalStore.calls[idx] = {
+      ...globalStore.calls[idx],
+      ...updates,
+      facts: updates.facts ? { ...globalStore.calls[idx].facts, ...updates.facts } : globalStore.calls[idx].facts,
+    };
+    return globalStore.calls[idx];
     return globalStore.calls[idx];
   },
 
@@ -1115,10 +1157,37 @@ export const db = {
     return leads.slice(offset, offset + limit);
   },
 
-  async createLead(leadData: Omit<Lead, 'id' | 'created_at' | 'updated_at'>, tenantId: string = DEFAULT_TENANT_ID): Promise<Lead> {
-    if (leadData.customer_id) {
-      await validateTenantEntityOwnership('customer', leadData.customer_id, tenantId);
+  async createLead(
+    leadData: Partial<Omit<Lead, 'id' | 'created_at' | 'updated_at'>> & {
+      customer_name: string;
+      phone: string;
+      requirement: string;
+    },
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<Lead> {
+    let customerId = leadData.customer_id;
+    if (customerId) {
+      await validateTenantEntityOwnership('customer', customerId, tenantId);
+    } else if (leadData.phone && leadData.phone.trim()) {
+      const existingCustomer = await this.getCustomerByPhone(leadData.phone, tenantId);
+      if (existingCustomer) {
+        customerId = existingCustomer.id;
+      } else {
+        const newCustomer = await this.createCustomer(
+          {
+            tenant_id: tenantId,
+            name: leadData.customer_name || 'Inbound Caller',
+            phone: leadData.phone,
+            company: leadData.company,
+          },
+          tenantId
+        );
+        customerId = newCustomer.id;
+      }
+    } else {
+      throw new Error('Foreign key integrity violation: Cannot create lead without valid customer_id or phone to resolve customer.');
     }
+
     if (leadData.call_id) {
       await validateTenantEntityOwnership('call', leadData.call_id, tenantId);
     }
@@ -1126,9 +1195,16 @@ export const db = {
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
     const newLead: Lead = {
+      source: 'INBOUND_CALL',
+      status: 'NEW',
+      temperature: 'WARM',
+      next_action: 'Operations review',
+      last_call_at: now,
+      followup_status: 'PENDING',
       ...leadData,
       id,
-      tenant_id: tenantId,
+      customer_id: customerId,
+      tenant_id: leadData.tenant_id || tenantId,
       created_at: now,
       updated_at: now,
     };
@@ -1153,11 +1229,29 @@ export const db = {
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<Lead | null> {
     const now = new Date().toISOString();
+    if (updates.customer_id) {
+      await validateTenantEntityOwnership('customer', updates.customer_id, tenantId);
+    }
+
+    // Explicit field allowlist: protect id, tenant_id, created_at
+    const sanitizedUpdates: Partial<Lead> = {};
+    if (updates.status !== undefined) sanitizedUpdates.status = updates.status;
+    if (updates.temperature !== undefined) sanitizedUpdates.temperature = updates.temperature;
+    if (updates.requirement !== undefined) sanitizedUpdates.requirement = updates.requirement;
+    if (updates.route !== undefined) sanitizedUpdates.route = updates.route;
+    if (updates.vehicle_type !== undefined) sanitizedUpdates.vehicle_type = updates.vehicle_type;
+    if (updates.weight !== undefined) sanitizedUpdates.weight = updates.weight;
+    if (updates.next_action !== undefined) sanitizedUpdates.next_action = updates.next_action;
+    if (updates.assigned_to !== undefined) sanitizedUpdates.assigned_to = updates.assigned_to;
+    if (updates.followup_status !== undefined) sanitizedUpdates.followup_status = updates.followup_status;
+    if (updates.last_call_at !== undefined) sanitizedUpdates.last_call_at = updates.last_call_at;
+    if (updates.customer_id !== undefined) sanitizedUpdates.customer_id = updates.customer_id;
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
       const { data, error } = await client
         .from('leads')
-        .update({ ...updates, updated_at: now })
+        .update({ ...sanitizedUpdates, updated_at: now })
         .eq('id', id)
         .eq('tenant_id', tenantId)
         .select('*, customer:customers(*)')
@@ -1172,10 +1266,48 @@ export const db = {
     if (idx === -1) return null;
     globalStore.leads[idx] = {
       ...globalStore.leads[idx],
-      ...updates,
+      ...sanitizedUpdates,
       updated_at: now,
     };
     return globalStore.leads[idx];
+  },
+
+  async getLeadById(id: string, tenantId: string = DEFAULT_TENANT_ID): Promise<Lead | null> {
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client
+        .from('leads')
+        .select('*, customer:customers(*)')
+        .eq('id', id)
+        .eq('tenant_id', tenantId)
+        .maybeSingle();
+      if (!error && data) {
+        const customer = Array.isArray(data.customer) ? data.customer[0] : data.customer;
+        return dbLeadToDomain(data, customer);
+      }
+    }
+    assertProductionDbReady();
+    return globalStore.leads.find((l) => l.id === id && l.tenant_id === tenantId) || null;
+  },
+
+  async getLeadByCallId(callId: string, tenantId: string = DEFAULT_TENANT_ID): Promise<Lead | null> {
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client
+        .from('leads')
+        .select('*, customer:customers(*)')
+        .eq('call_id', callId)
+        .eq('tenant_id', tenantId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!error && data) {
+        const customer = Array.isArray(data.customer) ? data.customer[0] : data.customer;
+        return dbLeadToDomain(data, customer);
+      }
+    }
+    assertProductionDbReady();
+    return globalStore.leads.find((l) => l.call_id === callId && l.tenant_id === tenantId) || null;
   },
 
   // -----------------------------------------------------------------------
@@ -1259,11 +1391,21 @@ export const db = {
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<OperationsRequest | null> {
     const now = new Date().toISOString();
+
+    // Explicit field allowlist: protect id, tenant_id, created_at, reference_no, idempotency_key, call_id
+    const sanitizedUpdates: Partial<OperationsRequest> = {};
+    if (updates.status !== undefined) sanitizedUpdates.status = updates.status;
+    if (updates.priority !== undefined) sanitizedUpdates.priority = updates.priority;
+    if (updates.resolution_notes !== undefined) sanitizedUpdates.resolution_notes = updates.resolution_notes;
+    if (updates.assigned_to !== undefined) sanitizedUpdates.assigned_to = updates.assigned_to;
+    if (updates.summary !== undefined) sanitizedUpdates.summary = updates.summary;
+    if (updates.details !== undefined) sanitizedUpdates.details = updates.details;
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
       const { data, error } = await client
         .from('operations_requests')
-        .update({ ...updates, updated_at: now })
+        .update({ ...sanitizedUpdates, updated_at: now })
         .eq('id', id)
         .eq('tenant_id', tenantId)
         .select('*, customer:customers(*)')
@@ -1278,7 +1420,7 @@ export const db = {
     if (idx === -1) return null;
     globalStore.operations_requests[idx] = {
       ...globalStore.operations_requests[idx],
-      ...updates,
+      ...sanitizedUpdates,
       updated_at: now,
     };
     return globalStore.operations_requests[idx];
@@ -1298,7 +1440,7 @@ export const db = {
   },
 
   async findApprovedRate(
-    params: { origin: string; destination: string; vehicleType?: string; weightTons?: number; date?: string },
+    params: { origin: string; destination: string; vehicleType?: string; weightTons?: number; date?: string; includeExpired?: boolean },
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<RateCard | null> {
     const origin = params.origin.trim().toLowerCase();
@@ -1355,8 +1497,12 @@ export const db = {
     const routeMatch = validCards.find((rc) => matchesRoute(rc) && matchesWeight(rc, validCards));
     if (routeMatch) return routeMatch;
 
-    // 3. If no valid card found, check for an expired card on this corridor so get_rate_quote
-    // can return explicit EXPIRED status rather than reporting the corridor as completely unavailable.
+    // 3. If no valid card found and includeExpired is requested, check for an expired card on this corridor
+    // so get_rate_quote can return explicit EXPIRED status rather than reporting corridor unavailable.
+    if (!params.includeExpired) {
+      return null;
+    }
+
     const expiredCards = activeCards.filter((rc) => rc.effective_to && rc.effective_to < queryDateStr);
     if (vehicle) {
       const exactExpired = expiredCards.find((rc) => matchesRoute(rc) && matchesVehicle(rc) && matchesWeight(rc, expiredCards));
@@ -1370,6 +1516,13 @@ export const db = {
     rateCardData: Omit<RateCard, 'id' | 'tenant_id' | 'source_version'> & { tenant_id?: string; source_version?: string },
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<RateCard> {
+    if (rateCardData.weight_max_tons < rateCardData.weight_min_tons) {
+      throw new Error('Invalid rate interval: weight_max_tons cannot be less than weight_min_tons.');
+    }
+    if (rateCardData.effective_to && rateCardData.effective_from && rateCardData.effective_to < rateCardData.effective_from) {
+      throw new Error('Invalid rate interval: effective_to cannot be earlier than effective_from.');
+    }
+
     const id = crypto.randomUUID();
     const newCard: RateCard = {
       ...rateCardData,
@@ -1392,11 +1545,43 @@ export const db = {
     updates: Partial<RateCard>,
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<RateCard | null> {
+    if (
+      updates.weight_min_tons !== undefined &&
+      updates.weight_max_tons !== undefined &&
+      updates.weight_max_tons < updates.weight_min_tons
+    ) {
+      throw new Error('Invalid rate interval: weight_max_tons cannot be less than weight_min_tons.');
+    }
+    if (
+      updates.effective_from !== undefined &&
+      updates.effective_to !== undefined &&
+      updates.effective_to < updates.effective_from
+    ) {
+      throw new Error('Invalid rate interval: effective_to cannot be earlier than effective_from.');
+    }
+
+    // Explicit field allowlist: protect id, tenant_id, created_at
+    const sanitizedUpdates: Partial<RateCard> = {};
+    if (updates.origin !== undefined) sanitizedUpdates.origin = updates.origin;
+    if (updates.destination !== undefined) sanitizedUpdates.destination = updates.destination;
+    if (updates.vehicle_type !== undefined) sanitizedUpdates.vehicle_type = updates.vehicle_type;
+    if (updates.weight_min_tons !== undefined) sanitizedUpdates.weight_min_tons = updates.weight_min_tons;
+    if (updates.weight_max_tons !== undefined) sanitizedUpdates.weight_max_tons = updates.weight_max_tons;
+    if (updates.price_inr !== undefined) sanitizedUpdates.price_inr = updates.price_inr;
+    if (updates.minimum_charge_inr !== undefined) sanitizedUpdates.minimum_charge_inr = updates.minimum_charge_inr;
+    if (updates.status !== undefined) sanitizedUpdates.status = updates.status;
+    if (updates.effective_from !== undefined) sanitizedUpdates.effective_from = updates.effective_from;
+    if (updates.effective_to !== undefined) sanitizedUpdates.effective_to = updates.effective_to;
+    if (updates.transit_time_hours !== undefined) sanitizedUpdates.transit_time_hours = updates.transit_time_hours;
+    if (updates.surcharge_notes !== undefined) sanitizedUpdates.surcharge_notes = updates.surcharge_notes;
+    if (updates.quote_type !== undefined) sanitizedUpdates.quote_type = updates.quote_type;
+    if (updates.supports_confirmed_quote !== undefined) sanitizedUpdates.supports_confirmed_quote = updates.supports_confirmed_quote;
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
       const { data, error } = await client
         .from('rate_cards')
-        .update(updates)
+        .update(sanitizedUpdates)
         .eq('id', id)
         .eq('tenant_id', tenantId)
         .select()
@@ -1408,7 +1593,7 @@ export const db = {
     if (idx === -1) return null;
     globalStore.rate_cards[idx] = {
       ...globalStore.rate_cards[idx],
-      ...updates,
+      ...sanitizedUpdates,
     };
     return globalStore.rate_cards[idx];
   },
@@ -1614,6 +1799,42 @@ export const db = {
     return newFollowup;
   },
 
+  async updateFollowup(
+    id: string,
+    updates: Partial<FollowupRecord>,
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<FollowupRecord | null> {
+    const now = new Date().toISOString();
+    const sanitizedUpdates: Partial<FollowupRecord> = {};
+    if (updates.status !== undefined) sanitizedUpdates.status = updates.status;
+    if (updates.recipient !== undefined) sanitizedUpdates.recipient = updates.recipient;
+    if (updates.message_content !== undefined) sanitizedUpdates.message_content = updates.message_content;
+    if (updates.provider_message_id !== undefined) sanitizedUpdates.provider_message_id = updates.provider_message_id;
+    if (updates.suppression_reason !== undefined) sanitizedUpdates.suppression_reason = updates.suppression_reason;
+    if (updates.sent_at !== undefined) sanitizedUpdates.sent_at = updates.sent_at;
+
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client
+        .from('followups')
+        .update({ ...sanitizedUpdates, updated_at: now })
+        .eq('id', id)
+        .eq('tenant_id', tenantId)
+        .select()
+        .single();
+      if (!error && data) return dbFollowupToDomain(data as any);
+    }
+    assertProductionDbReady();
+    const idx = globalStore.followups.findIndex((f) => f.id === id && f.tenant_id === tenantId);
+    if (idx === -1) return null;
+    globalStore.followups[idx] = {
+      ...globalStore.followups[idx],
+      ...sanitizedUpdates,
+      updated_at: now,
+    };
+    return globalStore.followups[idx];
+  },
+
   async getFollowupByCallId(
     callId: string,
     tenantId: string = DEFAULT_TENANT_ID
@@ -1644,27 +1865,6 @@ export const db = {
     }
     assertProductionDbReady();
     return globalStore.followups.filter((f: FollowupRecord) => f.tenant_id === tenantId);
-  },
-
-  async getLeadByCallId(
-    callId: string,
-    tenantId: string = DEFAULT_TENANT_ID
-  ): Promise<Lead | null> {
-    if (await isSupabaseLive()) {
-      const client = createAdminClient();
-      const { data, error } = await client
-        .from('leads')
-        .select('*, customer:customers(*)')
-        .eq('call_id', callId)
-        .eq('tenant_id', tenantId)
-        .single();
-      if (!error && data) {
-        const customer = Array.isArray(data.customer) ? data.customer[0] : data.customer;
-        return dbLeadToDomain(data, customer);
-      }
-    }
-    assertProductionDbReady();
-    return globalStore.leads.find((l: Lead) => l.call_id === callId && l.tenant_id === tenantId) || null;
   },
 
   // -----------------------------------------------------------------------

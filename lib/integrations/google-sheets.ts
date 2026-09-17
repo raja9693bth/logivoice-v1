@@ -106,6 +106,14 @@ export async function syncCallToGoogleSheets(
   }
 
   if (!spreadsheetId) {
+    if (process.env.NODE_ENV === 'production') {
+      return {
+        synced: false,
+        status: 'UNCONFIGURED',
+        provider: 'GOOGLE_SHEETS_API_V4',
+        error: 'Google Sheets spreadsheet ID not configured for tenant in production.',
+      };
+    }
     spreadsheetId = DEFAULT_SPREADSHEET_ID;
   }
 
@@ -200,6 +208,32 @@ export async function syncCallToGoogleSheets(
         }
       } catch {
         // Fallback to default tab name if metadata query times out
+      }
+
+      // Reconciliation check: verify whether this call_id is already in the sheet
+      try {
+        const checkRes = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetTab)}!B:B`,
+          {
+            headers: { Authorization: `Bearer ${accessToken}` },
+            signal: AbortSignal.timeout(5000),
+          }
+        );
+        if (checkRes.ok) {
+          const checkData = await checkRes.json();
+          const existingIds = (checkData.values || []).map((v: any) => v[0]);
+          if (existingIds.includes(call.external_call_id)) {
+            syncedCallIds.add(call.external_call_id);
+            return {
+              synced: true,
+              status: 'SKIPPED',
+              provider: 'GOOGLE_SHEETS_RECONCILIATION',
+              spreadsheet_id: spreadsheetId,
+            };
+          }
+        }
+      } catch {
+        // Continue if reconciliation query fails
       }
 
       const appendRes = await fetch(

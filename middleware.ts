@@ -20,8 +20,16 @@ export async function middleware(request: NextRequest) {
   }
 
   // 2. Supabase Session Verification via SSR Cookies
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '';
-  const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_SECRET_KEY || '';
+  // Browser middleware MUST strictly use public Supabase configuration (never SUPABASE_SECRET_KEY)
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || (!isProduction ? process.env.SUPABASE_URL : '') || '';
+  const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+
+  if (isProduction && (!supabaseUrl || !supabaseKey)) {
+    // Missing production Supabase public configuration: fail closed
+    const loginUrl = new URL('/login', request.url);
+    loginUrl.searchParams.set('error', 'DEPLOYMENT_CONFIGURATION_REQUIRED');
+    return NextResponse.redirect(loginUrl);
+  }
 
   if (supabaseUrl && supabaseKey) {
     try {

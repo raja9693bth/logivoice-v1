@@ -5,7 +5,7 @@ import { db } from '@/lib/db';
 export async function GET(req: NextRequest) {
   try {
     const authContext = await getAuthContext(req);
-    requireRole(authContext, ['OPS_MANAGER', 'ADMIN', 'SYSTEM']);
+    requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'SYSTEM']);
 
     const { searchParams } = new URL(req.url);
     const limitStr = searchParams.get('limit');

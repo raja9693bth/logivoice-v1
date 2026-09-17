@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
     const newLead = await db.createLead(
       {
         tenant_id: authContext.tenantId,
-        customer_id: val.customer_id || 'cust-unknown',
+        customer_id: val.customer_id || undefined,
         customer_name: val.customer_name,
         phone: val.phone,
         company: val.company,

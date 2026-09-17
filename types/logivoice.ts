@@ -15,6 +15,7 @@ export type CallIntent =
   | 'UNSUPPORTED_REQUEST';
 
 export type CallOutcome =
+  | 'IN_PROGRESS'
   | 'COMPLETED'
   | 'TRANSFERRED'
   | 'CALLBACK_SCHEDULED'
@@ -93,7 +94,7 @@ export interface Call {
   id: string;
   external_call_id: string;
   tenant_id: string;
-  customer_id: string;
+  customer_id?: string;
   customer?: Customer;
   started_at: string;
   ended_at?: string;
@@ -127,9 +128,9 @@ export interface Call {
 export interface OperationsRequest {
   id: string;
   reference_no: string;
-  call_id: string;
+  call_id?: string;
   tenant_id: string;
-  customer_id: string;
+  customer_id?: string;
   customer_name: string;
   customer_phone: string;
   type: RequestType;
@@ -148,7 +149,8 @@ export interface OperationsRequest {
 export interface Lead {
   id: string;
   tenant_id: string;
-  customer_id: string;
+  call_id?: string;
+  customer_id?: string;
   customer_name: string;
   phone: string;
   company?: string;
@@ -163,6 +165,23 @@ export interface Lead {
   assigned_to?: string;
   last_call_at: string;
   followup_status: FollowupStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FollowupRecord {
+  id: string;
+  tenant_id: string;
+  call_id: string;
+  customer_id?: string;
+  channel: FollowupChannel;
+  status: FollowupStatus;
+  recipient: string;
+  message_content?: string;
+  template_id?: string;
+  provider_message_id?: string;
+  suppression_reason?: string;
+  sent_at?: string;
   created_at: string;
   updated_at: string;
 }
@@ -219,6 +238,7 @@ export interface AuditEvent {
   tool_name?: string;
   details: Record<string, unknown>;
   timestamp: string;
+  created_at?: string;
 }
 
 export interface DispatcherKPIs {

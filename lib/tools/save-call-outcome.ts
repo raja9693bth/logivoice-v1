@@ -14,9 +14,9 @@ export async function executeSaveCallOutcome(
 ): Promise<SaveCallOutcomeOutput> {
   try {
     // 1. Resolve customer
-    let customerId = 'cust-unknown';
+    let customerId: string | undefined = undefined;
     let customerName = input.customer_name || 'Inbound Caller';
-    let customerPhone = input.customer_phone || '+91 99999 00000';
+    let customerPhone = input.customer_phone;
 
     if (input.customer_phone) {
       const existing = await db.getCustomerByPhone(input.customer_phone, tenantId);
@@ -98,30 +98,46 @@ export async function executeSaveCallOutcome(
       callId = newCall.id;
     }
 
-    // 4. Update or create Lead record if commercial interest exists
+    // 4. Update or create Lead record if commercial interest exists and contact is known
     let leadId: string | undefined;
-    if (leadTemp === 'HOT' || leadTemp === 'WARM') {
-      const newLead = await db.createLead(
-        {
-          tenant_id: tenantId,
-          customer_id: customerId,
-          customer_name: customerName,
-          phone: customerPhone,
-          source: 'INBOUND_CALL',
-          status: 'QUALIFIED',
-          temperature: leadTemp,
-          route: input.facts?.route_from && input.facts?.route_to ? `${input.facts.route_from} -> ${input.facts.route_to}` : undefined,
-          vehicle_type: input.facts?.vehicle_type,
-          weight: input.facts?.weight,
-          requirement: input.summary.slice(0, 150),
-          next_action: leadTemp === 'HOT' ? 'Lock booking & assign vehicle' : 'Follow up with corridor quote',
-          assigned_to: 'Primary Dispatcher',
-          followup_status: 'PENDING',
-          last_call_at: new Date().toISOString(),
-        },
-        tenantId
-      );
-      leadId = newLead.id;
+    if ((leadTemp === 'HOT' || leadTemp === 'WARM') && customerPhone) {
+      const existingLead = await db.getLeadByCallId(callId, tenantId);
+      if (existingLead) {
+        leadId = existingLead.id;
+        await db.updateLead(
+          leadId,
+          {
+            temperature: leadTemp,
+            requirement: input.summary.slice(0, 150),
+            route: input.facts?.route_from && input.facts?.route_to ? `${input.facts.route_from} -> ${input.facts.route_to}` : existingLead.route,
+            vehicle_type: input.facts?.vehicle_type || existingLead.vehicle_type,
+            weight: input.facts?.weight || existingLead.weight,
+          },
+          tenantId
+        );
+      } else {
+        const newLead = await db.createLead(
+          {
+            tenant_id: tenantId,
+            customer_id: customerId,
+            customer_name: customerName,
+            phone: customerPhone,
+            source: 'INBOUND_CALL',
+            status: 'QUALIFIED',
+            temperature: leadTemp,
+            route: input.facts?.route_from && input.facts?.route_to ? `${input.facts.route_from} -> ${input.facts.route_to}` : undefined,
+            vehicle_type: input.facts?.vehicle_type,
+            weight: input.facts?.weight,
+            requirement: input.summary.slice(0, 150),
+            next_action: leadTemp === 'HOT' ? 'Lock booking & assign vehicle' : 'Follow up with corridor quote',
+            assigned_to: 'Primary Dispatcher',
+            followup_status: 'PENDING',
+            last_call_at: new Date().toISOString(),
+          },
+          tenantId
+        );
+        leadId = newLead.id;
+      }
     }
 
     // 5. Audit Log

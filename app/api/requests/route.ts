@@ -53,11 +53,17 @@ export async function POST(req: NextRequest) {
     }
 
     const val = parseResult.data;
+    let customerId: string | undefined = undefined;
+    if (val.customer_phone) {
+      const cust = await db.getCustomerByPhone(val.customer_phone, authContext.tenantId);
+      if (cust) customerId = cust.id;
+    }
+
     const newRequest = await db.createRequest(
       {
         tenant_id: authContext.tenantId,
-        customer_id: 'cust-unknown',
-        call_id: val.call_id || '',
+        customer_id: customerId,
+        call_id: val.call_id || undefined,
         reference_no: `REQ-${Date.now().toString().slice(-6)}`,
         type: val.type,
         status: 'PENDING',

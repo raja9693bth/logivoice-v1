@@ -57,7 +57,7 @@ export async function POST(req: NextRequest) {
       {
         external_call_id: validated.external_call_id,
         tenant_id: authContext.tenantId,
-        customer_id: validated.customer_id || 'cust-unknown',
+        customer_id: validated.customer_id || undefined,
         started_at: validated.started_at || new Date().toISOString(),
         ended_at: validated.ended_at,
         duration_seconds: validated.duration_seconds,

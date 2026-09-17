@@ -136,29 +136,35 @@ export async function dispatchTool(
 
     const latencyMs = Date.now() - startTime;
 
-    // Log Tool Execution Event in Audit Trail
-    await db.logAuditEvent(
-      {
-        tenant_id: tenantId,
-        call_id,
-        event_type: 'TOOL_EXECUTION',
-        actor: authContext.userId,
-        actor_type: authContext.role === 'VOICE_GATEWAY' ? 'AI_AGENT' : 'DISPATCHER',
-        actor_id: authContext.userId,
-        tool_name,
-        severity: 'INFO',
-        details: {
-          arguments: args,
-          status: executionStatus,
-          latency_ms: latencyMs,
+    // Log Tool Execution Event in Audit Trail safely
+    try {
+      await db.logAuditEvent(
+        {
+          tenant_id: tenantId,
+          call_id,
+          event_type: 'TOOL_EXECUTION',
+          actor: authContext.userId,
+          actor_type: authContext.role === 'VOICE_GATEWAY' ? 'AI_AGENT' : 'DISPATCHER',
+          actor_id: authContext.userId,
+          tool_name,
+          severity: 'INFO',
+          details: {
+            arguments: args,
+            status: executionStatus,
+            latency_ms: latencyMs,
+          },
         },
-      },
-      tenantId
-    );
+        tenantId
+      );
+    } catch {
+      // Best-effort audit logging
+    }
+
+    const isFailureStatus = ['FAILED', 'PROVIDER_UNAVAILABLE', 'PROVIDER_ERROR', 'UNAVAILABLE', 'TRANSFER_UNAVAILABLE'].includes(executionStatus);
 
     return {
       tool_name,
-      success: true,
+      success: !isFailureStatus,
       status: executionStatus,
       result,
       latency_ms: latencyMs,
@@ -167,24 +173,28 @@ export async function dispatchTool(
     const latencyMs = Date.now() - startTime;
     const errorMessage = error instanceof Error ? error.message : 'Unknown tool execution failure';
 
-    await db.logAuditEvent(
-      {
-        tenant_id: tenantId,
-        call_id,
-        event_type: 'TOOL_EXECUTION_FAILED',
-        actor: authContext.userId,
-        actor_type: 'AI_AGENT',
-        actor_id: authContext.userId,
-        tool_name,
-        severity: 'ERROR',
-        details: {
-          arguments: args,
-          error: errorMessage,
-          latency_ms: latencyMs,
+    try {
+      await db.logAuditEvent(
+        {
+          tenant_id: tenantId,
+          call_id,
+          event_type: 'TOOL_EXECUTION_FAILED',
+          actor: authContext.userId,
+          actor_type: 'AI_AGENT',
+          actor_id: authContext.userId,
+          tool_name,
+          severity: 'ERROR',
+          details: {
+            arguments: args,
+            error: errorMessage,
+            latency_ms: latencyMs,
+          },
         },
-      },
-      tenantId
-    );
+        tenantId
+      );
+    } catch {
+      // Best-effort audit logging
+    }
 
     return {
       tool_name,

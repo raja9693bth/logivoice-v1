@@ -4,12 +4,12 @@ import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Truck, Lock, Mail, ArrowRight, AlertCircle, Loader2, CheckCircle2 } from 'lucide-react';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
-import { createClient } from '@/lib/supabase/client';
+import { createClient, getSupabaseBrowserConfig } from '@/lib/supabase/client';
 
 export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState('dispatcher@logivoice.local');
-  const [password, setPassword] = useState('LogiVoice@2026');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
@@ -17,6 +17,10 @@ export default function LoginPage() {
 
   useEffect(() => {
     setIsDev(process.env.NODE_ENV !== 'production');
+    const cfg = getSupabaseBrowserConfig();
+    if (!cfg.isConfigured && process.env.NODE_ENV === 'production') {
+      setError('Supabase authentication configuration missing: NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY is not configured.');
+    }
   }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -24,6 +28,13 @@ export default function LoginPage() {
     setIsLoading(true);
     setError(null);
     setSuccessNotice(null);
+
+    const config = getSupabaseBrowserConfig();
+    if (!config.isConfigured) {
+      setError('Authentication configuration error: NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY must be configured in environment.');
+      setIsLoading(false);
+      return;
+    }
 
     try {
       const supabase = createClient();
@@ -51,11 +62,13 @@ export default function LoginPage() {
       }
     } catch (err) {
       console.warn('[LoginPage] Supabase client authentication exception:', err);
-      // If network fails to reach remote Supabase in local development, provide honest error
-      if (process.env.NODE_ENV !== 'production') {
-        setError('Authentication service unreachable. In development mode, you may use local evaluation session.');
+      const errMsg = err instanceof Error ? err.message : 'Unknown error';
+      if (errMsg.includes('missing configuration')) {
+        setError('Authentication configuration error: Supabase URL or publishable key is not set.');
+      } else if (process.env.NODE_ENV !== 'production') {
+        setError(`Authentication service unreachable: ${errMsg}. In development mode, you may use local evaluation session.`);
       } else {
-        setError('Authentication service temporarily unavailable. Please contact the system administrator.');
+        setError(`Authentication failed: ${errMsg}`);
       }
       setIsLoading(false);
     }

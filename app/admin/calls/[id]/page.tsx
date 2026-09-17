@@ -32,7 +32,7 @@ export default function CallDetailPage({ params }: { params: Promise<{ id: strin
   const [isDemoMode, setIsDemoMode] = useState(false);
 
   useEffect(() => {
-    const demoActive = typeof window !== 'undefined' && localStorage.getItem('logivoice_demo_mode') === 'true';
+    const demoActive = process.env.NODE_ENV !== 'production' && typeof window !== 'undefined' && localStorage.getItem('logivoice_demo_mode') === 'true';
     setIsDemoMode(demoActive);
 
     if (demoActive) {

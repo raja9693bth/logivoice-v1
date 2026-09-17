@@ -25,6 +25,35 @@ export function createCorrelationContext(
   };
 }
 
+function sanitizeForLog(obj: unknown, depth = 0): unknown {
+  if (depth > 5 || obj === null || obj === undefined) return obj;
+  if (typeof obj !== 'object') return obj;
+
+  if (Array.isArray(obj)) {
+    return obj.map((item) => sanitizeForLog(item, depth + 1));
+  }
+
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+    const lower = key.toLowerCase();
+    if (
+      lower.includes('password') ||
+      lower.includes('secret') ||
+      lower.includes('token') ||
+      lower.includes('authorization') ||
+      lower.includes('api_key') ||
+      lower.includes('apikey')
+    ) {
+      sanitized[key] = '[REDACTED]';
+    } else if (typeof value === 'object') {
+      sanitized[key] = sanitizeForLog(value, depth + 1);
+    } else {
+      sanitized[key] = value;
+    }
+  }
+  return sanitized;
+}
+
 export function logTrace(context: CorrelationContext, event: string, metadata?: Record<string, unknown>) {
   const durationMs = Date.now() - context.startTime;
   console.log(
@@ -37,7 +66,7 @@ export function logTrace(context: CorrelationContext, event: string, metadata?: 
       actor: context.actor,
       event,
       duration_ms: durationMs,
-      ...metadata,
+      ...(metadata ? (sanitizeForLog(metadata) as Record<string, unknown>) : {}),
     })
   );
 }
@@ -60,7 +89,7 @@ export function logError(
       event,
       duration_ms: durationMs,
       error: error instanceof Error ? { message: error.message, stack: error.stack } : error,
-      ...metadata,
+      ...(metadata ? (sanitizeForLog(metadata) as Record<string, unknown>) : {}),
     })
   );
 }

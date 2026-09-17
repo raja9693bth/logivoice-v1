@@ -24,6 +24,7 @@ import {
   RequestType,
   FollowupStatus,
   FollowupChannel,
+  FollowupRecord,
 } from '@/types/logivoice';
 
 export interface TrackingRecord {
@@ -38,23 +39,6 @@ export interface TrackingRecord {
   exception_reason?: string;
   source: string;
   last_synced_at: string;
-}
-
-export interface FollowupRecord {
-  id: string;
-  tenant_id: string;
-  call_id: string;
-  customer_id: string;
-  channel: FollowupChannel;
-  status: FollowupStatus;
-  recipient: string;
-  template_id?: string;
-  message_snippet: string;
-  provider_message_id?: string;
-  suppression_reason?: string;
-  sent_at?: string;
-  created_at: string;
-  updated_at: string;
 }
 
 export interface ClientConfig {
@@ -636,6 +620,8 @@ class Store {
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-09-16T12:00:00Z',
   };
+
+  followups: FollowupRecord[] = [];
 }
 
 // Global persistent instance in Node runtime
@@ -664,20 +650,26 @@ export function assertProductionDbReady() {
   if (simulatedDbFailure) {
     throw new DatabaseUnavailableError('Simulated database outage triggered.');
   }
-  if (getRuntimeMode() === 'PRODUCTION' && process.env.ALLOW_IN_MEMORY_DEV_STORE !== 'true') {
+  if (getRuntimeMode() === 'PRODUCTION') {
     throw new DatabaseUnavailableError();
   }
 }
 
 // Helper to check whether live Supabase tables are ready to query
 let supabaseLiveStatus: boolean | null = null;
+let lastSupabaseCheckTime: number = 0;
+const SUPABASE_CHECK_TTL_MS = 15000; // 15 seconds cache to allow recovery detection
 
 export async function isSupabaseLive(): Promise<boolean> {
   if (simulatedDbFailure) return false;
-  if (supabaseLiveStatus !== null) return supabaseLiveStatus;
+  const now = Date.now();
+  if (supabaseLiveStatus !== null && now - lastSupabaseCheckTime < SUPABASE_CHECK_TTL_MS) {
+    return supabaseLiveStatus;
+  }
   try {
     const client = createAdminClient();
     const { error } = await client.from('tenants').select('id').limit(1);
+    lastSupabaseCheckTime = now;
     if (!error) {
       supabaseLiveStatus = true;
       return true;
@@ -685,6 +677,7 @@ export async function isSupabaseLive(): Promise<boolean> {
   } catch {
     // Database connection or table cache issue
   }
+  lastSupabaseCheckTime = now;
   supabaseLiveStatus = false;
   return false;
 }
@@ -792,7 +785,7 @@ export const db = {
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<Customer> {
     const now = new Date().toISOString();
-    const id = `cust-${Date.now()}`;
+    const id = crypto.randomUUID();
     const newCustomer: Customer = {
       ...customer,
       id,
@@ -884,11 +877,12 @@ export const db = {
   },
 
   async createCall(callData: Omit<Call, 'id'>, tenantId: string = DEFAULT_TENANT_ID): Promise<Call> {
-    const id = `call-${Date.now()}`;
+    const id = crypto.randomUUID();
     const newCall: Call = {
       ...callData,
       id,
       tenant_id: tenantId,
+      customer_id: callData.customer_id && callData.customer_id !== 'cust-unknown' ? callData.customer_id : undefined,
     };
 
     if (await isSupabaseLive()) {
@@ -952,7 +946,7 @@ export const db = {
 
   async createLead(leadData: Omit<Lead, 'id' | 'created_at' | 'updated_at'>, tenantId: string = DEFAULT_TENANT_ID): Promise<Lead> {
     const now = new Date().toISOString();
-    const id = `lead-${Date.now()}`;
+    const id = crypto.randomUUID();
     const newLead: Lead = {
       ...leadData,
       id,
@@ -1028,11 +1022,13 @@ export const db = {
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<OperationsRequest> {
     const now = new Date().toISOString();
-    const id = `req-${Date.now()}`;
+    const id = crypto.randomUUID();
     const newReq: OperationsRequest = {
       ...requestData,
       id,
       tenant_id: tenantId,
+      customer_id: requestData.customer_id && requestData.customer_id !== 'cust-unknown' ? requestData.customer_id : undefined,
+      call_id: requestData.call_id && !requestData.call_id.startsWith('call-') ? requestData.call_id : undefined,
       created_at: now,
       updated_at: now,
     };
@@ -1125,7 +1121,7 @@ export const db = {
     rateCardData: Omit<RateCard, 'id' | 'tenant_id' | 'source_version'> & { tenant_id?: string; source_version?: string },
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<RateCard> {
-    const id = `rc-${Date.now()}`;
+    const id = crypto.randomUUID();
     const newCard: RateCard = {
       ...rateCardData,
       id,
@@ -1219,7 +1215,7 @@ export const db = {
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<KnowledgeItem> {
     const now = new Date().toISOString().split('T')[0];
-    const id = `kb-${Date.now()}`;
+    const id = crypto.randomUUID();
     const newItem: KnowledgeItem = {
       ...itemData,
       id,
@@ -1272,11 +1268,12 @@ export const db = {
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<AuditEvent> {
     const timestamp = new Date().toISOString();
-    const id = `aud-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const id = crypto.randomUUID();
     const newEvent: AuditEvent = {
       ...event,
       id,
       tenant_id: tenantId,
+      call_id: event.call_id && !event.call_id.startsWith('call-') ? event.call_id : undefined,
       timestamp,
     };
 
@@ -1332,12 +1329,90 @@ export const db = {
   },
 
   // -----------------------------------------------------------------------
+  // FOLLOWUPS
+  // -----------------------------------------------------------------------
+  async createFollowup(
+    followupData: Omit<FollowupRecord, 'id' | 'created_at' | 'updated_at'>,
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<FollowupRecord> {
+    const now = new Date().toISOString();
+    const id = crypto.randomUUID();
+    const newFollowup: FollowupRecord = {
+      ...followupData,
+      id,
+      tenant_id: tenantId,
+      created_at: now,
+      updated_at: now,
+    };
+
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client.from('followups').insert([newFollowup]).select().single();
+      if (!error && data) return data as FollowupRecord;
+    }
+    assertProductionDbReady();
+    globalStore.followups.unshift(newFollowup);
+    return newFollowup;
+  },
+
+  async getFollowupByCallId(
+    callId: string,
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<FollowupRecord | null> {
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client
+        .from('followups')
+        .select('*')
+        .eq('call_id', callId)
+        .eq('tenant_id', tenantId)
+        .single();
+      if (!error && data) return data as FollowupRecord;
+    }
+    assertProductionDbReady();
+    return globalStore.followups.find((f: FollowupRecord) => f.call_id === callId && f.tenant_id === tenantId) || null;
+  },
+
+  async listFollowups(tenantId: string = DEFAULT_TENANT_ID): Promise<FollowupRecord[]> {
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client
+        .from('followups')
+        .select('*')
+        .eq('tenant_id', tenantId)
+        .order('created_at', { ascending: false });
+      if (!error && data) return data as FollowupRecord[];
+    }
+    assertProductionDbReady();
+    return globalStore.followups.filter((f: FollowupRecord) => f.tenant_id === tenantId);
+  },
+
+  async getLeadByCallId(
+    callId: string,
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<Lead | null> {
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client
+        .from('leads')
+        .select('*')
+        .eq('call_id', callId)
+        .eq('tenant_id', tenantId)
+        .single();
+      if (!error && data) return data as Lead;
+    }
+    assertProductionDbReady();
+    return globalStore.leads.find((l: Lead) => l.call_id === callId && l.tenant_id === tenantId) || null;
+  },
+
+  // -----------------------------------------------------------------------
   // DISPATCHER KPIS
   // -----------------------------------------------------------------------
   async getKPIs(tenantId: string = DEFAULT_TENANT_ID): Promise<DispatcherKPIs> {
     const calls = await this.listCalls(tenantId);
     const leads = await this.listLeads(tenantId);
     const reqs = await this.listRequests(tenantId);
+    const auditEvents = await this.listAuditEvents(tenantId, 100);
 
     const missed = calls.filter((c) => c.outcome === 'MISSED' || c.outcome === 'FAILED').length;
     const escalated = calls.filter((c) => c.outcome === 'TRANSFERRED' || c.escalation_status?.is_escalated).length;
@@ -1345,16 +1420,26 @@ export const db = {
     const hotLeads = leads.filter((l) => l.temperature === 'HOT').length;
     const warmLeads = leads.filter((l) => l.temperature === 'WARM').length;
 
+    // Truthful calculation from actual recorded audit & call metrics
+    const toolEvents = auditEvents.filter((e) => e.event_type.startsWith('TOOL_'));
+    const successTools = toolEvents.filter((e) => e.event_type === 'TOOL_EXECUTION').length;
+    const toolSuccessRate = toolEvents.length > 0 ? Math.round((successTools / toolEvents.length) * 100) : 0;
+
+    const completedCalls = calls.filter((c) => c.duration_seconds > 0);
+    const avgDuration = completedCalls.length > 0
+      ? Math.round(completedCalls.reduce((acc, c) => acc + c.duration_seconds, 0) / completedCalls.length)
+      : 0;
+
     return {
       calls_today: calls.length,
-      calls_trend: '+14% vs yesterday',
+      calls_trend: calls.length > 0 ? `${calls.length} total active calls` : 'No live calls',
       missed_calls: missed,
       escalated_calls: escalated,
       open_requests: openReqs,
       hot_leads: hotLeads,
       warm_leads: warmLeads,
-      avg_response_latency_ms: 820,
-      tool_success_rate_percent: 98.4,
+      avg_response_latency_ms: avgDuration,
+      tool_success_rate_percent: toolSuccessRate,
     };
   },
 };

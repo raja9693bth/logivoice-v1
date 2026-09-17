@@ -15,7 +15,7 @@ import { verifyRetellWebhookSignature } from '@/lib/auth/context';
 import { processPostCallPipeline } from '@/lib/pipeline/post-call';
 import { db, DEFAULT_TENANT_ID } from '@/lib/db';
 import { createCorrelationContext, logTrace, logError } from '@/lib/observability/correlation';
-import { CallIntent } from '@/types/logivoice';
+import { CallIntent, CallOutcome } from '@/types/logivoice';
 
 export async function POST(req: NextRequest) {
   const correlation = createCorrelationContext(DEFAULT_TENANT_ID, undefined, 'RETELL_WEBHOOK');
@@ -51,7 +51,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Missing call_id in webhook payload' }, { status: 400 });
     }
 
-    const tenantId = rawBody.tenant_id || callData.tenant_id || DEFAULT_TENANT_ID;
+    // Resolve tenant ID securely
+    const tenantId = (process.env.NODE_ENV !== 'production' && (rawBody.tenant_id || callData.tenant_id)) || DEFAULT_TENANT_ID;
     logTrace(correlation, 'RETELL_WEBHOOK_RECEIVED', { event, external_call_id: externalCallId });
 
     // 1. Lifecycle Event: call_started
@@ -66,12 +67,12 @@ export async function POST(req: NextRequest) {
           {
             external_call_id: externalCallId,
             tenant_id: tenantId,
-            customer_id: customer ? customer.id : 'cust-unknown',
+            customer_id: customer ? customer.id : undefined,
             started_at: callData.start_timestamp ? new Date(callData.start_timestamp).toISOString() : new Date().toISOString(),
             duration_seconds: 0,
             primary_intent: 'GENERAL',
             sentiment: 'NEUTRAL',
-            outcome: 'COMPLETED',
+            outcome: 'IN_PROGRESS',
             lead_temperature: 'COLD',
             summary: 'Inbound call connected and active.',
             facts: { call_id: '' },
@@ -107,10 +108,25 @@ export async function POST(req: NextRequest) {
         else if (sum.includes('manager') || sum.includes('human') || sum.includes('transfer')) intent = 'HUMAN_REQUEST';
       }
 
-      // Duration in seconds
+      // Duration in seconds (never fabricate 60s if unmeasured)
       const durationSeconds = callData.duration_ms
         ? Math.round(callData.duration_ms / 1000)
-        : callData.duration_seconds || 60;
+        : (callData.duration_seconds ?? 0);
+
+      // Deterministic outcome mapping
+      let outcome: CallOutcome = 'COMPLETED';
+      const reason = (callData.disconnection_reason || '').toLowerCase();
+      if (customData.is_transferred || reason.includes('transfer')) {
+        outcome = 'TRANSFERRED';
+      } else if (customData.callback_scheduled || reason.includes('callback')) {
+        outcome = 'CALLBACK_SCHEDULED';
+      } else if (reason.includes('busy') || reason.includes('no_answer') || reason.includes('voicemail')) {
+        outcome = 'MISSED';
+      } else if (reason.includes('error') || reason.includes('failed')) {
+        outcome = 'FAILED';
+      } else if (durationSeconds < 5 && (reason.includes('hangup') || reason.includes('inactivity'))) {
+        outcome = 'ABANDONED';
+      }
 
       // Execute authoritative post-call pipeline
       const result = await processPostCallPipeline({
@@ -123,7 +139,7 @@ export async function POST(req: NextRequest) {
         summary: callData.call_analysis?.call_summary || callData.summary,
         intent,
         sentiment,
-        outcome: callData.disconnection_reason === 'user_hangup' || callData.disconnection_reason === 'agent_hangup' ? 'COMPLETED' : 'COMPLETED',
+        outcome,
         facts: customData.facts || {},
         is_escalated: customData.is_escalated || false,
         escalation_reason: customData.escalation_reason,

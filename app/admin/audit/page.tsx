@@ -85,43 +85,67 @@ export default function SystemAuditPage() {
       </div>
 
       {/* Gateway & Webhook Health Status Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
-        <div className="p-4 rounded-xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 space-y-1.5 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
-            <span>Retell Inbound Webhook</span>
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-          </div>
-          <div className="text-lg font-bold text-slate-900 dark:text-white font-mono">100% Healthy</div>
-          <p className="text-[10px] text-slate-500">Last received 2 mins ago</p>
-        </div>
+      {(() => {
+        const toolEvents = events.filter((e) => e.tool_name);
+        const failedToolEvents = toolEvents.filter((e) => e.severity === 'ERROR' || e.event_type.includes('FAIL')).length;
+        const toolSuccessRate = toolEvents.length > 0 ? Math.round(((toolEvents.length - failedToolEvents) / toolEvents.length) * 100) : null;
 
-        <div className="p-4 rounded-xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 space-y-1.5 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
-            <span>Operational Tool Gateway</span>
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-          </div>
-          <div className="text-lg font-bold text-slate-900 dark:text-white font-mono">99.2% Success</div>
-          <p className="text-[10px] text-slate-500">Latency p50: 165ms</p>
-        </div>
+        const webhookEvents = events.filter((e) => e.event_type.includes('WEBHOOK') || e.event_type.includes('CALL_'));
+        const latestWebhook = webhookEvents[0];
+        const suppressedEvents = events.filter((e) => e.event_type.includes('SUPPRESS') || (e.details as Record<string, unknown>)?.status === 'SUPPRESSED').length;
 
-        <div className="p-4 rounded-xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 space-y-1.5 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
-            <span>Follow-up Policy Engine</span>
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-          </div>
-          <div className="text-lg font-bold text-slate-900 dark:text-white font-mono">Enforced</div>
-          <p className="text-[10px] text-slate-500">2 events suppressed safely</p>
-        </div>
+        return (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
+            <div className="p-4 rounded-xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 space-y-1.5 shadow-xs">
+              <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
+                <span>Retell Inbound Webhook</span>
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+              </div>
+              <div className="text-lg font-bold text-slate-900 dark:text-white font-mono">
+                {webhookEvents.length > 0 ? 'Active' : 'Listening'}
+              </div>
+              <p className="text-[10px] text-slate-500">
+                {latestWebhook
+                  ? `Last event: ${new Date(latestWebhook.created_at || latestWebhook.timestamp).toLocaleTimeString('en-IN')}`
+                  : 'No webhook events recorded'}
+              </p>
+            </div>
 
-        <div className="p-4 rounded-xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 space-y-1.5 shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
-            <span>Tenant Isolation Boundary</span>
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+            <div className="p-4 rounded-xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 space-y-1.5 shadow-xs">
+              <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
+                <span>Operational Tool Gateway</span>
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+              </div>
+              <div className="text-lg font-bold text-slate-900 dark:text-white font-mono">
+                {toolSuccessRate !== null ? `${toolSuccessRate}% Success` : 'No data'}
+              </div>
+              <p className="text-[10px] text-slate-500">
+                {toolEvents.length > 0 ? `${toolEvents.length} tools executed` : 'Awaiting voice events'}
+              </p>
+            </div>
+
+            <div className="p-4 rounded-xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 space-y-1.5 shadow-xs">
+              <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
+                <span>Follow-up Policy Engine</span>
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+              </div>
+              <div className="text-lg font-bold text-slate-900 dark:text-white font-mono">Enforced</div>
+              <p className="text-[10px] text-slate-500">
+                {suppressedEvents > 0 ? `${suppressedEvents} events suppressed safely` : 'Zero suppression triggers'}
+              </p>
+            </div>
+
+            <div className="p-4 rounded-xl bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 space-y-1.5 shadow-xs">
+              <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
+                <span>Tenant Isolation Boundary</span>
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+              </div>
+              <div className="text-lg font-bold text-slate-900 dark:text-white font-mono">Secured</div>
+              <p className="text-[10px] text-slate-500">All queries scoped to tenant_id</p>
+            </div>
           </div>
-          <div className="text-lg font-bold text-slate-900 dark:text-white font-mono">Secured</div>
-          <p className="text-[10px] text-slate-500">All queries scoped to tenant_id</p>
-        </div>
-      </div>
+        );
+      })()}
 
       {/* Filter Bar */}
       <div className="p-4 rounded-xl bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col md:flex-row items-stretch md:items-center gap-3">

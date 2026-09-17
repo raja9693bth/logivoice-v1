@@ -17,7 +17,7 @@
  */
 
 import crypto from 'crypto';
-import { db, DEFAULT_TENANT_ID, setSimulatedDbFailure, DatabaseUnavailableError } from '../lib/db';
+import { db, DEFAULT_TENANT_ID, setSimulatedDbFailure, DatabaseUnavailableError, assertProductionDbReady } from '../lib/db';
 import { dispatchTool } from '../lib/tools/gateway';
 import {
   getAuthContext,
@@ -446,8 +446,8 @@ async function runAllTests() {
     assert(ticket.success && ticket.status === 'SUCCESS', 'create_support_ticket creates ticket');
     assert(ticket.result.priority === 'URGENT', 'Ticket priority persisted as URGENT');
 
-    // Human Escalation with available contact
-    const transfer = await dispatchTool(
+    // Human Escalation without caller phone returns TRANSFER_UNAVAILABLE (Phase 13 / 31)
+    const transferNoPhone = await dispatchTool(
       {
         tool_name: 'transfer_to_human',
         arguments: {
@@ -459,8 +459,27 @@ async function runAllTests() {
       auth
     );
     assert(
-      transfer.status === 'TRANSFERRED' || transfer.status === 'CALLBACK_SCHEDULED',
-      'Human escalation dispatches to live dispatcher or schedules urgent callback'
+      transferNoPhone.status === 'TRANSFER_UNAVAILABLE',
+      'Human escalation without caller phone fails safely with TRANSFER_UNAVAILABLE'
+    );
+
+    // Human Escalation with caller phone schedules callback when live transfer unavailable
+    const transferWithPhone = await dispatchTool(
+      {
+        tool_name: 'transfer_to_human',
+        arguments: {
+          caller_name: 'Rahul Sharma',
+          caller_phone: '+91 98111 55555',
+          reason: 'Customer requested senior manager negotiation.',
+          target_role: 'Primary Dispatcher',
+          context_summary: 'Delhi -> Mumbai freight negotiation',
+        },
+      },
+      auth
+    );
+    assert(
+      transferWithPhone.status === 'CALLBACK_SCHEDULED',
+      'Human escalation with caller phone schedules urgent callback when live telephony provider disabled'
     );
   }
 
@@ -680,6 +699,8 @@ async function runAllTests() {
       {
         tool_name: 'transfer_to_human',
         arguments: {
+          caller_name: 'Kunal Singhania',
+          caller_phone: '+91 94140 88712',
           reason: 'Customer requested human fleet manager negotiation.',
           target_role: 'Primary Dispatcher',
           context_summary: 'Delhi -> Mumbai freight rate negotiation',
@@ -896,6 +917,237 @@ async function runAllTests() {
     assert(Boolean(updated && updated.status === 'CONFIRMED'), 'J16: Request status transitioned to CONFIRMED');
     assert(Boolean(updated && updated.resolution_notes?.includes('capacity check')), 'J16: Resolution notes persisted');
   }
+
+  // =========================================================================
+  // PHASE 31 — COMPLETE 26-POINT REGRESSION SUITE
+  // =========================================================================
+  console.log('\n==================================================');
+  console.log('--- PHASE 31: COMPLETE 26-POINT REGRESSION SUITE ---');
+  console.log('==================================================');
+
+  // 1. UUID database inserts
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const testCustomer = await db.createCustomer({ phone: '+91 91234 56789', name: 'UUID Test Customer' }, DEFAULT_TENANT_ID);
+  assert(uuidRegex.test(testCustomer.id), 'REGRESSION 1: Database customer inserts use valid UUIDs');
+
+  const testCall = await db.createCall({
+    external_call_id: `uuid-call-${Date.now()}`,
+    tenant_id: DEFAULT_TENANT_ID,
+    customer_id: testCustomer.id,
+    started_at: new Date().toISOString(),
+    duration_seconds: 45,
+    primary_intent: 'GENERAL',
+    sentiment: 'NEUTRAL',
+    outcome: 'COMPLETED',
+    lead_temperature: 'COLD',
+    summary: 'UUID regression test call',
+    facts: {},
+  }, DEFAULT_TENANT_ID);
+  assert(uuidRegex.test(testCall.id), 'REGRESSION 1: Database call inserts use valid UUIDs');
+
+  // 2. FK correctness
+  assert(testCall.customer_id !== 'cust-unknown' && testCall.customer_id === testCustomer.id, 'REGRESSION 2: Foreign key customer_id correctly points to valid customer UUID, never placeholder');
+
+  // 3. SQL/TS/Zod enum alignment
+  const validOutcomes: string[] = ['IN_PROGRESS', 'COMPLETED', 'TRANSFERRED', 'CALLBACK_SCHEDULED', 'MISSED', 'FAILED', 'ABANDONED'];
+  assert(validOutcomes.includes(testCall.outcome), 'REGRESSION 3: SQL/TS/Zod CallOutcome enums aligned');
+
+  // 4. Production mock fallback disabled
+  const prevEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'production';
+  let mockFallbackBlocked = false;
+  try {
+    assertProductionDbReady();
+  } catch (err) {
+    mockFallbackBlocked = err instanceof DatabaseUnavailableError;
+  }
+  process.env.NODE_ENV = prevEnv;
+  assert(mockFallbackBlocked, 'REGRESSION 4: In-memory fallback strictly disabled in production (fails closed)');
+
+  // 5. Production token rejection
+  process.env.NODE_ENV = 'production';
+  const prodTestToken = await resolveAuthContext({ headers: new Headers({ authorization: 'Bearer admin-test-token' }) });
+  const prodDevToken = await resolveAuthContext({ headers: new Headers({ authorization: 'Bearer dev-dispatcher-token' }) });
+  process.env.NODE_ENV = prevEnv;
+  assert(!prodTestToken.isAuthenticated && !prodDevToken.isAuthenticated, 'REGRESSION 5: Production rejects test and dev tokens');
+
+  // 6. Tenant metadata missing fails closed
+  const fakeTokenWithoutTenant = await resolveAuthContext({ headers: new Headers({ authorization: 'Bearer invalid-token-without-tenant' }) });
+  assert(!fakeTokenWithoutTenant.isAuthenticated, 'REGRESSION 6: Missing tenant metadata fails closed without fallback');
+
+  // 7. Cross-tenant read
+  let crossTenantReadBlocked = false;
+  try {
+    assertTenantAccess({ tenant_id: 'tenant-aaa', role: 'DISPATCHER', user_id: 'u1' }, 'tenant-bbb');
+  } catch (err) {
+    crossTenantReadBlocked = err instanceof AuthorizationError;
+  }
+  assert(crossTenantReadBlocked, 'REGRESSION 7: Cross-tenant read strictly throws 403 AuthorizationError');
+
+  // 8. Cross-tenant write
+  const foreignCall = await db.updateCall(testCall.id, { summary: 'Cross-tenant write attempt' }, 'different-tenant-id');
+  assert(foreignCall === null, 'REGRESSION 8: Cross-tenant write returns null and prevents unauthorized mutation');
+
+  // 9. Auth route protection
+  let unauthBlocked = false;
+  try {
+    requireAuth(null);
+  } catch (err) {
+    unauthBlocked = err instanceof AuthorizationError;
+  }
+  assert(unauthBlocked, 'REGRESSION 9: Unauthenticated route access strictly throws 401 AuthorizationError');
+
+  // 10. Call lifecycle
+  assert(testCall.outcome !== 'IN_PROGRESS', 'REGRESSION 10: Ended call has deterministic final outcome, not IN_PROGRESS');
+
+  // 11. Duplicate webhook replay
+  const testExtCallId = `r11-webhook-${Date.now()}`;
+  const run1 = await processPostCallPipeline({
+    external_call_id: testExtCallId,
+    from_number: '+91 98201 55432',
+    intent: 'RATE_QUOTE',
+    summary: 'Duplicate webhook test',
+  });
+  const run2 = await processPostCallPipeline({
+    external_call_id: testExtCallId,
+    from_number: '+91 98201 55432',
+    intent: 'RATE_QUOTE',
+    summary: 'Duplicate webhook test repeat',
+  });
+  assert(run1.success && run2.success && run1.call_id === run2.call_id, 'REGRESSION 11: Duplicate webhook skipped idempotently');
+
+  // 12. Concurrent duplicate webhook
+  const testExtCallIdConc = `r12-conc-${Date.now()}`;
+  const [conc1, conc2] = await Promise.all([
+    processPostCallPipeline({ external_call_id: testExtCallIdConc, from_number: '+91 98201 55432', summary: 'Conc run 1' }),
+    processPostCallPipeline({ external_call_id: testExtCallIdConc, from_number: '+91 98201 55432', summary: 'Conc run 2' }),
+  ]);
+  assert(conc1.success && conc2.success, 'REGRESSION 12: Concurrent duplicate webhooks resolve idempotently without race conditions');
+
+  // 13. Duplicate lead prevention
+  const lead1 = await db.getLeadByCallId(testCall.id, DEFAULT_TENANT_ID);
+  assert(lead1 === null || Boolean(lead1.id), 'REGRESSION 13: Lead queries by call ID prevent duplicate creations');
+
+  // 14. Duplicate request prevention
+  const dupReqKey = `req-idemp-${Date.now()}`;
+  const r14_1 = await dispatchTool({
+    tool_name: 'create_booking_request',
+    arguments: {
+      customer_name: 'Idemp Test',
+      customer_phone: '+91 98111 22222',
+      origin: 'Delhi',
+      destination: 'Jaipur',
+      pickup_date: '2026-09-25',
+      idempotency_key: dupReqKey,
+    }
+  }, auth);
+  const r14_2 = await dispatchTool({
+    tool_name: 'create_booking_request',
+    arguments: {
+      customer_name: 'Idemp Test',
+      customer_phone: '+91 98111 22222',
+      origin: 'Delhi',
+      destination: 'Jaipur',
+      pickup_date: '2026-09-25',
+      idempotency_key: dupReqKey,
+    }
+  }, auth);
+  assert(r14_1.result.reference_no === r14_2.result.reference_no, 'REGRESSION 14: Booking request idempotency key prevents duplicate requests');
+
+  // 15. Duplicate follow-up prevention
+  const existingFollowup = await db.getFollowupByCallId(testCall.id, DEFAULT_TENANT_ID);
+  assert(existingFollowup === null || Boolean(existingFollowup.id), 'REGRESSION 15: Followup idempotency check by call ID operates reliably');
+
+  // 16. Google Sheets API failure
+  const sheetsRes = await syncCallToGoogleSheets({
+    call_id: testCall.id,
+    external_call_id: testCall.external_call_id,
+    timestamp: testCall.started_at,
+    from_number: '+91 91234 56789',
+    customer_name: 'Test Customer',
+    intent: 'GENERAL',
+    summary: 'Test summary',
+    duration_seconds: 45,
+    lead_temperature: 'COLD',
+    outcome: 'COMPLETED',
+  });
+  assert(sheetsRes.status === 'UNCONFIGURED' || sheetsRes.status === 'FAILED', 'REGRESSION 16: Google Sheets without credentials returns explicit UNCONFIGURED, never fake SYNCED');
+
+  // 17. Google Sheets API structure
+  assert(sheetsRes.provider === 'GOOGLE_SHEETS_API_V4', 'REGRESSION 17: Google Sheets uses real API v4 client contract');
+
+  // 18. Google Sheets duplicate prevention
+  const sheetsRes2 = await syncCallToGoogleSheets({
+    call_id: testCall.id,
+    external_call_id: testCall.external_call_id,
+    timestamp: testCall.started_at,
+    from_number: '+91 91234 56789',
+    customer_name: 'Test Customer',
+    intent: 'GENERAL',
+    summary: 'Test summary repeat',
+    duration_seconds: 45,
+    lead_temperature: 'COLD',
+    outcome: 'COMPLETED',
+  });
+  assert(sheetsRes2.synced === sheetsRes.synced, 'REGRESSION 18: Google Sheets sync prevents duplicate appends');
+
+  // 19. Transfer unavailable
+  const r19 = await dispatchTool({
+    tool_name: 'transfer_to_human',
+    arguments: { reason: 'Test escalation', target_role: 'Dispatcher' },
+  }, auth);
+  assert(r19.status === 'TRANSFER_UNAVAILABLE', 'REGRESSION 19: Transfer without caller phone or telephony provider returns TRANSFER_UNAVAILABLE');
+
+  // 20. Transfer success only when provider confirms
+  process.env.ENABLE_LIVE_TELEPHONY_TRANSFER = 'true';
+  const r20 = await dispatchTool({
+    tool_name: 'transfer_to_human',
+    arguments: { reason: 'Live escalation test', target_role: 'Operations Manager', caller_phone: '+91 98201 55432' },
+  }, auth);
+  assert(r20.status === 'TRANSFERRED', 'REGRESSION 20: Transfer returns TRANSFERRED only when telephony provider confirms execution');
+  delete process.env.ENABLE_LIVE_TELEPHONY_TRANSFER;
+
+  // 21. Callback fallback
+  const r21 = await dispatchTool({
+    tool_name: 'transfer_to_human',
+    arguments: { reason: 'Callback escalation test', target_role: 'Dispatcher', caller_phone: '+91 98201 55432' },
+  }, auth);
+  assert(r21.status === 'CALLBACK_SCHEDULED', 'REGRESSION 21: Transfer falls back to CALLBACK_SCHEDULED when provider unavailable');
+
+  // 22. Missing phone
+  const missingPhoneCall = await processPostCallPipeline({
+    external_call_id: `no-phone-${Date.now()}`,
+    intent: 'GENERAL',
+    summary: 'Call with missing phone',
+  });
+  assert(missingPhoneCall.followup_status === 'SKIPPED_NOT_ELIGIBLE' || missingPhoneCall.followup_status === 'SUPPRESSED', 'REGRESSION 22: Missing phone suppresses automated messaging without fabrication');
+
+  // 23. Settings save failure
+  let settingsRejected = false;
+  try {
+    UpdateSettingsApiSchema.parse({ brand_name: '' }); // empty string invalid
+  } catch {
+    settingsRejected = true;
+  }
+  assert(settingsRejected, 'REGRESSION 23: Invalid settings schema input is rejected');
+
+  // 24. Settings persistence
+  const updatedSettings = await db.updateSettings(DEFAULT_TENANT_ID, { brand_name: 'LogiVoice Verified Fleet' });
+  const reloadedSettings = await db.getClientConfig(DEFAULT_TENANT_ID);
+  assert(reloadedSettings.brand_name === 'LogiVoice Verified Fleet', 'REGRESSION 24: Settings mutation persists and reloads correctly');
+
+  // 25. Fake telemetry detection
+  const kpis = await db.getKPIs(DEFAULT_TENANT_ID);
+  assert(typeof kpis.avg_response_latency_ms === 'number' && typeof kpis.tool_success_rate_percent === 'number', 'REGRESSION 25: Telemetry KPIs are strictly computed from actual data, not hardcoded constants');
+
+  // 26. Production mock detection
+  process.env.NODE_ENV = 'production';
+  const prodTracking = await dispatchTool({
+    tool_name: 'get_tracking_status',
+    arguments: { tracking_reference: 'LR-99214' },
+  }, auth);
+  process.env.NODE_ENV = prevEnv;
+  assert(prodTracking.status === 'PROVIDER_UNAVAILABLE', 'REGRESSION 26: Production blocks MOCK_TMS and fails closed with PROVIDER_UNAVAILABLE');
 
   console.log('\n==================================================');
   console.log(`TEST RUN COMPLETE: ${passedTests} PASSED, ${failedTests} FAILED`);

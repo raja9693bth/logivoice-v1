@@ -44,8 +44,8 @@ export default function DashboardPage() {
     setIsLoading(true);
     setError(null);
 
-    // Check if demo mode was explicitly selected
-    const demoActive = typeof window !== 'undefined' && localStorage.getItem('logivoice_demo_mode') === 'true';
+    // Check if demo mode was explicitly selected (strictly forbidden in production)
+    const demoActive = process.env.NODE_ENV !== 'production' && typeof window !== 'undefined' && localStorage.getItem('logivoice_demo_mode') === 'true';
     setIsDemoMode(demoActive);
 
     if (demoActive) {
@@ -93,16 +93,23 @@ export default function DashboardPage() {
       const hotLeads = fetchedLeads.filter((l) => l.temperature === 'HOT').length;
       const warmLeads = fetchedLeads.filter((l) => l.temperature === 'WARM').length;
 
+      const successfulCalls = fetchedCalls.filter(
+        (c) => c.outcome === 'COMPLETED' || c.outcome === 'TRANSFERRED' || c.outcome === 'CALLBACK_SCHEDULED'
+      ).length;
+      const successRate = fetchedCalls.length > 0 ? Math.round((successfulCalls / fetchedCalls.length) * 1000) / 10 : 0;
+      const totalDuration = fetchedCalls.reduce((acc, c) => acc + (c.duration_seconds || 0), 0);
+      const avgDurationSec = fetchedCalls.length > 0 ? Math.round(totalDuration / fetchedCalls.length) : 0;
+
       setKpis({
         calls_today: fetchedCalls.length,
-        calls_trend: fetchedCalls.length > 0 ? '+100% active' : '0% live',
+        calls_trend: fetchedCalls.length > 0 ? `${fetchedCalls.length} recorded` : 'No calls',
         missed_calls: missed,
         escalated_calls: escalated,
         open_requests: openReqs,
         hot_leads: hotLeads,
         warm_leads: warmLeads,
-        avg_response_latency_ms: 820,
-        tool_success_rate_percent: 99.2,
+        avg_response_latency_ms: avgDurationSec * 1000,
+        tool_success_rate_percent: successRate,
       });
     } catch (err) {
       console.warn('[DashboardPage] Real API fetch error:', err);
@@ -295,35 +302,45 @@ export default function DashboardPage() {
           <Card className="space-y-4 min-w-0 max-w-full">
             <div>
               <div className="flex justify-between text-xs mb-1">
-                <span className="text-slate-500 dark:text-slate-400">Response Latency (p50)</span>
-                <span className="text-slate-900 dark:text-white font-mono font-semibold">820 ms</span>
+                <span className="text-slate-500 dark:text-slate-400">Call Success / Completion</span>
+                <span className="text-slate-900 dark:text-white font-mono font-semibold">
+                  {calls.length > 0 ? `${kpis?.tool_success_rate_percent ?? 0}%` : 'No data'}
+                </span>
               </div>
               <div className="w-full bg-slate-100 dark:bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                <div className="bg-emerald-500 h-full rounded-full" style={{ width: '82%' }} />
+                <div
+                  className="bg-emerald-500 h-full rounded-full transition-all"
+                  style={{ width: `${Math.min(100, kpis?.tool_success_rate_percent ?? 0)}%` }}
+                />
               </div>
-              <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">Target: &lt;1.2s perceived responsiveness</p>
+              <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">Authoritative outcome resolution</p>
             </div>
 
             <div>
               <div className="flex justify-between text-xs mb-1">
-                <span className="text-slate-500 dark:text-slate-400">Tool Execution Success</span>
-                <span className="text-slate-900 dark:text-white font-mono font-semibold">99.2%</span>
+                <span className="text-slate-500 dark:text-slate-400">Average Call Duration</span>
+                <span className="text-slate-900 dark:text-white font-mono font-semibold">
+                  {calls.length > 0 ? `${Math.round((kpis?.avg_response_latency_ms ?? 0) / 1000)}s` : 'No data'}
+                </span>
               </div>
               <div className="w-full bg-slate-100 dark:bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                <div className="bg-sky-500 h-full rounded-full" style={{ width: '99%' }} />
+                <div
+                  className="bg-sky-500 h-full rounded-full transition-all"
+                  style={{ width: `${Math.min(100, Math.max(10, Math.round((kpis?.avg_response_latency_ms ?? 0) / 1000)))}%` }}
+                />
               </div>
-              <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">Rates, Tracking &amp; Handoff Gateway</p>
+              <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">Measured from carrier connect to termination</p>
             </div>
 
             <div>
               <div className="flex justify-between text-xs mb-1">
-                <span className="text-slate-500 dark:text-slate-400">Interruption &amp; Barge-in</span>
-                <span className="text-slate-900 dark:text-white font-mono font-semibold">98.4%</span>
+                <span className="text-slate-500 dark:text-slate-400">Barge-in / Interruption</span>
+                <span className="text-slate-900 dark:text-white font-mono font-semibold">Enabled</span>
               </div>
               <div className="w-full bg-slate-100 dark:bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                <div className="bg-purple-500 h-full rounded-full" style={{ width: '98%' }} />
+                <div className="bg-purple-500 h-full rounded-full" style={{ width: '100%' }} />
               </div>
-              <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">Caller speech interrupt recognition</p>
+              <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">Voice streaming hardware interrupt detection</p>
             </div>
 
             <div className="pt-2 border-t border-slate-200 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-400 flex items-center justify-between">

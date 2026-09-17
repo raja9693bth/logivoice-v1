@@ -24,7 +24,7 @@ export async function GET(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   try {
     const authContext = await getAuthContext(req);
-    requireRole(authContext, ['ADMIN', 'OPS_MANAGER', 'SYSTEM']);
+    requireRole(authContext, ['ADMIN', 'OPS_MANAGER', 'DISPATCHER', 'SYSTEM']);
 
     let body: unknown;
     try {

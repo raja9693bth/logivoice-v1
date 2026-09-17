@@ -32,7 +32,7 @@ export const CreateCallApiSchema = z.object({
     ])
     .default('GENERAL'),
   sentiment: z.enum(['POSITIVE', 'NEUTRAL', 'FRUSTRATED', 'ANGRY']).default('NEUTRAL'),
-  outcome: z.enum(['COMPLETED', 'TRANSFERRED', 'CALLBACK_SCHEDULED', 'MISSED', 'FAILED', 'ABANDONED']).default('COMPLETED'),
+  outcome: z.enum(['IN_PROGRESS', 'COMPLETED', 'TRANSFERRED', 'CALLBACK_SCHEDULED', 'MISSED', 'FAILED', 'ABANDONED']).default('IN_PROGRESS'),
   summary: z.string().max(4000).default(''),
   facts: z
     .object({
@@ -77,7 +77,7 @@ export const UpdateCallApiSchema = z.object({
     ])
     .optional(),
   sentiment: z.enum(['POSITIVE', 'NEUTRAL', 'FRUSTRATED', 'ANGRY']).optional(),
-  outcome: z.enum(['COMPLETED', 'TRANSFERRED', 'CALLBACK_SCHEDULED', 'MISSED', 'FAILED', 'ABANDONED']).optional(),
+  outcome: z.enum(['IN_PROGRESS', 'COMPLETED', 'TRANSFERRED', 'CALLBACK_SCHEDULED', 'MISSED', 'FAILED', 'ABANDONED']).optional(),
   lead_temperature: z.enum(['HOT', 'WARM', 'COLD', 'REVIEW']).optional(),
   summary: z.string().max(4000).optional(),
   facts: z

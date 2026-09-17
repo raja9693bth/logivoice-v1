@@ -19,6 +19,7 @@ import { Card } from '@/components/ui/Card';
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<'PROFILE' | 'VOICE' | 'ESCALATION' | 'INTEGRATIONS'>('PROFILE');
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Business Profile State
   const [brandName, setBrandName] = useState('LogiVoice Freight Express');
@@ -42,9 +43,12 @@ export default function SettingsPage() {
   const [opsManager, setOpsManager] = useState('+91 98222 33445 (Rohan Verma - Hub Head)');
   const [breakdownEmergency, setBreakdownEmergency] = useState('+91 98333 44556 (24/7 Roadside Rescue Line)');
 
-  React.useEffect(() => {
+  const loadSettings = () => {
     fetch('/api/settings')
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
       .then((data) => {
         if (data?.config) {
           const cfg = data.config;
@@ -55,12 +59,17 @@ export default function SettingsPage() {
         }
       })
       .catch((err) => console.warn('[SettingsPage] API fetch error:', err));
+  };
+
+  React.useEffect(() => {
+    loadSettings();
   }, []);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSaveError(null);
     try {
-      await fetch('/api/settings', {
+      const res = await fetch('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -70,11 +79,25 @@ export default function SettingsPage() {
           ai_disclosure_wording: disclosureWording,
         }),
       });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Failed to save configuration (HTTP ${res.status})`);
+      }
+
+      const data = await res.json();
+      if (data?.config) {
+        if (data.config.brand_name) setBrandName(data.config.brand_name);
+        if (data.config.business_name) setLegalName(data.config.business_name);
+        if (data.config.primary_operating_cities) setOperatingRegions(data.config.primary_operating_cities.join(', '));
+        if (data.config.ai_disclosure_wording) setDisclosureWording(data.config.ai_disclosure_wording);
+      }
+
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
-    } catch {
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 3000);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Save operation failed');
+      setTimeout(() => setSaveError(null), 5000);
     }
   };
 
@@ -97,6 +120,12 @@ export default function SettingsPage() {
           <div className="px-3 py-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/80 border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 text-xs font-medium flex items-center gap-1.5 animate-in fade-in">
             <CheckCircle2 className="w-3.5 h-3.5" />
             <span>Settings Saved Successfully</span>
+          </div>
+        )}
+        {saveError && (
+          <div className="px-3 py-1.5 rounded-lg bg-rose-50 dark:bg-rose-950/80 border border-rose-300 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs font-medium flex items-center gap-1.5 animate-in fade-in">
+            <AlertCircle className="w-3.5 h-3.5" />
+            <span>{saveError}</span>
           </div>
         )}
       </div>
@@ -346,7 +375,7 @@ export default function SettingsPage() {
                     CONNECTED
                   </span>
                 </div>
-                <p className="text-slate-600 dark:text-slate-400 text-[11px]">Primary voice streaming, latency p50 ~820ms, bilingual Hindi/English.</p>
+                <p className="text-slate-600 dark:text-slate-400 text-[11px]">Primary voice streaming, real-time audio pipeline, bilingual Hindi/English.</p>
                 <div className="text-slate-500 font-mono text-[10px]">Configured in .env.local (RETELL_API_KEY)</div>
               </div>
 

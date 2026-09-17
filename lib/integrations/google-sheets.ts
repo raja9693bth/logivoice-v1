@@ -2,9 +2,14 @@
  * LOGIVOICE V1 — GOOGLE SHEETS OPERATIONAL VIEW SYNC
  * Secondary operational synchronization layer. Supabase remains master record.
  * Handles duplicate prevention, safe auth, and deterministic mock adapter when unconfigured.
+ *
+ * Configured Spreadsheet:
+ * ID: 1bvfGYB8btM_Ce7QWTg7JdLVEKl4yJSX0goocyTzLADE
  */
 
 import { Call, Lead } from '@/types/logivoice';
+
+export const DEFAULT_SPREADSHEET_ID = '1bvfGYB8btM_Ce7QWTg7JdLVEKl4yJSX0goocyTzLADE';
 
 export interface SheetRowData {
   date: string;
@@ -44,11 +49,50 @@ export function resetSheetsSyncIdempotency(): void {
   syncedCallIds.clear();
 }
 
+/**
+ * Exchanges OAuth refresh token for a short-lived Google Sheets API access token.
+ */
+async function getGoogleAccessToken(): Promise<string | null> {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    return null;
+  }
+
+  try {
+    const res = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token',
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.warn('[GoogleSheets] Token exchange failed:', res.status, errText);
+      return null;
+    }
+
+    const data = await res.json();
+    return data.access_token || null;
+  } catch (err) {
+    console.warn('[GoogleSheets] Token request exception:', err);
+    return null;
+  }
+}
+
 export async function syncCallToGoogleSheets(
   call: Call,
   lead?: Lead | null
 ): Promise<SheetSyncResult> {
-  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID || DEFAULT_SPREADSHEET_ID;
 
   // Format row columns strictly according to SSOT 03_STRUCTURED_DATA_MODEL line 214
   const rowData: SheetRowData = {
@@ -73,20 +117,82 @@ export async function syncCallToGoogleSheets(
     assigned_to: lead?.assigned_to || 'Primary Dispatcher',
   };
 
-  // Idempotency: skip if already synced
+  // Idempotency: skip if already synced in current runtime
   if (syncedCallIds.has(call.external_call_id)) {
     return {
       synced: true,
       status: 'SKIPPED',
       provider: 'IDEMPOTENCY_GUARD',
-      spreadsheet_id: spreadsheetId || 'mock-sheet-id',
+      spreadsheet_id: spreadsheetId,
     };
   }
 
-  // 1. If real Google credentials exist (production)
-  if (spreadsheetId && process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_REFRESH_TOKEN) {
+  // 1. Live Google Sheets REST API integration (Requires OAuth credentials)
+  const hasCredentials = Boolean(
+    process.env.GOOGLE_CLIENT_ID &&
+    process.env.GOOGLE_CLIENT_SECRET &&
+    process.env.GOOGLE_REFRESH_TOKEN
+  );
+
+  if (hasCredentials) {
     try {
-      // In production, syncs via Google Sheets REST API
+      const accessToken = await getGoogleAccessToken();
+      if (!accessToken) {
+        return {
+          synced: false,
+          status: 'FAILED',
+          provider: 'GOOGLE_SHEETS_API_V4',
+          error: 'Failed to obtain Google Sheets access token from refresh token',
+        };
+      }
+
+      const appendRes = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1:append?valueInputOption=USER_ENTERED`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            values: [
+              [
+                rowData.date,
+                rowData.call_id,
+                rowData.customer,
+                rowData.phone,
+                rowData.company,
+                rowData.intent,
+                rowData.origin,
+                rowData.destination,
+                rowData.weight,
+                rowData.vehicle,
+                rowData.quote,
+                rowData.quote_type,
+                rowData.tracking_ref,
+                rowData.lead_status,
+                rowData.lead_temp,
+                rowData.summary,
+                rowData.escalated,
+                rowData.next_action,
+                rowData.assigned_to,
+              ],
+            ],
+          }),
+          signal: AbortSignal.timeout(10000),
+        }
+      );
+
+      if (!appendRes.ok) {
+        const errText = await appendRes.text();
+        return {
+          synced: false,
+          status: 'FAILED',
+          provider: 'GOOGLE_SHEETS_API_V4',
+          error: `Google Sheets API error HTTP ${appendRes.status}: ${errText}`,
+        };
+      }
+
       syncedCallIds.add(call.external_call_id);
       return {
         synced: true,
@@ -99,29 +205,27 @@ export async function syncCallToGoogleSheets(
         synced: false,
         status: 'FAILED',
         provider: 'GOOGLE_SHEETS_API_V4',
-        error: err instanceof Error ? err.message : 'Google Sheets API error',
+        error: err instanceof Error ? err.message : 'Google Sheets API network error',
       };
     }
   }
 
-  // 2. Unconfigured credentials check
-  if (!spreadsheetId || !process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_REFRESH_TOKEN) {
-    if (process.env.NODE_ENV === 'production' || process.env.ENABLE_MOCK_INTEGRATIONS !== 'true') {
-      return {
-        synced: false,
-        status: 'UNCONFIGURED',
-        provider: 'GOOGLE_SHEETS_API_V4',
-        error: 'Google Sheets credentials not configured. Authoritative record preserved in Supabase.',
-      };
-    }
+  // 2. Unconfigured credentials check (Production fail closed)
+  if (process.env.NODE_ENV === 'production' || process.env.ENABLE_MOCK_INTEGRATIONS !== 'true') {
+    return {
+      synced: false,
+      status: 'UNCONFIGURED',
+      provider: 'GOOGLE_SHEETS_API_V4',
+      error: 'Google Sheets OAuth credentials not configured in environment. Master record preserved in Supabase.',
+    };
   }
 
-  // 3. Explicit Mock Sync for development/testing
+  // 3. Explicit Mock Sync for non-production development/testing only
   syncedCallIds.add(call.external_call_id);
   return {
     synced: true,
     status: 'MOCK_SYNCED',
-    spreadsheet_id: spreadsheetId || 'mock-spreadsheet-logivoice-v1',
+    spreadsheet_id: spreadsheetId,
     provider: 'DETERMINISTIC_MOCK_SHEETS_ADAPTER',
   };
 }

@@ -24,6 +24,15 @@ export async function executeGetTrackingStatus(
       };
     }
 
+    // In production, MOCK_TMS records must never be presented as real live shipment telemetry
+    if (process.env.NODE_ENV === 'production' && record.source === 'MOCK_TMS') {
+      return {
+        status: 'PROVIDER_UNAVAILABLE',
+        tracking_reference: ref,
+        message: 'Live TMS provider integration is unconfigured in production environment.',
+      };
+    }
+
     return {
       status: 'FOUND',
       tracking_reference: record.tracking_reference,

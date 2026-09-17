@@ -31,7 +31,7 @@ export async function executeCreateSupportTicket(
       {
         reference_no: referenceNo,
         tenant_id: tenantId,
-        call_id: input.call_id || `call-${Date.now()}`,
+        call_id: input.call_id || undefined,
         customer_id: customer.id,
         customer_name: customer.name,
         customer_phone: customer.phone,

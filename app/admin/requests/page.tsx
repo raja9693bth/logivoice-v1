@@ -34,7 +34,7 @@ export default function RequestsPage() {
     setIsLoading(true);
     setError(null);
 
-    const demoActive = typeof window !== 'undefined' && localStorage.getItem('logivoice_demo_mode') === 'true';
+    const demoActive = process.env.NODE_ENV !== 'production' && typeof window !== 'undefined' && localStorage.getItem('logivoice_demo_mode') === 'true';
     setIsDemoMode(demoActive);
 
     if (demoActive) {

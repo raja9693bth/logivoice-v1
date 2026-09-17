@@ -87,7 +87,7 @@ export async function getAuthContext(
   const headers: Headers =
     req instanceof Headers
       ? req
-      : 'headers' in req && req.headers
+      : req && typeof req === 'object' && 'headers' in req && req.headers
       ? (req.headers as Headers)
       : new Headers();
 
@@ -151,8 +151,23 @@ export async function getAuthContext(
       const client = createAdminClient();
       const { data: { user }, error } = await client.auth.getUser(token);
       if (!error && user) {
-        const tenantId = (user.app_metadata?.tenant_id as string) || DEFAULT_TENANT_ID;
-        const role = (user.app_metadata?.role as UserRole) || 'DISPATCHER';
+        const metadataTenant = user.app_metadata?.tenant_id as string | undefined;
+        const metadataRole = user.app_metadata?.role as UserRole | undefined;
+
+        // In production, user MUST have explicit tenant_id and supported role in server-validated app_metadata
+        if (isProduction && (!metadataTenant || !metadataRole)) {
+          console.warn('[AuthContext] Production user rejected: missing tenant_id or role in app_metadata');
+          return {
+            userId: user.id,
+            tenantId: '',
+            role: 'DISPATCHER',
+            isAuthenticated: false,
+            source: 'UNAUTHENTICATED',
+          };
+        }
+
+        const tenantId = metadataTenant || DEFAULT_TENANT_ID;
+        const role = metadataRole || 'DISPATCHER';
         return {
           userId: user.id,
           tenantId,
@@ -184,8 +199,22 @@ export async function getAuthContext(
 
       const { data: { user }, error } = await supabase.auth.getUser();
       if (!error && user) {
-        const tenantId = (user.app_metadata?.tenant_id as string) || DEFAULT_TENANT_ID;
-        const role = (user.app_metadata?.role as UserRole) || 'DISPATCHER';
+        const metadataTenant = user.app_metadata?.tenant_id as string | undefined;
+        const metadataRole = user.app_metadata?.role as UserRole | undefined;
+
+        if (isProduction && (!metadataTenant || !metadataRole)) {
+          console.warn('[AuthContext] Production cookie session rejected: missing tenant_id or role in app_metadata');
+          return {
+            userId: user.id,
+            tenantId: '',
+            role: 'DISPATCHER',
+            isAuthenticated: false,
+            source: 'UNAUTHENTICATED',
+          };
+        }
+
+        const tenantId = metadataTenant || DEFAULT_TENANT_ID;
+        const role = metadataRole || 'DISPATCHER';
         return {
           userId: user.id,
           tenantId,
@@ -228,8 +257,8 @@ export const resolveAuthContext = getAuthContext;
 /**
  * Enforces that the request has an authenticated identity.
  */
-export function requireAuth(context: AuthContext) {
-  if (!context.isAuthenticated) {
+export function requireAuth(context: AuthContext | null | undefined) {
+  if (!context || !context.isAuthenticated) {
     throw new AuthorizationError('Authentication required', 401);
   }
 }

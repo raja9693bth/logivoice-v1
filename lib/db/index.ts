@@ -103,6 +103,9 @@ export interface ClientConfig {
   secondary_language: string;
   inbound_phone_number?: string;
   booking_url?: string;
+  voice_persona?: string;
+  barge_in_enabled?: boolean;
+  allow_language_switching?: boolean;
   escalation_contacts: Array<{
     role: string;
     name: string;
@@ -526,6 +529,17 @@ class Store {
       source: 'MOCK_TMS',
       last_synced_at: new Date().toISOString(),
     },
+    {
+      id: 'trk-05',
+      tenant_id: DEFAULT_TENANT_ID,
+      tracking_reference: 'LR-88291',
+      status: 'IN_TRANSIT',
+      current_location: 'Kotputli Toll Plaza (NH 48)',
+      status_timestamp: new Date(Date.now() - 30 * 60000).toISOString(),
+      eta_if_verified: new Date(Date.now() + 4 * 3600000).toISOString(),
+      source: 'MOCK_TMS',
+      last_synced_at: new Date().toISOString(),
+    },
   ];
 
   knowledge_items: KnowledgeItem[] = [
@@ -802,6 +816,9 @@ export const db = {
     if (updates.tracking_config !== undefined) sanitizedUpdates.tracking_config = updates.tracking_config;
     if (updates.followup_config !== undefined) sanitizedUpdates.followup_config = updates.followup_config;
     if (updates.sheets_config !== undefined) sanitizedUpdates.sheets_config = updates.sheets_config;
+    if (updates.voice_persona !== undefined) sanitizedUpdates.voice_persona = updates.voice_persona;
+    if (updates.barge_in_enabled !== undefined) sanitizedUpdates.barge_in_enabled = updates.barge_in_enabled;
+    if (updates.allow_language_switching !== undefined) sanitizedUpdates.allow_language_switching = updates.allow_language_switching;
 
     const now = new Date().toISOString();
     if (await isSupabaseLive()) {
@@ -850,23 +867,40 @@ export const db = {
   },
 
   async getCustomerByPhone(phone: string, tenantId: string = DEFAULT_TENANT_ID): Promise<Customer | null> {
-    const cleanPhone = phone.replace(/[\s-]/g, '');
+    const rawClean = phone.replace(/[\s-]/g, '');
+    const normalized = rawClean.startsWith('+')
+      ? rawClean
+      : rawClean.length === 10
+      ? `+91${rawClean}`
+      : rawClean.length === 12 && rawClean.startsWith('91')
+      ? `+${rawClean}`
+      : rawClean;
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
       const { data, error } = await client
         .from('customers')
         .select('*')
         .eq('tenant_id', tenantId)
-        .ilike('phone', `%${cleanPhone.slice(-10)}%`)
+        .or(`phone.eq.${normalized},phone.eq.${rawClean},phone.eq.${phone}`)
         .limit(1)
-        .single();
+        .maybeSingle();
       if (!error && data) return data as Customer;
     }
     assertProductionDbReady();
     return (
-      globalStore.customers.find(
-        (c) => c.tenant_id === tenantId && c.phone.replace(/[\s-]/g, '').endsWith(cleanPhone.slice(-10))
-      ) || null
+      globalStore.customers.find((c) => {
+        if (c.tenant_id !== tenantId) return false;
+        const cClean = c.phone.replace(/[\s-]/g, '');
+        const cNorm = cClean.startsWith('+')
+          ? cClean
+          : cClean.length === 10
+          ? `+91${cClean}`
+          : cClean.length === 12 && cClean.startsWith('91')
+          ? `+${cClean}`
+          : cClean;
+        return cNorm === normalized || cClean === rawClean || c.phone === phone;
+      }) || null
     );
   },
 
@@ -1072,6 +1106,9 @@ export const db = {
       if (updates.escalation_status !== undefined) updatePayload.escalation_status = updates.escalation_status;
       if (updates.followup_state !== undefined) updatePayload.followup_state = updates.followup_state;
       if (updates.customer_id !== undefined) updatePayload.customer_id = updates.customer_id;
+      if (updates.recording_url !== undefined) updatePayload.recording_url = updates.recording_url;
+      if (updates.agent_version !== undefined) updatePayload.agent_version = updates.agent_version;
+      if (updates.intent_confidence !== undefined) updatePayload.intent_confidence = updates.intent_confidence;
 
       const { data, error } = await client
         .from('calls')
@@ -1092,6 +1129,22 @@ export const db = {
             throw new Error(`Failed to update call_facts for call ${callId}: ${factsErr.message}`);
           }
         }
+        if (updates.transcript && updates.transcript.length > 0) {
+          const transcriptRows = updates.transcript.map((t) => ({
+            id: crypto.randomUUID(),
+            call_id: callId,
+            tenant_id: tenantId,
+            speaker: t.speaker,
+            text: t.text,
+            timestamp: t.timestamp,
+            language: t.language || null,
+            created_at: new Date().toISOString(),
+          }));
+          const { error: transcriptErr } = await client.from('transcript_segments').insert(transcriptRows);
+          if (transcriptErr) {
+            throw new Error(`Failed to update transcript_segments for call ${callId}: ${transcriptErr.message}`);
+          }
+        }
         return dbCallToDomain(data, factsRow);
       }
     }
@@ -1102,8 +1155,8 @@ export const db = {
       ...globalStore.calls[idx],
       ...updates,
       facts: updates.facts ? { ...globalStore.calls[idx].facts, ...updates.facts } : globalStore.calls[idx].facts,
+      transcript: updates.transcript || globalStore.calls[idx].transcript,
     };
-    return globalStore.calls[idx];
     return globalStore.calls[idx];
   },
 
@@ -1112,7 +1165,7 @@ export const db = {
   // -----------------------------------------------------------------------
   async listLeads(
     tenantId: string = DEFAULT_TENANT_ID,
-    filters?: { temperature?: LeadTemperature; search?: string; limit?: number; offset?: number }
+    filters?: { temperature?: LeadTemperature; status?: string; search?: string; limit?: number; offset?: number }
   ): Promise<Lead[]> {
     const limit = Math.min(Math.max(filters?.limit || 50, 1), 100);
     const offset = Math.max(filters?.offset || 0, 0);
@@ -1127,6 +1180,7 @@ export const db = {
         .range(offset, offset + limit - 1);
 
       if (filters?.temperature) query = query.eq('temperature', filters.temperature);
+      if (filters?.status) query = query.eq('status', filters.status);
       if (filters?.search) {
         const s = filters.search.trim();
         if (s) {
@@ -1144,6 +1198,7 @@ export const db = {
     assertProductionDbReady();
     let leads = globalStore.leads.filter((l) => l.tenant_id === tenantId);
     if (filters?.temperature) leads = leads.filter((l) => l.temperature === filters.temperature);
+    if (filters?.status) leads = leads.filter((l) => l.status === filters.status);
     if (filters?.search) {
       const s = filters.search.toLowerCase();
       leads = leads.filter(
@@ -1348,6 +1403,34 @@ export const db = {
     return reqs.slice(offset, offset + limit);
   },
 
+  async getRequestByIdempotencyKey(
+    key: string,
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<OperationsRequest | null> {
+    if (!key) return null;
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client
+        .from('operations_requests')
+        .select('*, customer:customers(*)')
+        .eq('tenant_id', tenantId)
+        .eq('idempotency_key', key)
+        .maybeSingle();
+      if (!error && data) {
+        const customer = Array.isArray(data.customer) ? data.customer[0] : data.customer;
+        return dbRequestToDomain(data, customer);
+      }
+    }
+    assertProductionDbReady();
+    return (
+      globalStore.operations_requests.find(
+        (r) =>
+          r.tenant_id === tenantId &&
+          (r.idempotency_key === key || (r.details as Record<string, unknown>)?.idempotency_key === key)
+      ) || null
+    );
+  },
+
   async createRequest(
     requestData: Omit<OperationsRequest, 'id' | 'created_at' | 'updated_at'>,
     tenantId: string = DEFAULT_TENANT_ID
@@ -1359,6 +1442,13 @@ export const db = {
       await validateTenantEntityOwnership('call', requestData.call_id, tenantId);
     }
 
+    if (requestData.idempotency_key) {
+      const existing = await this.getRequestByIdempotencyKey(requestData.idempotency_key, tenantId);
+      if (existing) {
+        return existing;
+      }
+    }
+
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
     const newReq: OperationsRequest = {
@@ -1367,6 +1457,7 @@ export const db = {
       tenant_id: tenantId,
       customer_id: requestData.customer_id && !requestData.customer_id.startsWith('cust-unknown') ? requestData.customer_id : undefined,
       call_id: requestData.call_id && !requestData.call_id.startsWith('call-') ? requestData.call_id : undefined,
+      idempotency_key: requestData.idempotency_key,
       created_at: now,
       updated_at: now,
     };
@@ -1487,14 +1578,32 @@ export const db = {
       return false;
     };
 
+    // Deterministic precedence ordering: vehicle match -> weight match -> effective_from recency -> price
+    const candidateMatches = validCards.filter((rc) => matchesRoute(rc));
+    candidateMatches.sort((a, b) => {
+      const aVehicle = vehicle && a.vehicle_type.trim().toLowerCase() === vehicle ? 1 : 0;
+      const bVehicle = vehicle && b.vehicle_type.trim().toLowerCase() === vehicle ? 1 : 0;
+      if (aVehicle !== bVehicle) return bVehicle - aVehicle;
+
+      const aWeight = matchesWeight(a, validCards) ? 1 : 0;
+      const bWeight = matchesWeight(b, validCards) ? 1 : 0;
+      if (aWeight !== bWeight) return bWeight - aWeight;
+
+      const aDate = a.effective_from || '';
+      const bDate = b.effective_from || '';
+      if (aDate !== bDate) return bDate.localeCompare(aDate);
+
+      return a.price_inr - b.price_inr;
+    });
+
     // 1. Exact match origin + destination + vehicleType + weight among currently valid cards
     if (vehicle) {
-      const exactMatch = validCards.find((rc) => matchesRoute(rc) && matchesVehicle(rc) && matchesWeight(rc, validCards));
+      const exactMatch = candidateMatches.find((rc) => matchesVehicle(rc) && matchesWeight(rc, validCards));
       if (exactMatch) return exactMatch;
     }
 
-    // 2. Route match within weight limits among currently valid cards
-    const routeMatch = validCards.find((rc) => matchesRoute(rc) && matchesWeight(rc, validCards));
+    // 2. Route match within weight limits among currently valid cards (highest precedence first)
+    const routeMatch = candidateMatches.find((rc) => matchesWeight(rc, validCards));
     if (routeMatch) return routeMatch;
 
     // 3. If no valid card found and includeExpired is requested, check for an expired card on this corridor
@@ -1728,6 +1837,8 @@ export const db = {
         if (getRuntimeMode() === 'PRODUCTION') {
           throw new Error(`Audit event failed to persist: ${error.message}`);
         }
+      } else {
+        return newEvent;
       }
     }
     assertProductionDbReady();
@@ -1882,25 +1993,68 @@ export const db = {
     const hotLeads = leads.filter((l) => l.temperature === 'HOT').length;
     const warmLeads = leads.filter((l) => l.temperature === 'WARM').length;
 
-    // Truthful calculation from actual recorded audit & call metrics
-    const toolEvents = auditEvents.filter((e) => e.event_type.startsWith('TOOL_'));
-    const successTools = toolEvents.filter((e) => e.event_type === 'TOOL_EXECUTION').length;
-    const toolSuccessRate = toolEvents.length > 0 ? Math.round((successTools / toolEvents.length) * 100) : 0;
+    // Truthful calculation of calls occurring today in business timezone (Asia/Kolkata)
+    const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const callsToday = calls.filter((c) => {
+      const d = c.started_at;
+      if (!d) return false;
+      const callDateStr = new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+      return callDateStr === todayStr;
+    });
 
-    const completedCalls = calls.filter((c) => c.duration_seconds > 0);
-    const avgDuration = completedCalls.length > 0
-      ? Math.round(completedCalls.reduce((acc, c) => acc + c.duration_seconds, 0) / completedCalls.length)
+    // Truthful calculation of tool success rate and response latency from measured tool executions
+    const measuredLatencies: number[] = [];
+    let totalToolAttempts = 0;
+    let successfulToolExecutions = 0;
+
+    for (const c of calls) {
+      if (c.tool_events && c.tool_events.length > 0) {
+        for (const te of c.tool_events) {
+          totalToolAttempts++;
+          if (te.execution_status === 'SUCCESS' || te.status === 'SUCCESS' || te.status === 'PENDING') {
+            successfulToolExecutions++;
+          }
+          if (typeof te.latency_ms === 'number' && te.latency_ms > 0) {
+            measuredLatencies.push(te.latency_ms);
+          }
+        }
+      }
+    }
+
+    for (const ae of auditEvents) {
+      if (ae.event_type.startsWith('TOOL_')) {
+        const details = (ae.details as Record<string, unknown>) || {};
+        if (typeof details.latency_ms === 'number' && details.latency_ms > 0) {
+          measuredLatencies.push(details.latency_ms);
+        }
+      }
+    }
+
+    if (totalToolAttempts === 0) {
+      const toolAudit = auditEvents.filter((e) => e.event_type.startsWith('TOOL_'));
+      totalToolAttempts = toolAudit.length;
+      successfulToolExecutions = toolAudit.filter(
+        (e) => e.event_type === 'TOOL_EXECUTION' && (e.details as Record<string, unknown>)?.success !== false
+      ).length;
+    }
+
+    const toolSuccessRate = totalToolAttempts > 0
+      ? Math.round((successfulToolExecutions / totalToolAttempts) * 100)
+      : 100;
+
+    const avgToolLatencyMs = measuredLatencies.length > 0
+      ? Math.round(measuredLatencies.reduce((acc, l) => acc + l, 0) / measuredLatencies.length)
       : 0;
 
     return {
-      calls_today: calls.length,
-      calls_trend: calls.length > 0 ? `${calls.length} total active calls` : 'No live calls',
+      calls_today: callsToday.length,
+      calls_trend: callsToday.length > 0 ? `${callsToday.length} active calls today` : 'No calls today',
       missed_calls: missed,
       escalated_calls: escalated,
       open_requests: openReqs,
       hot_leads: hotLeads,
       warm_leads: warmLeads,
-      avg_response_latency_ms: avgDuration,
+      avg_response_latency_ms: avgToolLatencyMs,
       tool_success_rate_percent: toolSuccessRate,
     };
   },

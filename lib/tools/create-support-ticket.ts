@@ -13,10 +13,7 @@ export async function executeCreateSupportTicket(
 ): Promise<CreateSupportTicketOutput> {
   try {
     if (input.idempotency_key) {
-      const existing = await db.listRequests(tenantId);
-      const matched = existing.find(
-        (r) => (r.details as Record<string, unknown>)?.idempotency_key === input.idempotency_key
-      );
+      const matched = await db.getRequestByIdempotencyKey(input.idempotency_key, tenantId);
       if (matched) {
         return {
           status: 'SUCCESS',
@@ -55,6 +52,7 @@ export async function executeCreateSupportTicket(
         type: 'SUPPORT_TICKET',
         status: 'PENDING',
         priority: input.priority || 'NORMAL',
+        idempotency_key: input.idempotency_key || undefined,
         summary: input.issue,
         details: {
           issue: input.issue,

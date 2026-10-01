@@ -39,14 +39,15 @@ export async function sendFollowupMessage(payload: MessagePayload): Promise<Mess
   }
 
   // 2. Check for real provider configuration
-  const whatsappKey = process.env.WHATSAPP_API_KEY;
+  const whatsappKey = process.env.WHATSAPP_API_KEY || process.env.WHATSAPP_API_TOKEN;
   const whatsappPhoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
 
   if (payload.channel === 'WHATSAPP' && whatsappKey && whatsappPhoneId) {
     try {
-      // Production Meta WhatsApp Cloud API boundary
+      // Production Meta WhatsApp Cloud API boundary with 10s request timeout
       const res = await fetch(`https://graph.facebook.com/v21.0/${whatsappPhoneId}/messages`, {
         method: 'POST',
+        signal: AbortSignal.timeout(10000),
         headers: {
           Authorization: `Bearer ${whatsappKey}`,
           'Content-Type': 'application/json',

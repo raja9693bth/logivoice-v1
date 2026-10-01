@@ -84,6 +84,9 @@ export default function SettingsPage() {
         if (cfg.business_hours) {
           setWorkingHours(`${cfg.business_hours.start} – ${cfg.business_hours.end} (${cfg.business_hours.days})`);
         }
+        if (cfg.voice_persona) setVoicePersona(cfg.voice_persona);
+        if (typeof cfg.barge_in_enabled === 'boolean') setBargeInEnabled(cfg.barge_in_enabled);
+        if (typeof cfg.allow_language_switching === 'boolean') setAllowSwitching(cfg.allow_language_switching);
         if (Array.isArray(cfg.escalation_contacts)) {
           const d = cfg.escalation_contacts.find((c: { role: string }) => c.role === 'DISPATCHER');
           if (d) {
@@ -130,6 +133,14 @@ export default function SettingsPage() {
         ai_disclosure_wording: disclosureWording,
         primary_language: primaryLang,
         timezone: timezone.split(' ')[0] || 'Asia/Kolkata',
+        business_hours: {
+          start: workingHours.split('–')[0]?.trim() || '08:00',
+          end: workingHours.split('–')[1]?.split('(')[0]?.trim() || '20:00',
+          days: workingHours.includes('(') ? workingHours.split('(')[1]?.replace(')', '').trim() : 'Monday - Saturday',
+        },
+        voice_persona: voicePersona,
+        barge_in_enabled: bargeInEnabled,
+        allow_language_switching: allowSwitching,
         escalation_contacts: [
           {
             role: 'DISPATCHER',
@@ -508,7 +519,7 @@ export default function SettingsPage() {
               </div>
               <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-[11px] text-slate-700 dark:text-slate-400">
                 <Lock className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
-                <span>Zero Secret Leakage Guaranteed</span>
+                <span>Secrets are stored server-side in secure environment variables</span>
               </div>
             </div>
 

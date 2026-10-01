@@ -10,7 +10,20 @@
 import { Call, Lead } from '@/types/logivoice';
 import { db, DEFAULT_TENANT_ID } from '@/lib/db';
 
-export const DEFAULT_SPREADSHEET_ID = '1bvfGYB8btM_Ce7QWTg7JdLVEKl4yJSX0goocyTzLADE';
+export const DEFAULT_SPREADSHEET_ID = '';
+
+/**
+ * Neutralizes spreadsheet formula injection by prepending a single quote
+ * to any cell content starting with '=', '+', '-', '@', '\t', or '\r'.
+ */
+export function sanitizeSheetCell(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  const str = String(value).trim();
+  if (/^[=+\-@\t\r]/.test(str)) {
+    return `'${str}`;
+  }
+  return str;
+}
 
 export interface SheetRowData {
   date: string;
@@ -114,30 +127,31 @@ export async function syncCallToGoogleSheets(
         error: 'Google Sheets spreadsheet ID not configured for tenant in production.',
       };
     }
-    spreadsheetId = DEFAULT_SPREADSHEET_ID;
+    spreadsheetId = 'mock-spreadsheet-id';
   }
 
   // Format row columns strictly according to SSOT 03_STRUCTURED_DATA_MODEL line 214
+  // All fields sanitized through sanitizeSheetCell to neutralize formula injection (=, +, -, @)
   const rowData: SheetRowData = {
-    date: new Date(call.started_at).toLocaleDateString('en-IN'),
-    call_id: call.external_call_id,
-    customer: call.customer?.name || 'Inbound Caller',
-    phone: call.customer?.phone || '',
-    company: call.customer?.company || '',
-    intent: call.primary_intent,
-    origin: call.facts?.route_from || '',
-    destination: call.facts?.route_to || '',
-    weight: call.facts?.weight || '',
-    vehicle: call.facts?.vehicle_type || '',
-    quote: call.facts?.quoted_amount ? `₹${call.facts.quoted_amount}` : '',
-    quote_type: call.facts?.quote_type || '',
-    tracking_ref: call.facts?.tracking_id || '',
-    lead_status: lead?.status || 'NEW',
-    lead_temp: call.lead_temperature,
-    summary: call.summary || '',
-    escalated: call.escalation_status?.is_escalated ? 'YES' : 'NO',
-    next_action: lead?.next_action || 'Review outcome',
-    assigned_to: lead?.assigned_to || 'Unassigned',
+    date: sanitizeSheetCell(new Date(call.started_at).toLocaleDateString('en-IN')),
+    call_id: sanitizeSheetCell(call.external_call_id),
+    customer: sanitizeSheetCell(call.customer?.name || 'Inbound Caller'),
+    phone: sanitizeSheetCell(call.customer?.phone || ''),
+    company: sanitizeSheetCell(call.customer?.company || ''),
+    intent: sanitizeSheetCell(call.primary_intent),
+    origin: sanitizeSheetCell(call.facts?.route_from || ''),
+    destination: sanitizeSheetCell(call.facts?.route_to || ''),
+    weight: sanitizeSheetCell(call.facts?.weight || ''),
+    vehicle: sanitizeSheetCell(call.facts?.vehicle_type || ''),
+    quote: sanitizeSheetCell(call.facts?.quoted_amount ? `₹${call.facts.quoted_amount}` : ''),
+    quote_type: sanitizeSheetCell(call.facts?.quote_type || ''),
+    tracking_ref: sanitizeSheetCell(call.facts?.tracking_id || ''),
+    lead_status: sanitizeSheetCell(lead?.status || 'NEW'),
+    lead_temp: sanitizeSheetCell(call.lead_temperature),
+    summary: sanitizeSheetCell(call.summary || ''),
+    escalated: sanitizeSheetCell(call.escalation_status?.is_escalated ? 'YES' : 'NO'),
+    next_action: sanitizeSheetCell(lead?.next_action || 'Review outcome'),
+    assigned_to: sanitizeSheetCell(lead?.assigned_to || 'Unassigned'),
   };
 
   // Idempotency: skip if already synced in current runtime

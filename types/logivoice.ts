@@ -86,6 +86,7 @@ export interface ToolExecutionEvent {
   input_params: Record<string, unknown>;
   output_result: Record<string, unknown>;
   execution_status: 'SUCCESS' | 'FAILED' | 'TIMEOUT' | 'UNAVAILABLE';
+  status?: string;
   latency_ms: number;
   timestamp: string;
 }
@@ -144,6 +145,7 @@ export interface OperationsRequest {
   notes?: string;
   resolution_notes?: string;
   assigned_to?: string;
+  idempotency_key?: string;
   created_at: string;
   updated_at: string;
 }

@@ -26,12 +26,14 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const { status, priority, type } = parsedQuery.data;
+    const { status, priority, type, limit, offset } = parsedQuery.data;
 
     const requests = await db.listRequests(authContext.tenantId, {
       status,
       priority,
       type,
+      limit,
+      offset,
     });
 
     return NextResponse.json({ requests });

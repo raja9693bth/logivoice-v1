@@ -260,6 +260,9 @@ export const UpdateSettingsApiSchema = z.object({
   secondary_language: z.string().max(50).optional(),
   inbound_phone_number: z.string().max(32).optional(),
   booking_url: z.string().url().max(250).optional(),
+  voice_persona: z.string().max(100).optional(),
+  barge_in_enabled: z.boolean().optional(),
+  allow_language_switching: z.boolean().optional(),
   escalation_contacts: z
     .array(
       z.object({

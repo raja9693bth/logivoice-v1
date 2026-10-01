@@ -69,10 +69,10 @@ export async function POST(req: NextRequest) {
     const configuredAgentId = process.env.RETELL_AGENT_ID;
 
     if (isProduction) {
-      // 1. Unknown / unmapped Retell agent identifier: reject with 400
-      if (configuredAgentId && agentId && agentId !== configuredAgentId) {
+      // 1. Unknown, missing or unmapped Retell agent identifier: reject with 400
+      if (configuredAgentId && (!agentId || agentId !== configuredAgentId)) {
         logError(correlation, 'RETELL_UNKNOWN_AGENT_ID', { agentId });
-        return NextResponse.json({ error: 'Unknown or unmapped Retell agent identifier for tenant' }, { status: 400 });
+        return NextResponse.json({ error: 'Unknown, missing or unmapped Retell agent identifier for tenant' }, { status: 400 });
       }
 
       // 2. Production tenant resolution MUST come from authoritative server mapping

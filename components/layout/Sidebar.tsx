@@ -19,7 +19,14 @@ import {
 import { cn } from '@/lib/utils';
 import { useSidebar } from '@/components/layout/SidebarContext';
 
-const NAVIGATION_ITEMS = [
+interface NavigationItem {
+  name: string;
+  href: string;
+  icon: typeof LayoutDashboard;
+  badge?: string;
+}
+
+const NAVIGATION_ITEMS: NavigationItem[] = [
   {
     name: 'Dashboard',
     href: '/admin',
@@ -30,19 +37,19 @@ const NAVIGATION_ITEMS = [
     name: 'Inbound Calls',
     href: '/admin/calls',
     icon: PhoneCall,
-    badge: '48',
+    badge: undefined,
   },
   {
     name: 'Operations Requests',
     href: '/admin/requests',
     icon: ClipboardList,
-    badge: '4',
+    badge: undefined,
   },
   {
     name: 'Leads & Nurturing',
     href: '/admin/leads',
     icon: Flame,
-    badge: '7 Hot',
+    badge: undefined,
   },
   {
     name: 'Rate Cards',
@@ -156,14 +163,14 @@ export function Sidebar() {
         <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 text-xs">
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-slate-500 dark:text-slate-400 font-medium">Telephony Bridge</span>
-            <span className="inline-flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400 font-medium">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              Active
+            <span className="inline-flex items-center gap-1 text-[11px] text-amber-600 dark:text-amber-400 font-medium">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+              Gated / Standby
             </span>
           </div>
           <div className="flex items-center gap-2 text-slate-800 dark:text-slate-300 font-mono text-[11px]">
             <Headphones className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400 shrink-0" />
-            <span className="truncate">Retell AI Inbound Gate</span>
+            <span className="truncate">Retell Inbound Gateway</span>
           </div>
         </div>
       </div>

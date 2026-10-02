@@ -25,6 +25,7 @@ import {
   FollowupStatus,
   AuditSeverity,
 } from '@/types/logivoice';
+import { normalizePhoneNumber } from '@/lib/utils';
 
 // =========================================================================
 // 1. DATABASE ROW INTERFACES (Normalized SQL Schema Contract)
@@ -467,18 +468,7 @@ export function domainCustomerToDbRow(
   customer: Partial<Customer> & { id: string; tenant_id: string; phone: string; name: string }
 ): CustomersDbRow {
   const now = new Date().toISOString();
-  const rawClean = customer.phone.replace(/[^\d+]/g, '');
-  const phoneNormalized = customer.phone_normalized || (
-    rawClean.startsWith('+')
-      ? `+${rawClean.slice(1).replace(/\D/g, '')}`
-      : rawClean.length === 10
-      ? `+91${rawClean}`
-      : rawClean.length === 11 && rawClean.startsWith('0')
-      ? `+91${rawClean.slice(1)}`
-      : rawClean.length === 12 && rawClean.startsWith('91')
-      ? `+${rawClean}`
-      : `+${rawClean}`
-  );
+  const phoneNormalized = customer.phone_normalized || normalizePhoneNumber(customer.phone);
 
   return {
     id: customer.id,

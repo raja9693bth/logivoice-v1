@@ -246,6 +246,7 @@ export const UpdateKnowledgeApiSchema = z.object({
 export const UpdateSettingsApiSchema = z.object({
   business_name: z.string().min(2).max(150).optional(),
   brand_name: z.string().min(2).max(100).optional(),
+  business_type: z.string().max(100).optional(),
   primary_operating_cities: z.array(z.string().min(2).max(50)).max(50).optional(),
   business_hours: z
     .object({
@@ -338,6 +339,7 @@ export const ListRequestsQuerySchema = z.object({
   type: z
     .enum(['BOOKING_REQUEST', 'SUPPORT_TICKET', 'CALLBACK_REQUEST', 'RATE_REQUEST'])
     .optional(),
+  search: z.string().max(100).optional(),
   limit: z.coerce.number().int().min(1).max(200).optional(),
   offset: z.coerce.number().int().min(0).optional(),
 }).strict();
@@ -385,6 +387,24 @@ export const GetRateQuoteQuerySchema = z.object({
   vehicle_type: z.string().max(50).optional(),
   weight_tons: z.coerce.number().positive().max(1000).optional(),
   pickup_date: z.string().max(50).optional(),
+  status: z.enum(['ACTIVE', 'INACTIVE', 'EXPIRED']).optional(),
+  search: z.string().max(100).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+}).strict();
+
+export const ListRateCardsQuerySchema = GetRateQuoteQuerySchema;
+
+export const ListAuditQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+  event_type: z.string().max(100).optional(),
+  severity: z.enum(['INFO', 'WARNING', 'ERROR', 'CRITICAL']).optional(),
+}).strict();
+
+export const BulkCreateRateCardsApiSchema = z.object({
+  bulk: z.literal(true),
+  items: z.array(CreateRateCardApiSchema).min(1).max(200),
 }).strict();
 
 // =========================================================================

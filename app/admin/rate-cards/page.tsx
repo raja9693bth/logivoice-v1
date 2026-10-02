@@ -83,10 +83,12 @@ export default function RateCardsPage() {
       minimum_charge_inr: number;
       transit_time_hours: number;
       error?: string;
+      conflict?: boolean;
+      conflictNote?: string;
     }>
   >([]);
   const [csvImporting, setCsvImporting] = useState(false);
-  const [csvResultMsg, setCsvResultMsg] = useState<string | null>(null);
+  const [csvResultMsg, setCsvResultMsg] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
 
   const filteredRateCards = useMemo(() => {
     return rateCards.filter((rc) => {
@@ -214,11 +216,12 @@ export default function RateCardsPage() {
       if (!text) return;
       const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
       if (lines.length < 2) {
-        setCsvResultMsg('CSV file is empty or missing data rows.');
+        setCsvResultMsg({ type: 'error', message: 'CSV file is empty or missing data rows.' });
         return;
       }
       const headers = lines[0].toLowerCase().split(',').map((h) => h.trim().replace(/['"]/g, ''));
       const parsed: typeof csvParsedRows = [];
+      const seenCsvKeys = new Set<string>();
 
       for (let i = 1; i < lines.length; i++) {
         const parts = lines[i].split(',').map((p) => p.trim().replace(/['"]/g, ''));
@@ -228,9 +231,9 @@ export default function RateCardsPage() {
           row[h] = parts[idx] || '';
         });
 
-        const origin = row.origin || parts[0] || '';
-        const destination = row.destination || parts[1] || '';
-        const vehicle_type = row.vehicle_type || parts[2] || '';
+        const origin = (row.origin || row.from || row.pickup || parts[0] || '').trim();
+        const destination = (row.destination || row.to || row.drop || parts[1] || '').trim();
+        const vehicle_type = (row.vehicle_type || row.vehicle || row.truck || parts[2] || '').trim();
         const minW = parseFloat(row.weight_min_tons || row.weight_min || parts[3] || '1');
         const maxW = parseFloat(row.weight_max_tons || row.weight_max || parts[4] || '5');
         const price = parseFloat(row.price_inr || row.price || parts[5] || '0');
@@ -238,10 +241,41 @@ export default function RateCardsPage() {
         const transit = parseInt(row.transit_time_hours || row.transit_hours || parts[7] || '24', 10);
 
         let rowErr: string | undefined;
-        if (!origin || !destination) rowErr = 'Missing origin or destination';
-        else if (!vehicle_type) rowErr = 'Missing vehicle type';
-        else if (isNaN(price) || price <= 0) rowErr = 'Invalid price INR';
-        else if (maxW < minW) rowErr = 'Max weight cannot be less than min weight';
+        let isConflict = false;
+        let conflictNote: string | undefined;
+
+        if (!origin || !destination) {
+          rowErr = 'Missing origin or destination';
+        } else if (!vehicle_type) {
+          rowErr = 'Missing vehicle type';
+        } else if (isNaN(price) || price <= 0) {
+          rowErr = 'Invalid price INR (must be > 0)';
+        } else if (isNaN(minW) || minW <= 0) {
+          rowErr = 'Invalid min weight';
+        } else if (isNaN(maxW) || maxW < minW) {
+          rowErr = 'Max weight cannot be less than min weight';
+        }
+
+        const laneKey = `${origin.toLowerCase()}|${destination.toLowerCase()}|${vehicle_type.toLowerCase()}`;
+        if (!rowErr) {
+          if (seenCsvKeys.has(laneKey)) {
+            rowErr = 'Duplicate lane in same CSV';
+          } else {
+            seenCsvKeys.add(laneKey);
+            // Check for conflict against existing loaded rate cards
+            const existingMatch = rateCards.find(
+              (c) =>
+                c.origin.toLowerCase() === origin.toLowerCase() &&
+                c.destination.toLowerCase() === destination.toLowerCase() &&
+                c.vehicle_type.toLowerCase() === vehicle_type.toLowerCase() &&
+                c.status === 'ACTIVE'
+            );
+            if (existingMatch) {
+              isConflict = true;
+              conflictNote = `Lane already active (₹${existingMatch.price_inr.toLocaleString('en-IN')})`;
+            }
+          }
+        }
 
         parsed.push({
           origin,
@@ -253,9 +287,19 @@ export default function RateCardsPage() {
           minimum_charge_inr: isNaN(minCharge) ? 0 : minCharge,
           transit_time_hours: isNaN(transit) ? 24 : transit,
           error: rowErr,
+          conflict: isConflict,
+          conflictNote,
         });
       }
       setCsvParsedRows(parsed);
+      const errCount = parsed.filter((r) => r.error).length;
+      const conflictCount = parsed.filter((r) => r.conflict).length;
+      if (errCount > 0 || conflictCount > 0) {
+        setCsvResultMsg({
+          type: 'info',
+          message: `Parsed ${parsed.length} rows (${errCount} invalid, ${conflictCount} existing lane conflicts detected).`,
+        });
+      }
     };
     reader.readAsText(file);
   };
@@ -263,50 +307,62 @@ export default function RateCardsPage() {
   const handleCommitCsv = async () => {
     const validRows = csvParsedRows.filter((r) => !r.error);
     if (validRows.length === 0) {
-      setCsvResultMsg('No valid rows found to import.');
+      setCsvResultMsg({ type: 'error', message: 'No valid rows found to import.' });
       return;
     }
     setCsvImporting(true);
     setCsvResultMsg(null);
-    let successCount = 0;
-    let failCount = 0;
-    for (const r of validRows) {
-      try {
-        const res = await fetch('/api/rates', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            origin: r.origin,
-            destination: r.destination,
-            vehicle_type: r.vehicle_type,
-            weight_min_tons: r.weight_min_tons,
-            weight_max_tons: r.weight_max_tons,
-            price_inr: r.price_inr,
-            minimum_charge_inr: r.minimum_charge_inr,
-            transit_time_hours: r.transit_time_hours,
-            effective_from: new Date().toISOString().split('T')[0],
-            status: 'ACTIVE',
-            quote_type: 'ESTIMATE',
-            supports_confirmed_quote: false,
-            source_version: 'v1.2-csv-bulk-import',
-          }),
-        });
-        if (res.ok) successCount++;
-        else failCount++;
-      } catch {
-        failCount++;
+
+    const payloadItems = validRows.map((r) => ({
+      origin: r.origin,
+      destination: r.destination,
+      vehicle_type: r.vehicle_type,
+      weight_min_tons: r.weight_min_tons,
+      weight_max_tons: r.weight_max_tons,
+      price_inr: r.price_inr,
+      minimum_charge_inr: r.minimum_charge_inr,
+      transit_time_hours: r.transit_time_hours,
+      effective_from: new Date().toISOString().split('T')[0],
+      status: 'ACTIVE' as const,
+      quote_type: 'ESTIMATE' as const,
+      supports_confirmed_quote: false,
+      source_version: 'v1.2-csv-bulk-import',
+    }));
+
+    try {
+      const res = await fetch('/api/rates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bulk: true,
+          items: payloadItems,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || `HTTP ${res.status}`);
       }
-    }
-    setCsvImporting(false);
-    setCsvResultMsg(`Imported ${successCount} rate cards.${failCount > 0 ? ` Errors on ${failCount} rows.` : ''}`);
-    fetchRateCards();
-    if (failCount === 0) {
+
+      setCsvResultMsg({
+        type: 'success',
+        message: `Successfully imported ${data.count} rate cards atomically. Audit event logged.`,
+      });
+      fetchRateCards();
       setTimeout(() => {
         setIsImportModalOpen(false);
         setCsvParsedRows([]);
         setCsvFile(null);
         setCsvResultMsg(null);
-      }, 1500);
+      }, 1600);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown database error';
+      setCsvResultMsg({
+        type: 'error',
+        message: `Bulk import failed: ${msg}. No rows were partially committed.`,
+      });
+    } finally {
+      setCsvImporting(false);
     }
   };
 
@@ -711,8 +767,16 @@ export default function RateCardsPage() {
             </label>
 
             {csvResultMsg && (
-              <div className="p-3 rounded-lg bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800/60 text-xs text-sky-800 dark:text-sky-300">
-                {csvResultMsg}
+              <div
+                className={`p-3 rounded-lg border text-xs ${
+                  csvResultMsg.type === 'error'
+                    ? 'bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-800/60 text-rose-800 dark:text-rose-300'
+                    : csvResultMsg.type === 'success'
+                    ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800/60 text-emerald-800 dark:text-emerald-300'
+                    : 'bg-sky-50 dark:bg-sky-950/40 border-sky-200 dark:border-sky-800/60 text-sky-800 dark:text-sky-300'
+                }`}
+              >
+                {csvResultMsg.message}
               </div>
             )}
 
@@ -729,13 +793,26 @@ export default function RateCardsPage() {
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {csvParsedRows.map((r, idx) => (
-                      <tr key={idx} className={r.error ? 'bg-rose-50/50 dark:bg-rose-950/20' : ''}>
+                      <tr
+                        key={idx}
+                        className={
+                          r.error
+                            ? 'bg-rose-50/50 dark:bg-rose-950/20'
+                            : r.conflict
+                            ? 'bg-amber-50/40 dark:bg-amber-950/20'
+                            : ''
+                        }
+                      >
                         <td className="p-2 font-medium">{r.origin} &rarr; {r.destination}</td>
                         <td className="p-2">{r.vehicle_type}</td>
                         <td className="p-2 font-mono">₹{r.price_inr.toLocaleString('en-IN')}</td>
                         <td className="p-2">
                           {r.error ? (
                             <span className="text-rose-600 dark:text-rose-400 text-[10px] font-semibold">{r.error}</span>
+                          ) : r.conflict ? (
+                            <span className="text-amber-600 dark:text-amber-400 text-[10px] font-semibold" title={r.conflictNote}>
+                              Active Lane Match
+                            </span>
                           ) : (
                             <span className="text-emerald-600 dark:text-emerald-400 text-[10px] font-semibold">Valid</span>
                           )}

@@ -10,7 +10,7 @@
 
 | Feature / Requirement | Status | Verification & Operational Contract |
 | :--- | :---: | :--- |
-| **Retell Webhook Raw Body HMAC-SHA256 Verification** | `DONE` | `lib/auth/context.ts` preserves raw byte payload and verifies signature with timing-safe HMAC equality. |
+| **Retell Webhook Raw Body HMAC-SHA256 Verification** | `DONE` | `lib/auth/context.ts` preserves raw byte payload and verifies signature using official `retell-sdk` (`v=<timestamp>,d=<digest>` with replay attack timeout) and timing-safe direct HMAC-SHA256 hex fallback. |
 | **Voice Agent ID Validation & Mismatched Agent Rejection** | `DONE` | Validates agent ID against configured tenant agent; rejects unmapped agents in production. |
 | **Retell Lifecycle State Machine (`call_started`, `call_ended`, `call_analyzed`)** | `DONE` | `app/api/retell/webhook/route.ts` creates call shell on start, updates duration on end, and triggers post-call pipeline on final analysis. |
 | **Deterministic Tool Gateway (`dispatchTool`)** | `DONE` | `lib/tools/gateway.ts` handles all 8 controlled tools with Zod schema validation, latency measurement, and audit event persistence. |
@@ -67,7 +67,7 @@
 | :--- | :---: | :--- |
 | **Truthful Timezone-Aware KPIs** | `DONE` | `calls_today` calculated in `Asia/Kolkata` timezone. Tool latency and success rate derived from real tool execution telemetry. |
 | **Server-Enforced RBAC & Tenant Scoping** | `DONE` | Protected API routes verify Supabase session and user role (`DISPATCHER`, `OPS_MANAGER`, `ADMIN`). |
-| **Rate Cards Administration & CSV Import** | `DONE` | Full rate card management UI with quote type, confirmability toggle, and truthful file import. |
+| **Rate Cards Administration & CSV Import** | `DONE` | Full rate card management UI with quote type, confirmability toggle, and atomic batch CSV import with duplicate/conflict detection, server-side Zod validation, and `BULK_RATE_IMPORT` audit logging. |
 | **Call Detail & Forensic Timeline** | `DONE` | Transcript, audio player, structured facts, tool execution timeline, and follow-up status wired to real database data. |
 | **System Status & Audit Log Viewer** | `DONE` | Real-time health metrics, provider status indicators, and masked audit event stream. |
 | **Responsive Bento UI & WCAG Accessibility** | `DONE` | Semantic HTML, keyboard navigation, aria labels, focus trap on dialogs, and viewport user-scalable enabled. |

@@ -26,34 +26,34 @@ interface IntegrationStatuses {
 
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<'PROFILE' | 'VOICE' | 'ESCALATION' | 'INTEGRATIONS'>('PROFILE');
+  const [isLoading, setIsLoading] = useState(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // Business Profile State
-  const [brandName, setBrandName] = useState('LogiVoice Freight Express');
-  const [legalName, setLegalName] = useState('LogiVoice Logistics Solutions Pvt Ltd');
-  const [businessType, setBusinessType] = useState('3PL & Full Truckload (FTL) Fleet Operator');
-  const [operatingRegions, setOperatingRegions] = useState('Delhi-NCR, Rajasthan, Gujarat, Maharashtra, Haryana');
-  const [workingHours, setWorkingHours] = useState('08:00 AM – 10:00 PM IST');
+  const [brandName, setBrandName] = useState('');
+  const [legalName, setLegalName] = useState('');
+  const [businessType, setBusinessType] = useState('');
+  const [operatingRegions, setOperatingRegions] = useState('');
+  const [workingHours, setWorkingHours] = useState('');
   const [timezone, setTimezone] = useState('Asia/Kolkata (IST +5:30)');
-  const [disclosureWording, setDisclosureWording] = useState(
-    'Main LogiVoice, aapki logistics operations assistant hoon.'
-  );
+  const [disclosureWording, setDisclosureWording] = useState('');
 
   // Voice State
   const [primaryLang, setPrimaryLang] = useState('Hinglish (Hindi + English)');
   const [allowSwitching, setAllowSwitching] = useState(true);
-  const [voicePersona, setVoicePersona] = useState('Warm, professional Indian business voice with natural turn-taking');
+  const [voicePersona, setVoicePersona] = useState('');
   const [bargeInEnabled, setBargeInEnabled] = useState(true);
 
   // Escalation Directory State (Section 32, Section 47: Neutral non-demo names)
-  const [dispatcherName, setDispatcherName] = useState('Fleet Operations Dispatch Desk');
-  const [dispatcherPhone, setDispatcherPhone] = useState('+91 98111 00000');
-  const [opsManagerName, setOpsManagerName] = useState('Regional Operations Hub Head');
-  const [opsManagerPhone, setOpsManagerPhone] = useState('+91 98222 00000');
-  const [emergencyName, setEmergencyName] = useState('24/7 Roadside Rescue Line');
-  const [emergencyPhone, setEmergencyPhone] = useState('+91 98333 00000');
+  const [dispatcherName, setDispatcherName] = useState('');
+  const [dispatcherPhone, setDispatcherPhone] = useState('');
+  const [opsManagerName, setOpsManagerName] = useState('');
+  const [opsManagerPhone, setOpsManagerPhone] = useState('');
+  const [emergencyName, setEmergencyName] = useState('');
+  const [emergencyPhone, setEmergencyPhone] = useState('');
 
   // Integration Status State (Section 34: Truthful dynamic model)
   const [integrationStatus, setIntegrationStatus] = useState<IntegrationStatuses>({
@@ -66,6 +66,8 @@ export default function SettingsPage() {
   });
 
   const loadSettings = async () => {
+    setIsLoading(true);
+    setFetchError(null);
     try {
       const res = await fetch('/api/settings');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -75,6 +77,7 @@ export default function SettingsPage() {
         const cfg = data.config;
         if (cfg.brand_name) setBrandName(cfg.brand_name);
         if (cfg.business_name) setLegalName(cfg.business_name);
+        if (cfg.business_type) setBusinessType(cfg.business_type);
         if (Array.isArray(cfg.primary_operating_cities)) {
           setOperatingRegions(cfg.primary_operating_cities.join(', '));
         }
@@ -90,18 +93,18 @@ export default function SettingsPage() {
         if (Array.isArray(cfg.escalation_contacts)) {
           const d = cfg.escalation_contacts.find((c: { role: string }) => c.role === 'DISPATCHER');
           if (d) {
-            setDispatcherName(d.name || 'Fleet Operations Dispatch Desk');
-            setDispatcherPhone(d.phone || '+91 98111 00000');
+            setDispatcherName(d.name || '');
+            setDispatcherPhone(d.phone || '');
           }
           const m = cfg.escalation_contacts.find((c: { role: string }) => c.role === 'OPS_MANAGER');
           if (m) {
-            setOpsManagerName(m.name || 'Regional Operations Hub Head');
-            setOpsManagerPhone(m.phone || '+91 98222 00000');
+            setOpsManagerName(m.name || '');
+            setOpsManagerPhone(m.phone || '');
           }
           const e = cfg.escalation_contacts.find((c: { role: string }) => c.role === 'EMERGENCY');
           if (e) {
-            setEmergencyName(e.name || '24/7 Roadside Rescue Line');
-            setEmergencyPhone(e.phone || '+91 98333 00000');
+            setEmergencyName(e.name || '');
+            setEmergencyPhone(e.phone || '');
           }
         }
       }
@@ -111,6 +114,9 @@ export default function SettingsPage() {
       }
     } catch (err) {
       console.warn('[SettingsPage] API fetch error:', err);
+      setFetchError(err instanceof Error ? err.message : 'Failed to connect to backend settings API');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -126,6 +132,7 @@ export default function SettingsPage() {
       const payload = {
         brand_name: brandName,
         business_name: legalName,
+        business_type: businessType,
         primary_operating_cities: operatingRegions
           .split(',')
           .map((s) => s.trim())
@@ -250,6 +257,26 @@ export default function SettingsPage() {
         )}
       </div>
 
+      {/* Error / Degraded Banner */}
+      {fetchError && (
+        <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+            <div>
+              <p className="font-semibold">Live Configuration Degraded / Unreachable</p>
+              <p className="text-[11px] text-amber-700 dark:text-amber-300 mt-0.5">{fetchError}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={loadSettings}
+            className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium text-xs shrink-0 cursor-pointer"
+          >
+            Retry Connection
+          </button>
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="flex items-center gap-2 border-b border-slate-200 dark:border-slate-800 pb-2 overflow-x-auto">
         <button
@@ -302,67 +329,73 @@ export default function SettingsPage() {
         </button>
       </div>
 
-      <form onSubmit={handleSave} className="space-y-6">
-        {/* Business Profile Tab */}
-        {activeTab === 'PROFILE' && (
-          <Card className="space-y-4">
-            <h2 className="text-sm font-semibold text-slate-900 dark:text-white">Client Business Identity</h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-              <div>
-                <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Brand Name Used on Voice Calls</label>
-                <input
-                  type="text"
-                  value={brandName}
-                  onChange={(e) => setBrandName(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
-                />
+      {isLoading ? (
+        <Card className="p-12 text-center text-slate-500 dark:text-slate-400 text-xs">
+          Loading live tenant configuration from server...
+        </Card>
+      ) : (
+        <form onSubmit={handleSave} className="space-y-6">
+          {/* Business Profile Tab */}
+          {activeTab === 'PROFILE' && (
+            <Card className="space-y-4">
+              <h2 className="text-sm font-semibold text-slate-900 dark:text-white">Client Business Identity</h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                <div>
+                  <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Brand Name Used on Voice Calls</label>
+                  <input
+                    type="text"
+                    value={brandName}
+                    onChange={(e) => setBrandName(e.target.value)}
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Legal Registered Entity Name</label>
+                  <input
+                    type="text"
+                    value={legalName}
+                    onChange={(e) => setLegalName(e.target.value)}
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Business Nature / Category</label>
+                  <input
+                    type="text"
+                    value={businessType}
+                    onChange={(e) => setBusinessType(e.target.value)}
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Primary Operating Regions (Comma Separated)</label>
+                  <input
+                    type="text"
+                    value={operatingRegions}
+                    onChange={(e) => setOperatingRegions(e.target.value)}
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Operating Business Hours</label>
+                  <input
+                    type="text"
+                    value={workingHours}
+                    onChange={(e) => setWorkingHours(e.target.value)}
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Operational Timezone</label>
+                  <input
+                    type="text"
+                    disabled
+                    value={timezone}
+                    className="w-full bg-slate-100 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 rounded-lg p-2 text-slate-500 dark:text-slate-400 cursor-not-allowed"
+                  />
+                  <span className="text-[10px] text-slate-500 mt-1 block">Deployment gated: Standardized to Asia/Kolkata (IST) for India domestic freight network.</span>
+                </div>
               </div>
-              <div>
-                <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Legal Registered Entity Name</label>
-                <input
-                  type="text"
-                  value={legalName}
-                  onChange={(e) => setLegalName(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
-                />
-              </div>
-              <div>
-                <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Business Nature / Category</label>
-                <input
-                  type="text"
-                  value={businessType}
-                  onChange={(e) => setBusinessType(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
-                />
-              </div>
-              <div>
-                <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Primary Operating Regions (Comma Separated)</label>
-                <input
-                  type="text"
-                  value={operatingRegions}
-                  onChange={(e) => setOperatingRegions(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
-                />
-              </div>
-              <div>
-                <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Operating Business Hours</label>
-                <input
-                  type="text"
-                  value={workingHours}
-                  onChange={(e) => setWorkingHours(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
-                />
-              </div>
-              <div>
-                <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Operational Timezone</label>
-                <input
-                  type="text"
-                  disabled
-                  value={timezone}
-                  className="w-full bg-slate-100 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 rounded-lg p-2 text-slate-500 dark:text-slate-400 cursor-not-allowed"
-                />
-              </div>
-            </div>
 
             <div>
               <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">AI Identity Disclosure Statement</label>
@@ -593,6 +626,7 @@ export default function SettingsPage() {
           </button>
         </div>
       </form>
-    </div>
-  );
+    )}
+  </div>
+);
 }

@@ -95,6 +95,7 @@ export interface ClientConfig {
   tenant_id: string;
   business_name: string;
   brand_name: string;
+  business_type?: string;
   primary_operating_cities: string[];
   business_hours: { start: string; end: string; days: string };
   timezone: string;
@@ -665,6 +666,7 @@ class Store {
     tenant_id: DEFAULT_TENANT_ID,
     business_name: 'Apex Logistics Solutions Pvt Ltd',
     brand_name: 'Apex Logistics',
+    business_type: '3PL & Full Truckload (FTL) Fleet Operator',
     primary_operating_cities: ['Delhi NCR', 'Mumbai', 'Ahmedabad', 'Bengaluru', 'Pune', 'Jaipur'],
     business_hours: { start: '08:00', end: '22:00', days: 'Mon-Sat' },
     timezone: 'Asia/Kolkata',
@@ -800,6 +802,7 @@ export const db = {
     const sanitizedUpdates: Partial<ClientConfig> = {};
     if (updates.brand_name !== undefined) sanitizedUpdates.brand_name = updates.brand_name;
     if (updates.business_name !== undefined) sanitizedUpdates.business_name = updates.business_name;
+    if (updates.business_type !== undefined) sanitizedUpdates.business_type = updates.business_type;
     if ((updates as any).legal_business_name !== undefined) sanitizedUpdates.business_name = (updates as any).legal_business_name;
     if (updates.primary_operating_cities !== undefined) sanitizedUpdates.primary_operating_cities = updates.primary_operating_cities;
     if ((updates as any).operating_cities !== undefined) sanitizedUpdates.primary_operating_cities = (updates as any).operating_cities;
@@ -1370,7 +1373,7 @@ export const db = {
   // -----------------------------------------------------------------------
   async listRequests(
     tenantId: string = DEFAULT_TENANT_ID,
-    filters?: { status?: RequestStatus; priority?: RequestPriority; type?: RequestType; limit?: number; offset?: number }
+    filters?: { status?: RequestStatus; priority?: RequestPriority; type?: RequestType; search?: string; limit?: number; offset?: number }
   ): Promise<OperationsRequest[]> {
     const limit = Math.min(Math.max(filters?.limit || 50, 1), 100);
     const offset = Math.max(filters?.offset || 0, 0);
@@ -1387,6 +1390,12 @@ export const db = {
       if (filters?.status) query = query.eq('status', filters.status);
       if (filters?.priority) query = query.eq('priority', filters.priority);
       if (filters?.type) query = query.eq('type', filters.type);
+      if (filters?.search) {
+        const s = filters.search.trim();
+        if (s) {
+          query = query.or(`summary.ilike.%${s}%,reference_no.ilike.%${s}%`);
+        }
+      }
       const { data, error } = await query;
       if (!error && data) {
         return data.map((d: any) => {
@@ -1400,6 +1409,16 @@ export const db = {
     if (filters?.status) reqs = reqs.filter((r) => r.status === filters.status);
     if (filters?.priority) reqs = reqs.filter((r) => r.priority === filters.priority);
     if (filters?.type) reqs = reqs.filter((r) => r.type === filters.type);
+    if (filters?.search) {
+      const s = filters.search.toLowerCase();
+      reqs = reqs.filter(
+        (r) =>
+          r.summary.toLowerCase().includes(s) ||
+          (r.reference_no && r.reference_no.toLowerCase().includes(s)) ||
+          (r.customer_name && r.customer_name.toLowerCase().includes(s)) ||
+          (r.customer_phone && r.customer_phone.includes(s))
+      );
+    }
     return reqs.slice(offset, offset + limit);
   },
 
@@ -1520,14 +1539,83 @@ export const db = {
   // -----------------------------------------------------------------------
   // RATE CARDS
   // -----------------------------------------------------------------------
-  async listRateCards(tenantId: string = DEFAULT_TENANT_ID): Promise<RateCard[]> {
+  async listRateCards(
+    tenantId: string = DEFAULT_TENANT_ID,
+    filters?: { status?: string; search?: string; limit?: number; offset?: number }
+  ): Promise<RateCard[]> {
+    const limit = Math.min(Math.max(filters?.limit || 100, 1), 500);
+    const offset = Math.max(filters?.offset || 0, 0);
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
-      const { data, error } = await client.from('rate_cards').select('*').eq('tenant_id', tenantId);
+      let query = client.from('rate_cards').select('*').eq('tenant_id', tenantId);
+      if (filters?.status) query = query.eq('status', filters.status);
+      if (filters?.search) {
+        const s = filters.search.trim();
+        if (s) {
+          query = query.or(`origin.ilike.%${s}%,destination.ilike.%${s}%,vehicle_type.ilike.%${s}%`);
+        }
+      }
+      query = query.range(offset, offset + limit - 1);
+      const { data, error } = await query;
       if (!error && data) return data as RateCard[];
     }
     assertProductionDbReady();
-    return globalStore.rate_cards.filter((rc) => rc.tenant_id === tenantId);
+    let cards = globalStore.rate_cards.filter((rc) => rc.tenant_id === tenantId);
+    if (filters?.status) cards = cards.filter((rc) => rc.status === filters.status);
+    if (filters?.search) {
+      const s = filters.search.toLowerCase();
+      cards = cards.filter(
+        (rc) =>
+          rc.origin.toLowerCase().includes(s) ||
+          rc.destination.toLowerCase().includes(s) ||
+          rc.vehicle_type.toLowerCase().includes(s)
+      );
+    }
+    return cards.slice(offset, offset + limit);
+  },
+
+  async bulkCreateRateCards(
+    cardsData: Array<Omit<RateCard, 'id' | 'tenant_id' | 'source_version' | 'effective_from'> & { tenant_id?: string; source_version?: string; effective_from?: string }>,
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<{ inserted: RateCard[]; count: number }> {
+    for (let i = 0; i < cardsData.length; i++) {
+      const c = cardsData[i];
+      if (c.weight_max_tons < c.weight_min_tons) {
+        throw new Error(`Row ${i + 1}: weight_max_tons (${c.weight_max_tons}) cannot be less than weight_min_tons (${c.weight_min_tons}).`);
+      }
+      if (c.effective_to && c.effective_from && c.effective_to < c.effective_from) {
+        throw new Error(`Row ${i + 1}: effective_to cannot be earlier than effective_from.`);
+      }
+    }
+
+    const cardsToInsert: RateCard[] = cardsData.map((d) => ({
+      ...d,
+      id: crypto.randomUUID(),
+      tenant_id: d.tenant_id || tenantId,
+      source_version: d.source_version || 'v1.2-csv-bulk-import',
+      effective_from: d.effective_from || new Date().toISOString().split('T')[0],
+      status: d.status || 'ACTIVE',
+      quote_type: d.quote_type || 'ESTIMATE',
+      supports_confirmed_quote: Boolean(d.supports_confirmed_quote),
+    }));
+
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client.from('rate_cards').insert(cardsToInsert).select();
+      if (error) {
+        throw new Error(`Database bulk insert failed: ${error.message}`);
+      }
+      if (data) {
+        return { inserted: data as RateCard[], count: data.length };
+      }
+    }
+
+    assertProductionDbReady();
+    for (const c of cardsToInsert) {
+      globalStore.rate_cards.unshift(c);
+    }
+    return { inserted: cardsToInsert, count: cardsToInsert.length };
   },
 
   async findApprovedRate(
@@ -1846,15 +1934,27 @@ export const db = {
     return newEvent;
   },
 
-  async listAuditEvents(tenantId: string = DEFAULT_TENANT_ID, limit: number = 50): Promise<AuditEvent[]> {
+  async listAuditEvents(
+    tenantId: string = DEFAULT_TENANT_ID,
+    options: number | { limit?: number; offset?: number; event_type?: string; severity?: string } = 50
+  ): Promise<AuditEvent[]> {
+    const opts = typeof options === 'number' ? { limit: options } : options;
+    const limit = Math.min(Math.max(opts.limit || 50, 1), 500);
+    const offset = Math.max(opts.offset || 0, 0);
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
-      const { data, error } = await client
+      let query = client
         .from('audit_events')
         .select('*')
         .eq('tenant_id', tenantId)
-        .order('created_at', { ascending: false })
-        .limit(limit);
+        .order('created_at', { ascending: false });
+
+      if (opts.event_type) query = query.eq('event_type', opts.event_type);
+      if (opts.severity) query = query.eq('severity', opts.severity);
+      query = query.range(offset, offset + limit - 1);
+
+      const { data, error } = await query;
       if (!error && data) {
         return data.map((d) => ({
           id: d.id,
@@ -1872,7 +1972,10 @@ export const db = {
       }
     }
     assertProductionDbReady();
-    return globalStore.audit_events.slice(0, limit);
+    let events = globalStore.audit_events.filter((e) => e.tenant_id === tenantId);
+    if (opts.event_type) events = events.filter((e) => e.event_type === opts.event_type);
+    if (opts.severity) events = events.filter((e) => e.severity === opts.severity);
+    return events.slice(offset, offset + limit);
   },
 
   // -----------------------------------------------------------------------

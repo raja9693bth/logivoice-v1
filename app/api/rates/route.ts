@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthContext, requireRole, AuthorizationError } from '@/lib/auth/context';
 import { db } from '@/lib/db';
-import { CreateRateCardApiSchema, UpdateRateCardApiSchema, GetRateQuoteQuerySchema } from '@/lib/schemas/api';
+import { CreateRateCardApiSchema, UpdateRateCardApiSchema, GetRateQuoteQuerySchema, BulkCreateRateCardsApiSchema } from '@/lib/schemas/api';
 
 export async function GET(req: NextRequest) {
   try {
@@ -15,6 +15,10 @@ export async function GET(req: NextRequest) {
       vehicle_type: searchParams.get('vehicle_type') || undefined,
       weight_tons: searchParams.get('weight_tons') || undefined,
       pickup_date: searchParams.get('pickup_date') || undefined,
+      status: searchParams.get('status') || undefined,
+      search: searchParams.get('search') || undefined,
+      limit: searchParams.get('limit') || undefined,
+      offset: searchParams.get('offset') || undefined,
     };
 
     const parsedQuery = GetRateQuoteQuerySchema.safeParse(rawQuery);
@@ -25,7 +29,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const { origin, destination, vehicle_type, weight_tons, pickup_date } = parsedQuery.data;
+    const { origin, destination, vehicle_type, weight_tons, pickup_date, status, search, limit, offset } = parsedQuery.data;
 
     // If query parameters for quote are given, run rate search
     if (origin && destination) {
@@ -53,8 +57,8 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // Otherwise list all rate cards
-    const rateCards = await db.listRateCards(authContext.tenantId);
+    // Otherwise list all rate cards with filters
+    const rateCards = await db.listRateCards(authContext.tenantId, { status, search, limit, offset });
     return NextResponse.json({ rate_cards: rateCards });
   } catch (error) {
     if (error instanceof AuthorizationError) {
@@ -77,6 +81,56 @@ export async function POST(req: NextRequest) {
       body = await req.json();
     } catch {
       return NextResponse.json({ error: 'Malformed JSON payload' }, { status: 400 });
+    }
+
+    // Bulk Rate Card Import Handler
+    if (typeof body === 'object' && body !== null && 'bulk' in body && (body as any).bulk === true) {
+      const bulkParse = BulkCreateRateCardsApiSchema.safeParse(body);
+      if (!bulkParse.success) {
+        return NextResponse.json(
+          { error: 'Validation failed on bulk import payload', details: bulkParse.error.flatten() },
+          { status: 400 }
+        );
+      }
+      const itemsToInsert = bulkParse.data.items.map((val) => ({
+        tenant_id: authContext.tenantId,
+        origin: val.origin,
+        destination: val.destination,
+        vehicle_type: val.vehicle_type,
+        weight_min_tons: val.weight_min_tons,
+        weight_max_tons: val.weight_max_tons,
+        price_inr: val.price_inr,
+        minimum_charge_inr: val.minimum_charge_inr,
+        effective_from: val.effective_from,
+        effective_to: val.effective_to,
+        status: val.status,
+        transit_time_hours: val.transit_time_hours,
+        quote_type: val.quote_type,
+        supports_confirmed_quote: val.supports_confirmed_quote,
+        source_version: 'v1.2-csv-bulk-import',
+        surcharge_notes: val.surcharge_notes,
+      }));
+
+      const res = await db.bulkCreateRateCards(itemsToInsert, authContext.tenantId);
+
+      // Log bulk audit event
+      await db.logAuditEvent(
+        {
+          tenant_id: authContext.tenantId,
+          event_type: 'BULK_RATE_IMPORT',
+          actor: authContext.userId,
+          actor_type: 'DISPATCHER',
+          actor_id: authContext.userId,
+          severity: 'INFO',
+          details: {
+            imported_count: res.count,
+            source: 'CSV_IMPORT',
+          },
+        },
+        authContext.tenantId
+      );
+
+      return NextResponse.json({ success: true, count: res.count, rate_cards: res.inserted }, { status: 201 });
     }
 
     const parseResult = CreateRateCardApiSchema.safeParse(body);

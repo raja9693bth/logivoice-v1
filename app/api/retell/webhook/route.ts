@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
     const isTestBypass = process.env.NODE_ENV === 'test' && req.headers.get('x-test-bypass-sig') === 'true';
 
     // Verify cryptographic Retell signature using the exact raw HTTP request body bytes
-    const hasValidSignature = isTestBypass || verifyRetellWebhookSignature(rawBodyText, signature);
+    const hasValidSignature = isTestBypass || (await verifyRetellWebhookSignature(rawBodyText, signature));
 
     if (!hasValidSignature && (process.env.NODE_ENV === 'production' || process.env.RETELL_API_KEY)) {
       logError(correlation, 'RETELL_WEBHOOK_SIGNATURE_INVALID', { hasSignature: Boolean(signature) });

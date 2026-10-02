@@ -6,6 +6,7 @@
 import crypto from 'crypto';
 import { db, DEFAULT_TENANT_ID } from '@/lib/db';
 import { CreateSupportTicketInput, CreateSupportTicketOutput } from '@/lib/schemas/tools';
+import { getOrCreateCustomer, generateReferenceNumber } from '@/lib/tools/helpers';
 
 export async function executeCreateSupportTicket(
   input: CreateSupportTicketInput,
@@ -25,21 +26,8 @@ export async function executeCreateSupportTicket(
       }
     }
 
-    let customer = await db.getCustomerByPhone(input.customer_phone, tenantId);
-    if (!customer) {
-      customer = await db.createCustomer(
-        {
-          tenant_id: tenantId,
-          phone: input.customer_phone,
-          name: input.customer_name,
-        },
-        tenantId
-      );
-    }
-
-    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const entropy = crypto.randomBytes(4).toString('hex').toUpperCase();
-    const referenceNo = `TCK-${dateStr}-${entropy}`;
+    const customer = await getOrCreateCustomer(input.customer_phone, input.customer_name, tenantId);
+    const referenceNo = generateReferenceNumber('TCK');
 
     const newTicket = await db.createRequest(
       {

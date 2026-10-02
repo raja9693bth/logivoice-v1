@@ -947,12 +947,20 @@ export const db = {
   // CALLS
   // -----------------------------------------------------------------------
   async getCallById(callId: string, tenantId: string = DEFAULT_TENANT_ID): Promise<Call | null> {
+    return this.fetchCallRecord('id', callId, tenantId);
+  },
+
+  async getCallByExternalId(externalCallId: string, tenantId: string = DEFAULT_TENANT_ID): Promise<Call | null> {
+    return this.fetchCallRecord('external_call_id', externalCallId, tenantId);
+  },
+
+  async fetchCallRecord(column: 'id' | 'external_call_id', value: string, tenantId: string): Promise<Call | null> {
     if (await isSupabaseLive()) {
       const client = createAdminClient();
       const { data, error } = await client
         .from('calls')
         .select('*, customer:customers(*), facts:call_facts(*), transcript:transcript_segments(*)')
-        .eq('id', callId)
+        .eq(column, value)
         .eq('tenant_id', tenantId)
         .single();
       if (!error && data) {
@@ -962,32 +970,39 @@ export const db = {
       }
     }
     assertProductionDbReady();
-    const call = globalStore.calls.find((c) => c.id === callId && c.tenant_id === tenantId);
+    const call = globalStore.calls.find((c) => c[column] === value && c.tenant_id === tenantId);
     if (!call) return null;
     const customer = globalStore.customers.find((c) => c.id === call.customer_id);
     return { ...call, customer };
   },
 
-  async getCallByExternalId(externalCallId: string, tenantId: string = DEFAULT_TENANT_ID): Promise<Call | null> {
-    if (await isSupabaseLive()) {
-      const client = createAdminClient();
-      const { data, error } = await client
-        .from('calls')
-        .select('*, customer:customers(*), facts:call_facts(*), transcript:transcript_segments(*)')
-        .eq('external_call_id', externalCallId)
-        .eq('tenant_id', tenantId)
-        .single();
-      if (!error && data) {
-        const factsRow = Array.isArray(data.facts) ? data.facts[0] : data.facts;
-        const customerRow = Array.isArray(data.customer) ? data.customer[0] : data.customer;
-        return dbCallToDomain(data, factsRow, customerRow, data.transcript);
-      }
+  async persistTranscriptSegments(
+    client: ReturnType<typeof createAdminClient>,
+    callId: string,
+    tenantId: string,
+    transcript: TranscriptTurn[]
+  ): Promise<void> {
+    const transcriptRows = transcript.map((t) => {
+      const hashId = crypto
+        .createHash('sha256')
+        .update(`${callId}:${t.timestamp}:${t.speaker}:${t.text}`)
+        .digest('hex')
+        .substring(0, 36);
+      return {
+        id: hashId,
+        call_id: callId,
+        tenant_id: tenantId,
+        speaker: t.speaker,
+        text: t.text,
+        timestamp: t.timestamp,
+        language: t.language || null,
+        created_at: new Date().toISOString(),
+      };
+    });
+    const { error: transcriptErr } = await client.from('transcript_segments').upsert(transcriptRows, { onConflict: 'id' });
+    if (transcriptErr) {
+      throw new Error(`Failed to persist transcript_segments for call ${callId}: ${transcriptErr.message}`);
     }
-    assertProductionDbReady();
-    const call = globalStore.calls.find((c) => c.external_call_id === externalCallId && c.tenant_id === tenantId);
-    if (!call) return null;
-    const customer = globalStore.customers.find((c) => c.id === call.customer_id);
-    return { ...call, customer };
   },
 
   async listCalls(
@@ -1071,27 +1086,7 @@ export const db = {
           }
         }
         if (newCall.transcript && newCall.transcript.length > 0) {
-          const transcriptRows = newCall.transcript.map((t) => {
-            const hashId = crypto
-              .createHash('sha256')
-              .update(`${id}:${t.timestamp}:${t.speaker}:${t.text}`)
-              .digest('hex')
-              .substring(0, 36);
-            return {
-              id: hashId,
-              call_id: id,
-              tenant_id: tenantId,
-              speaker: t.speaker,
-              text: t.text,
-              timestamp: t.timestamp,
-              language: t.language || null,
-              created_at: new Date().toISOString(),
-            };
-          });
-          const { error: transcriptErr } = await client.from('transcript_segments').upsert(transcriptRows, { onConflict: 'id' });
-          if (transcriptErr) {
-            throw new Error(`Failed to persist transcript_segments for call ${id}: ${transcriptErr.message}`);
-          }
+          await this.persistTranscriptSegments(client, id, tenantId, newCall.transcript);
         }
         return dbCallToDomain(data, factsRow);
       }
@@ -1150,27 +1145,7 @@ export const db = {
           }
         }
         if (updates.transcript && updates.transcript.length > 0) {
-          const transcriptRows = updates.transcript.map((t) => {
-            const hashId = crypto
-              .createHash('sha256')
-              .update(`${callId}:${t.timestamp}:${t.speaker}:${t.text}`)
-              .digest('hex')
-              .substring(0, 36);
-            return {
-              id: hashId,
-              call_id: callId,
-              tenant_id: tenantId,
-              speaker: t.speaker,
-              text: t.text,
-              timestamp: t.timestamp,
-              language: t.language || null,
-              created_at: new Date().toISOString(),
-            };
-          });
-          const { error: transcriptErr } = await client.from('transcript_segments').upsert(transcriptRows, { onConflict: 'id' });
-          if (transcriptErr) {
-            throw new Error(`Failed to update transcript_segments for call ${callId}: ${transcriptErr.message}`);
-          }
+          await this.persistTranscriptSegments(client, callId, tenantId, updates.transcript);
         }
         return dbCallToDomain(data, factsRow);
       }

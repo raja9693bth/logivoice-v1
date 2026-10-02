@@ -17,6 +17,35 @@ import { TransferToHumanInput, TransferToHumanOutput } from '@/lib/schemas/tools
 import { executeProviderCallTransfer } from '@/lib/integrations/telephony';
 import { normalizePhoneNumber } from '@/lib/utils';
 
+async function logTransferAudit(
+  tenantId: string,
+  callId: string | undefined,
+  reason: string,
+  targetRole: string | undefined,
+  targetPhone: string | undefined,
+  extra: Record<string, unknown>
+): Promise<void> {
+  await db.logAuditEvent(
+    {
+      tenant_id: tenantId,
+      call_id: callId,
+      event_type: 'CALL_ESCALATED',
+      actor: 'AI_AGENT',
+      actor_type: 'AI_AGENT',
+      actor_id: 'voice-agent',
+      tool_name: 'transfer_to_human',
+      severity: 'WARNING',
+      details: {
+        reason,
+        target_role: targetRole,
+        target_phone: targetPhone,
+        ...extra,
+      },
+    },
+    tenantId
+  );
+}
+
 export async function executeTransferToHuman(
   input: TransferToHumanInput,
   tenantId: string = DEFAULT_TENANT_ID
@@ -64,28 +93,12 @@ export async function executeTransferToHuman(
 
       if (providerResult.success && providerResult.status === 'TRANSFERRED') {
         // Audit log verified provider escalation
-        await db.logAuditEvent(
-          {
-            tenant_id: tenantId,
-            call_id: input.call_id,
-            event_type: 'CALL_ESCALATED',
-            actor: 'AI_AGENT',
-            actor_type: 'AI_AGENT',
-            actor_id: 'voice-agent',
-            tool_name: 'transfer_to_human',
-            severity: 'WARNING',
-            details: {
-              reason: input.reason,
-              target_role: targetContact.role,
-              target_phone: targetPhone,
-              context_summary: input.context_summary,
-              provider: providerResult.provider,
-              provider_transfer_id: providerResult.providerTransferId,
-              provider_confirmed: true,
-            },
-          },
-          tenantId
-        );
+        await logTransferAudit(tenantId, input.call_id, input.reason, targetContact.role, targetPhone, {
+          context_summary: input.context_summary,
+          provider: providerResult.provider,
+          provider_transfer_id: providerResult.providerTransferId,
+          provider_confirmed: true,
+        });
 
         return {
           status: 'TRANSFERRED',
@@ -191,27 +204,11 @@ export async function executeTransferToHuman(
     );
 
     // Audit log fallback callback creation
-    await db.logAuditEvent(
-      {
-        tenant_id: tenantId,
-        call_id: input.call_id,
-        event_type: 'CALL_ESCALATED',
-        actor: 'AI_AGENT',
-        actor_type: 'AI_AGENT',
-        actor_id: 'voice-agent',
-        tool_name: 'transfer_to_human',
-        severity: 'WARNING',
-        details: {
-          reason: input.reason,
-          target_role: targetContact?.role,
-          target_phone: targetPhone,
-          callback_reference: callbackRef,
-          fallback_mode: 'URGENT_CALLBACK',
-          provider_confirmed: false,
-        },
-      },
-      tenantId
-    );
+    await logTransferAudit(tenantId, input.call_id, input.reason, targetContact?.role, targetPhone, {
+      callback_reference: callbackRef,
+      fallback_mode: 'URGENT_CALLBACK',
+      provider_confirmed: false,
+    });
 
     return {
       status: 'CALLBACK_SCHEDULED',

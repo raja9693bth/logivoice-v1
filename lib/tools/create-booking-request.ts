@@ -6,6 +6,7 @@
 import crypto from 'crypto';
 import { db, DEFAULT_TENANT_ID } from '@/lib/db';
 import { CreateBookingRequestInput, CreateBookingRequestOutput } from '@/lib/schemas/tools';
+import { getOrCreateCustomer, generateReferenceNumber } from '@/lib/tools/helpers';
 
 export async function executeCreateBookingRequest(
   input: CreateBookingRequestInput,
@@ -26,22 +27,10 @@ export async function executeCreateBookingRequest(
     }
 
     // 2. Resolve or Register Customer
-    let customer = await db.getCustomerByPhone(input.customer_phone, tenantId);
-    if (!customer) {
-      customer = await db.createCustomer(
-        {
-          tenant_id: tenantId,
-          phone: input.customer_phone,
-          name: input.customer_name,
-        },
-        tenantId
-      );
-    }
+    const customer = await getOrCreateCustomer(input.customer_phone, input.customer_name, tenantId);
 
     // 3. Collision-Safe Reference Number Generation with Crypto Entropy
-    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const entropy = crypto.randomBytes(4).toString('hex').toUpperCase();
-    const referenceNo = `BKG-${dateStr}-${entropy}`;
+    const referenceNo = generateReferenceNumber('BKG');
 
     // 4. Determine status:
     // If confirmation is true, it is REQUEST_CREATED (pending dispatcher vehicle assignment)

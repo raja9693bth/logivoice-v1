@@ -9,7 +9,32 @@ import { z } from 'zod';
 
 // =========================================================================
 // CALLS API SCHEMAS
-// =========================================================================
+export const CallFactsApiSchema = z
+  .object({
+    route_from: z.string().max(100).optional(),
+    route_to: z.string().max(100).optional(),
+    weight: z.string().max(50).optional(),
+    vehicle_type: z.string().max(50).optional(),
+    material_type: z.string().max(100).optional(),
+    pickup_date: z.string().max(50).optional(),
+    quoted_amount: z.number().nonnegative().optional(),
+    quote_type: z.enum(['ESTIMATE', 'CONFIRMED']).optional(),
+    tracking_id: z.string().max(50).optional(),
+    booking_reference: z.string().max(50).optional(),
+    special_requirements: z.string().max(500).optional(),
+  })
+  .optional();
+
+export const CallEscalationStatusApiSchema = z
+  .object({
+    is_escalated: z.boolean(),
+    reason: z.string().max(500).optional(),
+    target_role: z.string().max(100).optional(),
+    target_phone: z.string().max(32).optional(),
+    handoff_successful: z.boolean().optional(),
+  })
+  .optional();
+
 export const CreateCallApiSchema = z.object({
   external_call_id: z.string().min(3).max(128),
   customer_id: z.string().max(128).optional(),
@@ -34,29 +59,8 @@ export const CreateCallApiSchema = z.object({
   sentiment: z.enum(['POSITIVE', 'NEUTRAL', 'FRUSTRATED', 'ANGRY']).default('NEUTRAL'),
   outcome: z.enum(['IN_PROGRESS', 'COMPLETED', 'TRANSFERRED', 'CALLBACK_SCHEDULED', 'MISSED', 'FAILED', 'ABANDONED']).default('IN_PROGRESS'),
   summary: z.string().max(4000).default(''),
-  facts: z
-    .object({
-      route_from: z.string().max(100).optional(),
-      route_to: z.string().max(100).optional(),
-      weight: z.string().max(50).optional(),
-      vehicle_type: z.string().max(50).optional(),
-      material_type: z.string().max(100).optional(),
-      pickup_date: z.string().max(50).optional(),
-      quoted_amount: z.number().nonnegative().optional(),
-      quote_type: z.enum(['ESTIMATE', 'CONFIRMED']).optional(),
-      tracking_id: z.string().max(50).optional(),
-      booking_reference: z.string().max(50).optional(),
-      special_requirements: z.string().max(500).optional(),
-    })
-    .optional(),
-  escalation_status: z
-    .object({
-      is_escalated: z.boolean(),
-      reason: z.string().max(500).optional(),
-      target_role: z.string().max(100).optional(),
-      target_phone: z.string().max(32).optional(),
-    })
-    .optional(),
+  facts: CallFactsApiSchema,
+  escalation_status: CallEscalationStatusApiSchema,
   agent_version: z.string().max(32).default('v1.0.0'),
 }).strict();
 
@@ -80,30 +84,8 @@ export const UpdateCallApiSchema = z.object({
   outcome: z.enum(['IN_PROGRESS', 'COMPLETED', 'TRANSFERRED', 'CALLBACK_SCHEDULED', 'MISSED', 'FAILED', 'ABANDONED']).optional(),
   lead_temperature: z.enum(['HOT', 'WARM', 'COLD', 'REVIEW']).optional(),
   summary: z.string().max(4000).optional(),
-  facts: z
-    .object({
-      route_from: z.string().max(100).optional(),
-      route_to: z.string().max(100).optional(),
-      weight: z.string().max(50).optional(),
-      vehicle_type: z.string().max(50).optional(),
-      material_type: z.string().max(100).optional(),
-      pickup_date: z.string().max(50).optional(),
-      quoted_amount: z.number().nonnegative().optional(),
-      quote_type: z.enum(['ESTIMATE', 'CONFIRMED']).optional(),
-      tracking_id: z.string().max(50).optional(),
-      booking_reference: z.string().max(50).optional(),
-      special_requirements: z.string().max(500).optional(),
-    })
-    .optional(),
-  escalation_status: z
-    .object({
-      is_escalated: z.boolean(),
-      reason: z.string().max(500).optional(),
-      target_role: z.string().max(100).optional(),
-      target_phone: z.string().max(32).optional(),
-      handoff_successful: z.boolean().optional(),
-    })
-    .optional(),
+  facts: CallFactsApiSchema,
+  escalation_status: CallEscalationStatusApiSchema,
 }).strict();
 
 // =========================================================================

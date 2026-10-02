@@ -30,10 +30,28 @@ export function DemoModeBanner() {
 }
 
 export function SystemStatusPill() {
+  const [status, setStatus] = React.useState<'CHECKING' | 'ONLINE' | 'DEGRADED'>('CHECKING');
+
+  React.useEffect(() => {
+    fetch('/api/health?check=liveness')
+      .then((res) => (res.ok ? setStatus('ONLINE') : setStatus('DEGRADED')))
+      .catch(() => setStatus('DEGRADED'));
+  }, []);
+
   return (
     <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs text-slate-700 dark:text-slate-300 transition-colors">
-      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-      <span className="font-medium">System Ready (Retell Inbound)</span>
+      <span
+        className={`w-2 h-2 rounded-full ${
+          status === 'ONLINE'
+            ? 'bg-emerald-500'
+            : status === 'DEGRADED'
+            ? 'bg-amber-500'
+            : 'bg-slate-400 animate-pulse'
+        }`}
+      />
+      <span className="font-medium">
+        {status === 'ONLINE' ? 'Voice Gateway: Standby' : status === 'DEGRADED' ? 'System Degraded' : 'Checking Health...'}
+      </span>
     </div>
   );
 }

@@ -23,7 +23,14 @@ export function Header({
   const [displayEmail, setDisplayEmail] = useState(userEmail || 'Loading...');
   const [displayRole, setDisplayRole] = useState(userRole || 'Operations Desk');
   const [urgentCount, setUrgentCount] = useState(0);
+  const [searchQuery, setSearchQuery] = useState('');
   const [isSigningOut, setIsSigningOut] = useState(false);
+
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && searchQuery.trim()) {
+      router.push(`/admin/calls?search=${encodeURIComponent(searchQuery.trim())}`);
+    }
+  };
 
   useEffect(() => {
     try {
@@ -87,7 +94,10 @@ export function Header({
           <Search className="w-4 h-4 text-slate-400 dark:text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 group-focus-within:text-sky-600 dark:group-focus-within:text-sky-400 transition-colors" />
           <input
             type="text"
-            placeholder="Search calls, LR #, rates..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={handleSearchKeyDown}
+            placeholder="Search calls, LR #, rates (press Enter)..."
             className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-900 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-hidden focus:border-sky-500 focus:ring-1 focus:ring-sky-500/20 transition-all truncate"
           />
         </div>

@@ -14,6 +14,7 @@ export async function GET(req: NextRequest) {
       status: searchParams.get('status') || undefined,
       priority: searchParams.get('priority') || undefined,
       type: searchParams.get('type') || undefined,
+      search: searchParams.get('search') || undefined,
       limit: searchParams.get('limit') || undefined,
       offset: searchParams.get('offset') || undefined,
     };
@@ -26,12 +27,15 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const { status, priority, type } = parsedQuery.data;
+    const { status, priority, type, search, limit, offset } = parsedQuery.data;
 
     const requests = await db.listRequests(authContext.tenantId, {
       status,
       priority,
       type,
+      search,
+      limit,
+      offset,
     });
 
     return NextResponse.json({ requests });

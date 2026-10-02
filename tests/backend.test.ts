@@ -17,6 +17,7 @@
  */
 
 import crypto from 'crypto';
+import { Retell } from 'retell-sdk';
 import { db, DEFAULT_TENANT_ID, setSimulatedDbFailure, DatabaseUnavailableError, assertProductionDbReady } from '../lib/db';
 import { dispatchTool } from '../lib/tools/gateway';
 import {
@@ -142,7 +143,7 @@ async function runAllTests() {
   }
 
   // =========================================================================
-  // 2. RETELL WEBHOOK & TOOL SECURITY (CRITICAL FIX B)
+  // 2. RETELL WEBHOOK & TOOL SECURITY (CRITICAL FIX B + OFFICIAL RETELL CONTRACT)
   // =========================================================================
   console.log('\n--- GROUP 2: Retell Cryptographic Signature & Tool Verification ---');
   {
@@ -150,24 +151,44 @@ async function runAllTests() {
     process.env.RETELL_API_KEY = secretKey;
 
     const rawPayload = JSON.stringify({ event: 'call_ended', call: { call_id: 'call-xyz-123' } });
-    const validSignature = crypto.createHmac('sha256', secretKey).update(rawPayload).digest('hex');
-
-    // Valid Signature
-    const isValid = verifyRetellWebhookSignature(rawPayload, validSignature);
-    assert(isValid, 'Cryptographic raw-body HMAC-SHA256 signature verification succeeds');
-
-    // Invalid Signature
-    const isInvalid = verifyRetellWebhookSignature(rawPayload, 'invalid-signature-hash');
-    assert(!isInvalid, 'Tampered or invalid signature is rejected');
-
-    // Missing Signature
-    const isMissing = verifyRetellWebhookSignature(rawPayload, null);
-    assert(!isMissing, 'Missing signature header is rejected');
-
-    // Altered Raw Body (Anti-Tampering)
     const alteredPayload = JSON.stringify({ event: 'call_ended', call: { call_id: 'call-xyz-999' } });
-    const isTampered = verifyRetellWebhookSignature(alteredPayload, validSignature);
-    assert(!isTampered, 'Signature verification fails when payload bytes are altered');
+
+    // A. Official Retell SDK Signature Contract (v=<timestamp>,d=<digest>)
+    const officialSignature = await Retell.sign(rawPayload, secretKey);
+    assert(officialSignature.startsWith('v='), 'Official Retell SDK generates timestamped v=<timestamp>,d=<digest> signature');
+
+    const isOfficialValid = await verifyRetellWebhookSignature(rawPayload, officialSignature);
+    assert(isOfficialValid, 'Official Retell SDK timestamped signature verifies successfully');
+
+    const isOfficialTampered = await verifyRetellWebhookSignature(alteredPayload, officialSignature);
+    assert(!isOfficialTampered, 'Official Retell SDK signature fails when payload bytes are altered');
+
+    const wrongKeyOfficialSig = await Retell.sign(rawPayload, 'wrong-secret-key-67890');
+    const isWrongKeyRejected = await verifyRetellWebhookSignature(rawPayload, wrongKeyOfficialSig);
+    assert(!isWrongKeyRejected, 'Official Retell SDK signature fails when signed with wrong secret');
+
+    const malformedOfficialSig = 'v=notanumber,d=invalidhex';
+    const isMalformedRejected = await verifyRetellWebhookSignature(rawPayload, malformedOfficialSig);
+    assert(!isMalformedRejected, 'Malformed official Retell SDK signature header fails closed');
+
+    // B. Direct HMAC-SHA256 Hex Contract (Legacy & Custom format)
+    const validHexSignature = crypto.createHmac('sha256', secretKey).update(rawPayload).digest('hex');
+
+    const isHexValid = await verifyRetellWebhookSignature(rawPayload, validHexSignature);
+    assert(isHexValid, 'Direct raw-body HMAC-SHA256 hex signature verification succeeds');
+
+    const isHexInvalid = await verifyRetellWebhookSignature(rawPayload, 'invalid-signature-hash');
+    assert(!isHexInvalid, 'Tampered or invalid hex signature is rejected');
+
+    const isHexTampered = await verifyRetellWebhookSignature(alteredPayload, validHexSignature);
+    assert(!isHexTampered, 'Hex signature verification fails when payload bytes are altered');
+
+    // C. Missing Signature Contract
+    const isMissing = await verifyRetellWebhookSignature(rawPayload, null);
+    assert(!isMissing, 'Missing signature header fails closed');
+
+    const isUndefined = await verifyRetellWebhookSignature(rawPayload, undefined as any);
+    assert(!isUndefined, 'Undefined signature header fails closed');
   }
 
   // =========================================================================
@@ -1507,6 +1528,78 @@ async function runAllTests() {
   const dbHealthFail = await db.getTenant(DEFAULT_TENANT_ID).catch(() => null);
   setSimulatedDbFailure(false);
   assert(dbHealthFail === null, 'Section 58.30: Health check reports database failure accurately when disconnected');
+
+  // 31. bulkCreateRateCards validation and atomic batch insertion
+  let bulkInvalidRejected = false;
+  try {
+    await db.bulkCreateRateCards([
+      {
+        origin: 'Delhi',
+        destination: 'Nagpur',
+        vehicle_type: '20ft Container',
+        weight_min_tons: 10,
+        weight_max_tons: 5, // invalid
+        price_inr: 25000,
+        minimum_charge_inr: 20000,
+        transit_time_hours: 36,
+        status: 'ACTIVE',
+        quote_type: 'ESTIMATE',
+        supports_confirmed_quote: false,
+      },
+    ]);
+  } catch (e: any) {
+    if (e.message.includes('weight_max_tons')) bulkInvalidRejected = true;
+  }
+  assert(bulkInvalidRejected, 'Section 58.31: bulkCreateRateCards rejects rows where weight_max_tons < weight_min_tons');
+
+  const bulkResult = await db.bulkCreateRateCards([
+    {
+      origin: 'Delhi',
+      destination: 'Nagpur',
+      vehicle_type: '20ft Container',
+      weight_min_tons: 5,
+      weight_max_tons: 12,
+      price_inr: 28000,
+      minimum_charge_inr: 25000,
+      transit_time_hours: 36,
+      status: 'ACTIVE',
+      quote_type: 'ESTIMATE',
+      supports_confirmed_quote: false,
+    },
+    {
+      origin: 'Mumbai',
+      destination: 'Indore',
+      vehicle_type: '32ft SXL',
+      weight_min_tons: 7,
+      weight_max_tons: 15,
+      price_inr: 32000,
+      minimum_charge_inr: 30000,
+      transit_time_hours: 24,
+      status: 'ACTIVE',
+      quote_type: 'ESTIMATE',
+      supports_confirmed_quote: false,
+    },
+  ]);
+  assert(bulkResult.count === 2 && bulkResult.inserted.length === 2, 'Section 58.31: bulkCreateRateCards atomically creates valid rate cards');
+
+  // 32. listRateCards query parameter forwarding
+  const searchCards = await db.listRateCards(DEFAULT_TENANT_ID, { search: 'Nagpur' });
+  assert(searchCards.length > 0 && searchCards.every((c) => c.origin.includes('Nagpur') || c.destination.includes('Nagpur')), 'Section 58.32: listRateCards forwards search parameter');
+  const limitedCards = await db.listRateCards(DEFAULT_TENANT_ID, { limit: 1 });
+  assert(limitedCards.length === 1, 'Section 58.32: listRateCards enforces limit parameter');
+
+  // 33. listRequests query parameter forwarding
+  const searchReqs = await db.listRequests(DEFAULT_TENANT_ID, { search: 'Delhi' });
+  assert(Array.isArray(searchReqs), 'Section 58.33: listRequests forwards search query parameter');
+
+  // 34. listAuditEvents query parameter forwarding
+  const auditEventsFiltered = await db.listAuditEvents(DEFAULT_TENANT_ID, { limit: 5 });
+  assert(auditEventsFiltered.length <= 5, 'Section 58.34: listAuditEvents forwards limit and offset');
+
+  // 35. settings business_type persistence
+  await db.updateClientConfig(DEFAULT_TENANT_ID, { business_type: 'National Express Freight & FTL Operator' });
+  const cfgWithType = await db.getClientConfig(DEFAULT_TENANT_ID);
+  assert(cfgWithType.business_type === 'National Express Freight & FTL Operator', 'Section 58.35: ClientConfig persists business_type across reloads');
 
   console.log('\n==================================================');
   console.log(`TEST RUN COMPLETE: ${passedTests} PASSED, ${failedTests} FAILED`);

@@ -26,11 +26,14 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const { temperature, search } = parsedQuery.data;
+    const { temperature, status, search, limit, offset } = parsedQuery.data;
 
     const leads = await db.listLeads(authContext.tenantId, {
       temperature,
+      status,
       search,
+      limit,
+      offset,
     });
 
     return NextResponse.json({ leads });

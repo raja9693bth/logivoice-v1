@@ -339,6 +339,7 @@ async function executePostCallPipeline(
           tenantId
         );
       } else {
+        followupStatus = 'SUPPRESSED';
         const suppressionReason = payload.is_escalated
           ? 'Call escalated to live human'
           : !customer?.phone

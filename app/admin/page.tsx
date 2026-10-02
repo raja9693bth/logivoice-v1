@@ -98,23 +98,36 @@ export default function DashboardPage() {
       const hotLeads = fetchedLeads.filter((l) => l.temperature === 'HOT').length;
       const warmLeads = fetchedLeads.filter((l) => l.temperature === 'WARM').length;
 
-      const successfulCalls = fetchedCalls.filter(
-        (c) => c.outcome === 'COMPLETED' || c.outcome === 'TRANSFERRED' || c.outcome === 'CALLBACK_SCHEDULED'
-      ).length;
-      const successRate = fetchedCalls.length > 0 ? Math.round((successfulCalls / fetchedCalls.length) * 1000) / 10 : 0;
-      const totalDuration = fetchedCalls.reduce((acc, c) => acc + (c.duration_seconds || 0), 0);
-      const avgDurationSec = fetchedCalls.length > 0 ? Math.round(totalDuration / fetchedCalls.length) : 0;
+      // Calculate tool telemetry from real tool events
+      const latencies: number[] = [];
+      let totalTools = 0;
+      let successfulTools = 0;
+      for (const c of fetchedCalls) {
+        if (c.tool_events && c.tool_events.length > 0) {
+          for (const te of c.tool_events) {
+            totalTools++;
+            if (te.execution_status === 'SUCCESS' || te.status === 'SUCCESS' || te.status === 'PENDING') successfulTools++;
+            if (typeof te.latency_ms === 'number' && te.latency_ms > 0) {
+              latencies.push(te.latency_ms);
+            }
+          }
+        }
+      }
+      const avgLatencyMs = latencies.length > 0
+        ? Math.round(latencies.reduce((acc, l) => acc + l, 0) / latencies.length)
+        : 0;
+      const toolSuccessRate = totalTools > 0 ? Math.round((successfulTools / totalTools) * 100) : 100;
 
       setKpis({
         calls_today: callsTodayCount,
-        calls_trend: '',
+        calls_trend: callsTodayCount > 0 ? `${callsTodayCount} calls today` : 'No calls today',
         missed_calls: missed,
         escalated_calls: escalated,
         open_requests: openReqs,
         hot_leads: hotLeads,
         warm_leads: warmLeads,
-        avg_response_latency_ms: avgDurationSec * 1000,
-        tool_success_rate_percent: successRate,
+        avg_response_latency_ms: avgLatencyMs,
+        tool_success_rate_percent: toolSuccessRate,
       });
     } catch (err) {
       console.warn('[DashboardPage] Real API fetch error:', err);
@@ -323,18 +336,18 @@ export default function DashboardPage() {
 
             <div>
               <div className="flex justify-between text-xs mb-1">
-                <span className="text-slate-500 dark:text-slate-400">Average Call Duration</span>
+                <span className="text-slate-500 dark:text-slate-400">Avg Tool Response Latency</span>
                 <span className="text-slate-900 dark:text-white font-mono font-semibold">
-                  {calls.length > 0 ? `${Math.round((kpis?.avg_response_latency_ms ?? 0) / 1000)}s` : 'No data'}
+                  {(kpis?.avg_response_latency_ms ?? 0) > 0 ? `${kpis?.avg_response_latency_ms}ms` : 'No telemetry'}
                 </span>
               </div>
               <div className="w-full bg-slate-100 dark:bg-slate-800 h-1.5 rounded-full overflow-hidden">
                 <div
                   className="bg-sky-500 h-full rounded-full transition-all"
-                  style={{ width: `${Math.min(100, Math.max(10, Math.round((kpis?.avg_response_latency_ms ?? 0) / 1000)))}%` }}
+                  style={{ width: `${Math.min(100, Math.max(10, Math.round(((kpis?.avg_response_latency_ms ?? 0) / 1500) * 100)))}%` }}
                 />
               </div>
-              <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">Measured from carrier connect to termination</p>
+              <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">Gateway tool execution roundtrip (target &lt; 1200ms)</p>
             </div>
 
             <div>

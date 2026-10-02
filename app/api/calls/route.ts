@@ -26,12 +26,14 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const { intent, outcome, search } = parsedQuery.data;
+    const { intent, outcome, search, limit, offset } = parsedQuery.data;
 
     const calls = await db.listCalls(authContext.tenantId, {
       intent,
       outcome,
       search,
+      limit,
+      offset,
     });
 
     return NextResponse.json({ calls });

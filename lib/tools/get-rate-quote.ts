@@ -57,7 +57,9 @@ export async function executeGetRateQuote(
     // A quote is strictly an ESTIMATE unless the approved rate card explicitly authorizes
     // commercial confirmation (quote_type === 'CONFIRMED' or supports_confirmed_quote === true).
     const isExplicitlyConfirmable =
-      matchedCard.quote_type === 'CONFIRMED' || matchedCard.supports_confirmed_quote === true;
+      (matchedCard.quote_type === 'CONFIRMED' || matchedCard.supports_confirmed_quote === true) &&
+      Boolean(vehicle_type) &&
+      weight_tons !== undefined;
     const quoteType: 'ESTIMATE' | 'CONFIRMED' = isExplicitlyConfirmable ? 'CONFIRMED' : 'ESTIMATE';
 
     const statusExplanation =

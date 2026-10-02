@@ -17,10 +17,27 @@ export async function executeTransferToHuman(
     const config = await db.getClientConfig(tenantId);
     const contacts = config.escalation_contacts || [];
 
-    // Find requested or top-priority escalation contact
+    // Canonical role mapping & lookup
+    const canonicalRoles: Record<string, string[]> = {
+      DISPATCHER: ['dispatcher', 'primary dispatcher', 'dispatch'],
+      OPS_MANAGER: ['ops_manager', 'operations manager', 'ops manager', 'manager'],
+      AFTER_HOURS: ['after_hours', 'urgent', 'after hours', 'night dispatch', 'emergency'],
+    };
+    const targetInputNorm = (input.target_role || '').trim().toUpperCase();
     const targetContact =
-      contacts.find((c) => c.role.toLowerCase().includes(input.target_role.toLowerCase())) ||
-      contacts[0];
+      contacts.find((c) => {
+        const cRoleUpper = c.role.trim().toUpperCase();
+        if (cRoleUpper === targetInputNorm) return true;
+        for (const [canon, aliases] of Object.entries(canonicalRoles)) {
+          if (
+            (canon === targetInputNorm || aliases.includes(input.target_role?.toLowerCase() || '')) &&
+            (canon === cRoleUpper || aliases.includes(c.role.toLowerCase()))
+          ) {
+            return true;
+          }
+        }
+        return false;
+      }) || contacts[0];
 
     // Check if live SIP / PSTN telephony transfer provider is active and confirms execution.
     // A contact phone number in client configuration is NOT proof that live transfer is available.
@@ -93,10 +110,7 @@ export async function executeTransferToHuman(
 
     // Fallback: Urgent Callback Task with deterministic idempotency & collision-safe reference
     const idempotencyKey = `cb-${tenantId}-${input.call_id || 'direct'}-${Buffer.from(input.reason).toString('hex').slice(0, 16)}`;
-    const existingReqs = await db.listRequests(tenantId);
-    const matched = existingReqs.find(
-      (r) => (r.details as Record<string, unknown>)?.idempotency_key === idempotencyKey
-    );
+    const matched = await db.getRequestByIdempotencyKey(idempotencyKey, tenantId);
     if (matched) {
       return {
         status: 'CALLBACK_SCHEDULED',
@@ -122,6 +136,7 @@ export async function executeTransferToHuman(
         type: 'CALLBACK_REQUEST',
         status: 'PENDING',
         priority: 'URGENT',
+        idempotency_key: idempotencyKey,
         summary: `Urgent Callback Required: ${input.reason}`,
         details: {
           reason: input.reason,

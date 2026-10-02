@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
     const expectedKey = process.env.RETELL_API_KEY;
     const isTestBypass = process.env.NODE_ENV === 'test' && req.headers.get('x-test-bypass-sig') === 'true';
 
-    const hasValidSignature = isTestBypass || verifyRetellWebhookSignature(rawBodyText, signature);
+    const hasValidSignature = isTestBypass || (await verifyRetellWebhookSignature(rawBodyText, signature));
     const hasValidKey =
       Boolean(expectedKey) &&
       (apiKey === expectedKey || authHeader?.replace('Bearer ', '').trim() === expectedKey);

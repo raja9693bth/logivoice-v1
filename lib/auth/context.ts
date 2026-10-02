@@ -14,6 +14,7 @@
 import crypto from 'crypto';
 import { NextRequest } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
+import { Retell } from 'retell-sdk';
 import { createAdminClient } from '@/lib/supabase/server';
 import { DEFAULT_TENANT_ID } from '@/lib/db';
 
@@ -36,12 +37,20 @@ export class AuthorizationError extends Error {
 
 /**
  * Verifies a Retell webhook or tool signature using raw HTTP body bytes.
+ * Validates against the official Retell SDK contract (v=<timestamp>,d=<digest> with replay protection)
+ * and falls back to constant-time direct HMAC-SHA256 hex comparison for legacy/custom calls.
  */
-export function verifyRetellWebhookSignature(rawBody: string, signature: string | null): boolean {
+export async function verifyRetellWebhookSignature(rawBody: string, signature: string | null): Promise<boolean> {
   const apiKey = process.env.RETELL_API_KEY;
   if (!signature || !apiKey) return false;
 
   try {
+    // 1. Official Retell SDK verification (handles timestamped v=<timestamp>,d=<digest> with replay protection)
+    if (signature.startsWith('v=') || signature.includes(',d=')) {
+      return await Retell.verify(rawBody, apiKey, signature);
+    }
+
+    // 2. Direct HMAC-SHA256 hex verification (legacy & custom signature format)
     const expected = crypto.createHmac('sha256', apiKey).update(rawBody).digest('hex');
     const sigBuffer = Buffer.from(signature);
     const expBuffer = Buffer.from(expected);
@@ -217,7 +226,7 @@ export async function getAuthContext(
 
   // 3. Supabase SSR Session via Cookies (for browser-initiated API calls)
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '';
-  const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_SECRET_KEY || '';
+  const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
 
   if (supabaseUrl && supabaseKey && 'cookies' in req && req.cookies && typeof req.cookies.getAll === 'function') {
     try {

@@ -126,6 +126,7 @@ export interface OperationsRequestsDbRow {
   priority: RequestPriority;
   summary: string;
   details: Record<string, unknown>;
+  idempotency_key: string | null;
   assigned_to: string | null;
   created_at: string;
   updated_at: string;
@@ -383,6 +384,7 @@ export function domainRequestToDbRow(
     priority: req.priority || 'NORMAL',
     summary: req.summary || 'Operational Request',
     details: detailsPayload,
+    idempotency_key: req.idempotency_key || (detailsPayload.idempotency_key as string) || null,
     assigned_to: req.assigned_to || null,
     created_at: req.created_at || now,
     updated_at: now,
@@ -413,6 +415,7 @@ export function dbRequestToDomain(
     notes: (details.notes as string) || undefined,
     resolution_notes: (details.resolution_notes as string) || undefined,
     assigned_to: row.assigned_to || undefined,
+    idempotency_key: row.idempotency_key || (details.idempotency_key as string) || undefined,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };

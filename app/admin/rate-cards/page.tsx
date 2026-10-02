@@ -66,6 +66,29 @@ export default function RateCardsPage() {
   const [formStatus, setFormStatus] = useState<'ACTIVE' | 'DRAFT' | 'EXPIRED'>('ACTIVE');
   const [formTransitHours, setFormTransitHours] = useState<number>(24);
   const [formNotes, setFormNotes] = useState('');
+  const [formQuoteType, setFormQuoteType] = useState<'ESTIMATE' | 'CONFIRMED'>('ESTIMATE');
+  const [formSupportsConfirmed, setFormSupportsConfirmed] = useState<boolean>(false);
+  const [formEffectiveTo, setFormEffectiveTo] = useState('');
+
+  // CSV Import State
+  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [csvParsedRows, setCsvParsedRows] = useState<
+    Array<{
+      origin: string;
+      destination: string;
+      vehicle_type: string;
+      weight_min_tons: number;
+      weight_max_tons: number;
+      price_inr: number;
+      minimum_charge_inr: number;
+      transit_time_hours: number;
+      error?: string;
+      conflict?: boolean;
+      conflictNote?: string;
+    }>
+  >([]);
+  const [csvImporting, setCsvImporting] = useState(false);
+  const [csvResultMsg, setCsvResultMsg] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
 
   const filteredRateCards = useMemo(() => {
     return rateCards.filter((rc) => {
@@ -94,6 +117,9 @@ export default function RateCardsPage() {
     setFormStatus('ACTIVE');
     setFormTransitHours(24);
     setFormNotes('Tolls included; standard detention rules apply.');
+    setFormQuoteType('ESTIMATE');
+    setFormSupportsConfirmed(false);
+    setFormEffectiveTo('');
     setIsEditDrawerOpen(true);
   };
 
@@ -107,9 +133,12 @@ export default function RateCardsPage() {
     setFormPrice(rc.price_inr);
     setFormMinCharge(rc.minimum_charge_inr);
     setFormEffectiveFrom(rc.effective_from);
+    setFormEffectiveTo(rc.effective_to || '');
     setFormStatus(rc.status);
     setFormTransitHours(rc.transit_time_hours || 24);
     setFormNotes(rc.surcharge_notes || '');
+    setFormQuoteType(rc.quote_type || 'ESTIMATE');
+    setFormSupportsConfirmed(Boolean(rc.supports_confirmed_quote));
     setIsEditDrawerOpen(true);
   };
 
@@ -135,6 +164,9 @@ export default function RateCardsPage() {
             status: formStatus,
             transit_time_hours: formTransitHours,
             surcharge_notes: formNotes,
+            effective_to: formEffectiveTo || undefined,
+            quote_type: formQuoteType,
+            supports_confirmed_quote: formSupportsConfirmed,
           }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -152,9 +184,12 @@ export default function RateCardsPage() {
             price_inr: formPrice,
             minimum_charge_inr: formMinCharge,
             effective_from: formEffectiveFrom,
+            effective_to: formEffectiveTo || undefined,
             status: formStatus,
             transit_time_hours: formTransitHours,
             surcharge_notes: formNotes,
+            quote_type: formQuoteType,
+            supports_confirmed_quote: formSupportsConfirmed,
             source_version: 'v1.2-portal-created',
           }),
         });
@@ -168,6 +203,183 @@ export default function RateCardsPage() {
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleCsvFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setCsvFile(file);
+    setCsvResultMsg(null);
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      if (!text) return;
+      const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      if (lines.length < 2) {
+        setCsvResultMsg({ type: 'error', message: 'CSV file is empty or missing data rows.' });
+        return;
+      }
+      const headers = lines[0].toLowerCase().split(',').map((h) => h.trim().replace(/['"]/g, ''));
+      const parsed: typeof csvParsedRows = [];
+      const seenCsvKeys = new Set<string>();
+
+      for (let i = 1; i < lines.length; i++) {
+        const parts = lines[i].split(',').map((p) => p.trim().replace(/['"]/g, ''));
+        if (parts.length < 3) continue;
+        const row: Record<string, string> = {};
+        headers.forEach((h, idx) => {
+          row[h] = parts[idx] || '';
+        });
+
+        const origin = (row.origin || row.from || row.pickup || parts[0] || '').trim();
+        const destination = (row.destination || row.to || row.drop || parts[1] || '').trim();
+        const vehicle_type = (row.vehicle_type || row.vehicle || row.truck || parts[2] || '').trim();
+        const minW = parseFloat(row.weight_min_tons || row.weight_min || parts[3] || '1');
+        const maxW = parseFloat(row.weight_max_tons || row.weight_max || parts[4] || '5');
+        const price = parseFloat(row.price_inr || row.price || parts[5] || '0');
+        const minCharge = parseFloat(row.minimum_charge_inr || row.minimum_charge || parts[6] || '0');
+        const transit = parseInt(row.transit_time_hours || row.transit_hours || parts[7] || '24', 10);
+
+        let rowErr: string | undefined;
+        let isConflict = false;
+        let conflictNote: string | undefined;
+
+        if (!origin || !destination) {
+          rowErr = 'Missing origin or destination';
+        } else if (!vehicle_type) {
+          rowErr = 'Missing vehicle type';
+        } else if (isNaN(price) || price <= 0) {
+          rowErr = 'Invalid price INR (must be > 0)';
+        } else if (isNaN(minW) || minW <= 0) {
+          rowErr = 'Invalid min weight';
+        } else if (isNaN(maxW) || maxW < minW) {
+          rowErr = 'Max weight cannot be less than min weight';
+        }
+
+        const laneKey = `${origin.toLowerCase()}|${destination.toLowerCase()}|${vehicle_type.toLowerCase()}`;
+        if (!rowErr) {
+          if (seenCsvKeys.has(laneKey)) {
+            rowErr = 'Duplicate lane in same CSV';
+          } else {
+            seenCsvKeys.add(laneKey);
+            // Check for conflict against existing loaded rate cards
+            const existingMatch = rateCards.find(
+              (c) =>
+                c.origin.toLowerCase() === origin.toLowerCase() &&
+                c.destination.toLowerCase() === destination.toLowerCase() &&
+                c.vehicle_type.toLowerCase() === vehicle_type.toLowerCase() &&
+                c.status === 'ACTIVE'
+            );
+            if (existingMatch) {
+              isConflict = true;
+              conflictNote = `Lane already active (₹${existingMatch.price_inr.toLocaleString('en-IN')})`;
+            }
+          }
+        }
+
+        parsed.push({
+          origin,
+          destination,
+          vehicle_type,
+          weight_min_tons: isNaN(minW) ? 1 : minW,
+          weight_max_tons: isNaN(maxW) ? 5 : maxW,
+          price_inr: isNaN(price) ? 0 : price,
+          minimum_charge_inr: isNaN(minCharge) ? 0 : minCharge,
+          transit_time_hours: isNaN(transit) ? 24 : transit,
+          error: rowErr,
+          conflict: isConflict,
+          conflictNote,
+        });
+      }
+      setCsvParsedRows(parsed);
+      const errCount = parsed.filter((r) => r.error).length;
+      const conflictCount = parsed.filter((r) => r.conflict).length;
+      if (errCount > 0 || conflictCount > 0) {
+        setCsvResultMsg({
+          type: 'info',
+          message: `Parsed ${parsed.length} rows (${errCount} invalid, ${conflictCount} existing lane conflicts detected).`,
+        });
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleCommitCsv = async () => {
+    const validRows = csvParsedRows.filter((r) => !r.error);
+    if (validRows.length === 0) {
+      setCsvResultMsg({ type: 'error', message: 'No valid rows found to import.' });
+      return;
+    }
+    setCsvImporting(true);
+    setCsvResultMsg(null);
+
+    const payloadItems = validRows.map((r) => ({
+      origin: r.origin,
+      destination: r.destination,
+      vehicle_type: r.vehicle_type,
+      weight_min_tons: r.weight_min_tons,
+      weight_max_tons: r.weight_max_tons,
+      price_inr: r.price_inr,
+      minimum_charge_inr: r.minimum_charge_inr,
+      transit_time_hours: r.transit_time_hours,
+      effective_from: new Date().toISOString().split('T')[0],
+      status: 'ACTIVE' as const,
+      quote_type: 'ESTIMATE' as const,
+      supports_confirmed_quote: false,
+      source_version: 'v1.2-csv-bulk-import',
+    }));
+
+    try {
+      const res = await fetch('/api/rates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bulk: true,
+          items: payloadItems,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+
+      setCsvResultMsg({
+        type: 'success',
+        message: `Successfully imported ${data.count} rate cards atomically. Audit event logged.`,
+      });
+      fetchRateCards();
+      setTimeout(() => {
+        setIsImportModalOpen(false);
+        setCsvParsedRows([]);
+        setCsvFile(null);
+        setCsvResultMsg(null);
+      }, 1600);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown database error';
+      setCsvResultMsg({
+        type: 'error',
+        message: `Bulk import failed: ${msg}. No rows were partially committed.`,
+      });
+    } finally {
+      setCsvImporting(false);
+    }
+  };
+
+  const handleDownloadSampleTemplate = () => {
+    const csvContent =
+      'origin,destination,vehicle_type,weight_min_tons,weight_max_tons,price_inr,minimum_charge_inr,transit_time_hours\n' +
+      'Delhi,Mumbai,32ft MXL,5.0,15.0,42000,38000,48\n' +
+      'Delhi,Jaipur,14ft Closed,1.0,4.0,14000,12000,12\n' +
+      'Mumbai,Pune,Tata Ace,0.5,1.5,4500,4000,6\n';
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', 'sample_rate_cards_template.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   return (
@@ -451,6 +663,42 @@ export default function RateCardsPage() {
             </div>
           </div>
 
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Quote Type</label>
+              <select
+                value={formQuoteType}
+                onChange={(e) => setFormQuoteType(e.target.value as any)}
+                className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
+              >
+                <option value="ESTIMATE">ESTIMATE (Indicative Tariff)</option>
+                <option value="CONFIRMED">CONFIRMED (Authorized Quote)</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Expiry Date (Optional)</label>
+              <input
+                type="date"
+                value={formEffectiveTo}
+                onChange={(e) => setFormEffectiveTo(e.target.value)}
+                className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 pt-1">
+            <input
+              id="supportsConfirmed"
+              type="checkbox"
+              checked={formSupportsConfirmed}
+              onChange={(e) => setFormSupportsConfirmed(e.target.checked)}
+              className="rounded bg-slate-50 dark:bg-slate-950 border-slate-300 dark:border-slate-800 text-sky-600 focus:ring-sky-500"
+            />
+            <label htmlFor="supportsConfirmed" className="text-xs text-slate-700 dark:text-slate-300">
+              <strong className="text-slate-900 dark:text-white">Authorize Immediate Booking Confirmation:</strong> Voice agent may commit booking for this rate.
+            </label>
+          </div>
+
           <div>
             <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Surcharges &amp; Detention Conditions</label>
             <textarea
@@ -480,17 +728,22 @@ export default function RateCardsPage() {
         </form>
       </Drawer>
 
-      {/* CSV Import Modal */}
+      {/* CSV Import Modal with Preview and Real Commit */}
       {isImportModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 dark:bg-black/70 backdrop-blur-xs">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-xl w-full p-6 space-y-4 shadow-2xl max-h-[90vh] flex flex-col">
             <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
               <h2 className="text-sm font-semibold text-slate-900 dark:text-white flex items-center gap-2">
                 <FileSpreadsheet className="w-4 h-4 text-sky-600 dark:text-sky-400" />
                 <span>Import Rate Cards (CSV)</span>
               </h2>
               <button
-                onClick={() => setIsImportModalOpen(false)}
+                onClick={() => {
+                  setIsImportModalOpen(false);
+                  setCsvParsedRows([]);
+                  setCsvFile(null);
+                  setCsvResultMsg(null);
+                }}
                 className="text-slate-400 hover:text-slate-600 dark:hover:text-white"
               >
                 <X className="w-4 h-4" />
@@ -498,37 +751,96 @@ export default function RateCardsPage() {
             </div>
 
             <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-              Upload client-approved rate sheet. Columns required: <br />
+              Upload approved freight rate CSV. Required columns: <br />
               <code className="bg-slate-100 dark:bg-slate-950 p-2 rounded font-mono text-[11px] text-sky-700 dark:text-sky-300 border border-slate-200 dark:border-slate-800 block mt-1 overflow-x-auto max-w-full break-all whitespace-pre-wrap">
-                origin, destination, vehicle_type, weight_min, weight_max, price_inr, minimum_charge, transit_hours
+                origin, destination, vehicle_type, weight_min_tons, weight_max_tons, price_inr, minimum_charge_inr, transit_time_hours
               </code>
             </p>
 
-            <div className="border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-xl p-8 text-center bg-slate-50 dark:bg-slate-950/50 hover:border-sky-500/50 transition-colors cursor-pointer">
-              <Upload className="w-8 h-8 text-slate-400 dark:text-slate-500 mx-auto mb-2" />
-              <p className="text-xs font-medium text-slate-800 dark:text-white">Click or drag &amp; drop .csv file here</p>
-              <p className="text-[10px] text-slate-500 mt-1">Maximum 5,000 rows per batch</p>
-            </div>
+            <label className="border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-xl p-6 text-center bg-slate-50 dark:bg-slate-950/50 hover:border-sky-500/50 transition-colors cursor-pointer block">
+              <input type="file" accept=".csv" onChange={handleCsvFileChange} className="hidden" />
+              <Upload className="w-7 h-7 text-slate-400 dark:text-slate-500 mx-auto mb-2" />
+              <p className="text-xs font-medium text-slate-800 dark:text-white">
+                {csvFile ? csvFile.name : 'Select or drop .csv rate sheet here'}
+              </p>
+              <p className="text-[10px] text-slate-500 mt-1">Parsed client-side before validation commit</p>
+            </label>
 
-            <div className="flex justify-between items-center pt-2">
-              <a
-                href="#sample-template"
-                onClick={(e) => {
-                  e.preventDefault();
-                  alert('Sample CSV format: origin,destination,vehicle_type,weight_min_tons,weight_max_tons,price_inr,minimum_charge_inr,transit_time_hours');
-                }}
-                className="text-xs text-sky-600 dark:text-sky-400 hover:underline"
+            {csvResultMsg && (
+              <div
+                className={`p-3 rounded-lg border text-xs ${
+                  csvResultMsg.type === 'error'
+                    ? 'bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-800/60 text-rose-800 dark:text-rose-300'
+                    : csvResultMsg.type === 'success'
+                    ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800/60 text-emerald-800 dark:text-emerald-300'
+                    : 'bg-sky-50 dark:bg-sky-950/40 border-sky-200 dark:border-sky-800/60 text-sky-800 dark:text-sky-300'
+                }`}
               >
-                Download Sample Template
-              </a>
+                {csvResultMsg.message}
+              </div>
+            )}
+
+            {csvParsedRows.length > 0 && (
+              <div className="flex-1 overflow-y-auto max-h-48 border border-slate-200 dark:border-slate-800 rounded-lg text-xs">
+                <table className="w-full text-left">
+                  <thead className="bg-slate-100 dark:bg-slate-800 sticky top-0 text-[10px] uppercase text-slate-500">
+                    <tr>
+                      <th className="p-2">Lane</th>
+                      <th className="p-2">Vehicle</th>
+                      <th className="p-2">Rate (₹)</th>
+                      <th className="p-2">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {csvParsedRows.map((r, idx) => (
+                      <tr
+                        key={idx}
+                        className={
+                          r.error
+                            ? 'bg-rose-50/50 dark:bg-rose-950/20'
+                            : r.conflict
+                            ? 'bg-amber-50/40 dark:bg-amber-950/20'
+                            : ''
+                        }
+                      >
+                        <td className="p-2 font-medium">{r.origin} &rarr; {r.destination}</td>
+                        <td className="p-2">{r.vehicle_type}</td>
+                        <td className="p-2 font-mono">₹{r.price_inr.toLocaleString('en-IN')}</td>
+                        <td className="p-2">
+                          {r.error ? (
+                            <span className="text-rose-600 dark:text-rose-400 text-[10px] font-semibold">{r.error}</span>
+                          ) : r.conflict ? (
+                            <span className="text-amber-600 dark:text-amber-400 text-[10px] font-semibold" title={r.conflictNote}>
+                              Active Lane Match
+                            </span>
+                          ) : (
+                            <span className="text-emerald-600 dark:text-emerald-400 text-[10px] font-semibold">Valid</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div className="flex justify-between items-center pt-2 border-t border-slate-200 dark:border-slate-800">
               <button
-                onClick={() => {
-                  alert('CSV Import Preview: 0 records loaded (Demo Mode).');
-                  setIsImportModalOpen(false);
-                }}
-                className="px-4 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-medium transition-colors shadow-xs"
+                type="button"
+                onClick={handleDownloadSampleTemplate}
+                className="text-xs text-sky-600 dark:text-sky-400 hover:underline cursor-pointer"
               >
-                Upload &amp; Validate
+                Download Sample CSV Template
+              </button>
+              <button
+                type="button"
+                onClick={handleCommitCsv}
+                disabled={csvImporting || csvParsedRows.filter((r) => !r.error).length === 0}
+                className="px-4 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-medium transition-colors shadow-xs disabled:opacity-50 cursor-pointer"
+              >
+                {csvImporting
+                  ? 'Importing...'
+                  : `Commit ${csvParsedRows.filter((r) => !r.error).length} Valid Records`}
               </button>
             </div>
           </div>

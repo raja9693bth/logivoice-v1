@@ -12,12 +12,9 @@ export async function executeCreateBookingRequest(
   tenantId: string = DEFAULT_TENANT_ID
 ): Promise<CreateBookingRequestOutput> {
   try {
-    // 1. Idempotency Check
+    // 1. Idempotency Check via authoritative DB index
     if (input.idempotency_key) {
-      const existing = await db.listRequests(tenantId);
-      const matched = existing.find(
-        (r) => (r.details as Record<string, unknown>)?.idempotency_key === input.idempotency_key
-      );
+      const matched = await db.getRequestByIdempotencyKey(input.idempotency_key, tenantId);
       if (matched) {
         return {
           status: 'REQUEST_CREATED',
@@ -63,6 +60,7 @@ export async function executeCreateBookingRequest(
         type: 'BOOKING_REQUEST',
         status: isPendingConfirmation ? 'IN_REVIEW' : 'PENDING',
         priority: 'HIGH',
+        idempotency_key: input.idempotency_key || undefined,
         summary: `Booking Request: ${input.origin} -> ${input.destination} (${input.vehicle_type}, ${input.weight})`,
         details: {
           origin: input.origin,

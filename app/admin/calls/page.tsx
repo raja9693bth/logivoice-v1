@@ -12,6 +12,7 @@ import {
   AlertTriangle,
   RefreshCw,
 } from 'lucide-react';
+import { useSearchParams } from 'next/navigation';
 import {
   TemperatureBadge,
   OutcomeBadge,
@@ -23,7 +24,8 @@ import { Drawer } from '@/components/ui/Drawer';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Call } from '@/types/logivoice';
 
-export default function CallsPage() {
+function CallsPageContent() {
+  const searchParams = useSearchParams();
   const [calls, setCalls] = useState<Call[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -33,6 +35,13 @@ export default function CallsPage() {
   const [outcomeFilter, setOutcomeFilter] = useState<string>('ALL');
   const [tempFilter, setTempFilter] = useState<string>('ALL');
   const [selectedCall, setSelectedCall] = useState<Call | null>(null);
+
+  useEffect(() => {
+    const q = searchParams.get('search');
+    if (q) {
+      setSearchQuery(q);
+    }
+  }, [searchParams]);
 
   const fetchCalls = async () => {
     setIsLoading(true);
@@ -412,3 +421,12 @@ export default function CallsPage() {
     </div>
   );
 }
+
+export default function CallsPage() {
+  return (
+    <React.Suspense fallback={<div className="p-8 text-xs text-slate-400">Loading calls...</div>}>
+      <CallsPageContent />
+    </React.Suspense>
+  );
+}
+

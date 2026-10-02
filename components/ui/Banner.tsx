@@ -1,12 +1,20 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { AlertCircle, X } from 'lucide-react';
 
 export function DemoModeBanner() {
   const [dismissed, setDismissed] = useState(false);
+  const [isDemo, setIsDemo] = useState(false);
 
-  if (dismissed) return null;
+  useEffect(() => {
+    const active =
+      process.env.NEXT_PUBLIC_DEMO_MODE === 'true' ||
+      (typeof window !== 'undefined' && localStorage.getItem('logivoice_demo_mode') === 'true');
+    setIsDemo(active);
+  }, []);
+
+  if (!isDemo || dismissed) return null;
 
   return (
     <div className="bg-amber-50 dark:bg-amber-950/40 border-b border-amber-200 dark:border-amber-800/40 text-amber-900 dark:text-amber-200 text-xs px-4 py-2 flex items-center justify-between transition-colors">
@@ -19,7 +27,7 @@ export function DemoModeBanner() {
       </div>
       <button
         onClick={() => setDismissed(true)}
-        className="text-amber-700 hover:text-amber-950 dark:text-amber-400 dark:hover:text-amber-200 p-1 rounded-sm transition-colors focus:outline-hidden focus:ring-1 focus:ring-amber-500"
+        className="text-amber-700 hover:text-amber-950 dark:text-amber-400 dark:hover:text-amber-200 p-1 rounded-sm transition-colors focus:outline-hidden focus:ring-1 focus:ring-amber-500 cursor-pointer"
         title="Dismiss notice"
         aria-label="Dismiss demo mode banner"
       >
@@ -50,8 +58,9 @@ export function SystemStatusPill() {
         }`}
       />
       <span className="font-medium">
-        {status === 'ONLINE' ? 'Voice Gateway: Standby' : status === 'DEGRADED' ? 'System Degraded' : 'Checking Health...'}
+        {status === 'ONLINE' ? 'App Online' : status === 'DEGRADED' ? 'System Degraded' : 'Checking Health...'}
       </span>
     </div>
   );
 }
+

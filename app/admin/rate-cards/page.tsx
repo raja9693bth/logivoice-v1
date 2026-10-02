@@ -16,6 +16,7 @@ import { formatCurrencyINR } from '@/lib/utils';
 import { Drawer } from '@/components/ui/Drawer';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { RateCard } from '@/types/logivoice';
+import { parseRateCardsCsv } from '@/lib/rules/rate-engine';
 
 export default function RateCardsPage() {
   const [rateCards, setRateCards] = useState<RateCard[]>([]);
@@ -190,7 +191,6 @@ export default function RateCardsPage() {
             surcharge_notes: formNotes,
             quote_type: formQuoteType,
             supports_confirmed_quote: formSupportsConfirmed,
-            source_version: 'v1.2-portal-created',
           }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -214,90 +214,23 @@ export default function RateCardsPage() {
     reader.onload = (event) => {
       const text = event.target?.result as string;
       if (!text) return;
-      const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-      if (lines.length < 2) {
-        setCsvResultMsg({ type: 'error', message: 'CSV file is empty or missing data rows.' });
+      const { allRows, validRows, errors } = parseRateCardsCsv(text, rateCards);
+      if (errors.length > 0 && allRows.length === 0) {
+        setCsvResultMsg({ type: 'error', message: errors[0] });
         return;
       }
-      const headers = lines[0].toLowerCase().split(',').map((h) => h.trim().replace(/['"]/g, ''));
-      const parsed: typeof csvParsedRows = [];
-      const seenCsvKeys = new Set<string>();
-
-      for (let i = 1; i < lines.length; i++) {
-        const parts = lines[i].split(',').map((p) => p.trim().replace(/['"]/g, ''));
-        if (parts.length < 3) continue;
-        const row: Record<string, string> = {};
-        headers.forEach((h, idx) => {
-          row[h] = parts[idx] || '';
-        });
-
-        const origin = (row.origin || row.from || row.pickup || parts[0] || '').trim();
-        const destination = (row.destination || row.to || row.drop || parts[1] || '').trim();
-        const vehicle_type = (row.vehicle_type || row.vehicle || row.truck || parts[2] || '').trim();
-        const minW = parseFloat(row.weight_min_tons || row.weight_min || parts[3] || '1');
-        const maxW = parseFloat(row.weight_max_tons || row.weight_max || parts[4] || '5');
-        const price = parseFloat(row.price_inr || row.price || parts[5] || '0');
-        const minCharge = parseFloat(row.minimum_charge_inr || row.minimum_charge || parts[6] || '0');
-        const transit = parseInt(row.transit_time_hours || row.transit_hours || parts[7] || '24', 10);
-
-        let rowErr: string | undefined;
-        let isConflict = false;
-        let conflictNote: string | undefined;
-
-        if (!origin || !destination) {
-          rowErr = 'Missing origin or destination';
-        } else if (!vehicle_type) {
-          rowErr = 'Missing vehicle type';
-        } else if (isNaN(price) || price <= 0) {
-          rowErr = 'Invalid price INR (must be > 0)';
-        } else if (isNaN(minW) || minW <= 0) {
-          rowErr = 'Invalid min weight';
-        } else if (isNaN(maxW) || maxW < minW) {
-          rowErr = 'Max weight cannot be less than min weight';
-        }
-
-        const laneKey = `${origin.toLowerCase()}|${destination.toLowerCase()}|${vehicle_type.toLowerCase()}`;
-        if (!rowErr) {
-          if (seenCsvKeys.has(laneKey)) {
-            rowErr = 'Duplicate lane in same CSV';
-          } else {
-            seenCsvKeys.add(laneKey);
-            // Check for conflict against existing loaded rate cards
-            const existingMatch = rateCards.find(
-              (c) =>
-                c.origin.toLowerCase() === origin.toLowerCase() &&
-                c.destination.toLowerCase() === destination.toLowerCase() &&
-                c.vehicle_type.toLowerCase() === vehicle_type.toLowerCase() &&
-                c.status === 'ACTIVE'
-            );
-            if (existingMatch) {
-              isConflict = true;
-              conflictNote = `Lane already active (₹${existingMatch.price_inr.toLocaleString('en-IN')})`;
-            }
-          }
-        }
-
-        parsed.push({
-          origin,
-          destination,
-          vehicle_type,
-          weight_min_tons: isNaN(minW) ? 1 : minW,
-          weight_max_tons: isNaN(maxW) ? 5 : maxW,
-          price_inr: isNaN(price) ? 0 : price,
-          minimum_charge_inr: isNaN(minCharge) ? 0 : minCharge,
-          transit_time_hours: isNaN(transit) ? 24 : transit,
-          error: rowErr,
-          conflict: isConflict,
-          conflictNote,
-        });
-      }
-      setCsvParsedRows(parsed);
-      const errCount = parsed.filter((r) => r.error).length;
-      const conflictCount = parsed.filter((r) => r.conflict).length;
+      setCsvParsedRows(allRows);
+      const errCount = allRows.filter((r) => r.error).length;
+      const conflictCount = allRows.filter((r) => r.conflict).length;
       if (errCount > 0 || conflictCount > 0) {
         setCsvResultMsg({
           type: 'info',
-          message: `Parsed ${parsed.length} rows (${errCount} invalid, ${conflictCount} existing lane conflicts detected).`,
+          message: `Parsed ${allRows.length} rows (${errCount} invalid, ${conflictCount} existing lane conflicts detected). ${validRows.length} valid rows ready to import.`,
+        });
+      } else {
+        setCsvResultMsg({
+          type: 'success',
+          message: `All ${validRows.length} rows parsed and validated cleanly.`,
         });
       }
     };
@@ -305,9 +238,9 @@ export default function RateCardsPage() {
   };
 
   const handleCommitCsv = async () => {
-    const validRows = csvParsedRows.filter((r) => !r.error);
+    const validRows = csvParsedRows.filter((r) => !r.error && !r.conflict);
     if (validRows.length === 0) {
-      setCsvResultMsg({ type: 'error', message: 'No valid rows found to import.' });
+      setCsvResultMsg({ type: 'error', message: 'No valid conflict-free rows found to import.' });
       return;
     }
     setCsvImporting(true);
@@ -326,7 +259,6 @@ export default function RateCardsPage() {
       status: 'ACTIVE' as const,
       quote_type: 'ESTIMATE' as const,
       supports_confirmed_quote: false,
-      source_version: 'v1.2-csv-bulk-import',
     }));
 
     try {
@@ -546,8 +478,9 @@ export default function RateCardsPage() {
         <form onSubmit={handleSaveRateCard} className="space-y-4 text-xs">
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Origin City / Hub</label>
+              <label htmlFor="formOrigin" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Origin City / Hub</label>
               <input
+                id="formOrigin"
                 type="text"
                 required
                 value={formOrigin}
@@ -557,8 +490,9 @@ export default function RateCardsPage() {
               />
             </div>
             <div>
-              <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Destination City / Hub</label>
+              <label htmlFor="formDest" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Destination City / Hub</label>
               <input
+                id="formDest"
                 type="text"
                 required
                 value={formDest}
@@ -570,8 +504,9 @@ export default function RateCardsPage() {
           </div>
 
           <div>
-            <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Vehicle Type / Size</label>
+            <label htmlFor="formVehicle" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Vehicle Type / Size</label>
             <input
+              id="formVehicle"
               type="text"
               required
               value={formVehicle}
@@ -583,24 +518,26 @@ export default function RateCardsPage() {
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Min Weight (Tons)</label>
+              <label htmlFor="formMinWeight" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Min Weight (Tons)</label>
               <input
+                id="formMinWeight"
                 type="number"
                 step="0.5"
                 required
                 value={formMinWeight}
-                onChange={(e) => setFormMinWeight(parseFloat(e.target.value))}
+                onChange={(e) => setFormMinWeight(Number.parseFloat(e.target.value))}
                 className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
               />
             </div>
             <div>
-              <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Max Weight (Tons)</label>
+              <label htmlFor="formMaxWeight" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Max Weight (Tons)</label>
               <input
+                id="formMaxWeight"
                 type="number"
                 step="0.5"
                 required
                 value={formMaxWeight}
-                onChange={(e) => setFormMaxWeight(parseFloat(e.target.value))}
+                onChange={(e) => setFormMaxWeight(Number.parseFloat(e.target.value))}
                 className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
               />
             </div>
@@ -608,22 +545,24 @@ export default function RateCardsPage() {
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Commercial Price (₹ INR)</label>
+              <label htmlFor="formPrice" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Commercial Price (₹ INR)</label>
               <input
+                id="formPrice"
                 type="number"
                 required
                 value={formPrice}
-                onChange={(e) => setFormPrice(parseInt(e.target.value, 10))}
+                onChange={(e) => setFormPrice(Number.parseInt(e.target.value, 10))}
                 className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500 font-mono font-bold text-emerald-600 dark:text-emerald-400"
               />
             </div>
             <div>
-              <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Minimum Charge (₹ INR)</label>
+              <label htmlFor="formMinCharge" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Minimum Charge (₹ INR)</label>
               <input
+                id="formMinCharge"
                 type="number"
                 required
                 value={formMinCharge}
-                onChange={(e) => setFormMinCharge(parseInt(e.target.value, 10))}
+                onChange={(e) => setFormMinCharge(Number.parseInt(e.target.value, 10))}
                 className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500 font-mono"
               />
             </div>
@@ -631,17 +570,19 @@ export default function RateCardsPage() {
 
           <div className="grid grid-cols-3 gap-3">
             <div>
-              <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Transit SLA (Hours)</label>
+              <label htmlFor="formTransitHours" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Transit SLA (Hours)</label>
               <input
+                id="formTransitHours"
                 type="number"
                 value={formTransitHours}
-                onChange={(e) => setFormTransitHours(parseInt(e.target.value, 10))}
+                onChange={(e) => setFormTransitHours(Number.parseInt(e.target.value, 10))}
                 className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
               />
             </div>
             <div>
-              <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Effective Date</label>
+              <label htmlFor="formEffectiveFrom" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Effective Date</label>
               <input
+                id="formEffectiveFrom"
                 type="date"
                 required
                 value={formEffectiveFrom}
@@ -650,8 +591,9 @@ export default function RateCardsPage() {
               />
             </div>
             <div>
-              <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Status</label>
+              <label htmlFor="formStatus" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Status</label>
               <select
+                id="formStatus"
                 value={formStatus}
                 onChange={(e) => setFormStatus(e.target.value as any)}
                 className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
@@ -665,8 +607,9 @@ export default function RateCardsPage() {
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Quote Type</label>
+              <label htmlFor="formQuoteType" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Quote Type</label>
               <select
+                id="formQuoteType"
                 value={formQuoteType}
                 onChange={(e) => setFormQuoteType(e.target.value as any)}
                 className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
@@ -676,8 +619,9 @@ export default function RateCardsPage() {
               </select>
             </div>
             <div>
-              <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Expiry Date (Optional)</label>
+              <label htmlFor="formEffectiveTo" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Expiry Date (Optional)</label>
               <input
+                id="formEffectiveTo"
                 type="date"
                 value={formEffectiveTo}
                 onChange={(e) => setFormEffectiveTo(e.target.value)}
@@ -700,8 +644,9 @@ export default function RateCardsPage() {
           </div>
 
           <div>
-            <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Surcharges &amp; Detention Conditions</label>
+            <label htmlFor="formNotes" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Surcharges &amp; Detention Conditions</label>
             <textarea
+              id="formNotes"
               rows={3}
               value={formNotes}
               onChange={(e) => setFormNotes(e.target.value)}
@@ -720,9 +665,10 @@ export default function RateCardsPage() {
             </button>
             <button
               type="submit"
-              className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold transition-colors shadow-xs"
+              disabled={saving}
+              className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-semibold transition-colors shadow-xs"
             >
-              Save Rate Card
+              {saving ? 'Saving...' : 'Save Rate Card'}
             </button>
           </div>
         </form>
@@ -730,14 +676,29 @@ export default function RateCardsPage() {
 
       {/* CSV Import Modal with Preview and Real Commit */}
       {isImportModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 dark:bg-black/70 backdrop-blur-xs">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="csvModalTitle"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 dark:bg-black/70 backdrop-blur-xs"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              setIsImportModalOpen(false);
+              setCsvParsedRows([]);
+              setCsvFile(null);
+              setCsvResultMsg(null);
+            }
+          }}
+        >
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-xl w-full p-6 space-y-4 shadow-2xl max-h-[90vh] flex flex-col">
             <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
-              <h2 className="text-sm font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+              <h2 id="csvModalTitle" className="text-sm font-semibold text-slate-900 dark:text-white flex items-center gap-2">
                 <FileSpreadsheet className="w-4 h-4 text-sky-600 dark:text-sky-400" />
                 <span>Import Rate Cards (CSV)</span>
               </h2>
               <button
+                type="button"
+                aria-label="Close CSV Import Dialog"
                 onClick={() => {
                   setIsImportModalOpen(false);
                   setCsvParsedRows([]);
@@ -757,8 +718,8 @@ export default function RateCardsPage() {
               </code>
             </p>
 
-            <label className="border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-xl p-6 text-center bg-slate-50 dark:bg-slate-950/50 hover:border-sky-500/50 transition-colors cursor-pointer block">
-              <input type="file" accept=".csv" onChange={handleCsvFileChange} className="hidden" />
+            <label htmlFor="csvFileInput" className="border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-xl p-6 text-center bg-slate-50 dark:bg-slate-950/50 hover:border-sky-500/50 transition-colors cursor-pointer block">
+              <input id="csvFileInput" type="file" accept=".csv" onChange={handleCsvFileChange} className="hidden" />
               <Upload className="w-7 h-7 text-slate-400 dark:text-slate-500 mx-auto mb-2" />
               <p className="text-xs font-medium text-slate-800 dark:text-white">
                 {csvFile ? csvFile.name : 'Select or drop .csv rate sheet here'}
@@ -835,12 +796,12 @@ export default function RateCardsPage() {
               <button
                 type="button"
                 onClick={handleCommitCsv}
-                disabled={csvImporting || csvParsedRows.filter((r) => !r.error).length === 0}
+                disabled={csvImporting || csvParsedRows.filter((r) => !r.error && !r.conflict).length === 0}
                 className="px-4 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-medium transition-colors shadow-xs disabled:opacity-50 cursor-pointer"
               >
                 {csvImporting
                   ? 'Importing...'
-                  : `Commit ${csvParsedRows.filter((r) => !r.error).length} Valid Records`}
+                  : `Commit ${csvParsedRows.filter((r) => !r.error && !r.conflict).length} Valid Records`}
               </button>
             </div>
           </div>

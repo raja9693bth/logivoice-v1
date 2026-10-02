@@ -4,6 +4,7 @@
  * enforcing strict tenant isolation, typing, and idempotency.
  */
 
+import crypto from 'crypto';
 import { createAdminClient } from '@/lib/supabase/server';
 import {
   Customer,
@@ -25,7 +26,12 @@ import {
   FollowupStatus,
   FollowupChannel,
   FollowupRecord,
+  SideEffectClaim,
+  SideEffectStatus,
+  CustomerSuppression,
 } from '@/types/logivoice';
+import { normalizePhoneNumber } from '@/lib/utils';
+import { evaluateApprovedRate } from '@/lib/rules/rate-engine';
 import {
   domainCallToDbRow,
   dbCallToDomain,
@@ -162,7 +168,7 @@ class Store {
     {
       id: 'cust-104',
       tenant_id: DEFAULT_TENANT_ID,
-      phone: '+91 91234 56789',
+      phone: '+91 91234 00000',
       name: 'Amit Agarwal',
       company: 'Northern Traders',
       customer_type: 'SHIPPER',
@@ -687,6 +693,8 @@ class Store {
   };
 
   followups: FollowupRecord[] = [];
+  side_effect_claims: SideEffectClaim[] = [];
+  customer_suppressions: CustomerSuppression[] = [];
 }
 
 // Global persistent instance in Node runtime
@@ -870,14 +878,8 @@ export const db = {
   },
 
   async getCustomerByPhone(phone: string, tenantId: string = DEFAULT_TENANT_ID): Promise<Customer | null> {
+    const normalized = normalizePhoneNumber(phone);
     const rawClean = phone.replace(/[\s-]/g, '');
-    const normalized = rawClean.startsWith('+')
-      ? rawClean
-      : rawClean.length === 10
-      ? `+91${rawClean}`
-      : rawClean.length === 12 && rawClean.startsWith('91')
-      ? `+${rawClean}`
-      : rawClean;
 
     if (await isSupabaseLive()) {
       const client = createAdminClient();
@@ -885,23 +887,18 @@ export const db = {
         .from('customers')
         .select('*')
         .eq('tenant_id', tenantId)
-        .or(`phone.eq.${normalized},phone.eq.${rawClean},phone.eq.${phone}`)
+        .or(`phone_normalized.eq.${normalized},phone.eq.${normalized},phone.eq.${rawClean},phone.eq.${phone}`)
         .limit(1)
         .maybeSingle();
-      if (!error && data) return data as Customer;
+      if (!error && data) return dbCustomerToDomain(data);
     }
     assertProductionDbReady();
     return (
       globalStore.customers.find((c) => {
         if (c.tenant_id !== tenantId) return false;
+        if (c.phone_normalized && c.phone_normalized === normalized) return true;
+        const cNorm = normalizePhoneNumber(c.phone);
         const cClean = c.phone.replace(/[\s-]/g, '');
-        const cNorm = cClean.startsWith('+')
-          ? cClean
-          : cClean.length === 10
-          ? `+91${cClean}`
-          : cClean.length === 12 && cClean.startsWith('91')
-          ? `+${cClean}`
-          : cClean;
         return cNorm === normalized || cClean === rawClean || c.phone === phone;
       }) || null
     );
@@ -911,12 +908,14 @@ export const db = {
     customer: Omit<Customer, 'id' | 'created_at' | 'updated_at'>,
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<Customer> {
+    const normalizedPhone = normalizePhoneNumber(customer.phone);
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
     const newCustomer: Customer = {
       ...customer,
       id,
       tenant_id: tenantId,
+      phone_normalized: normalizedPhone,
       created_at: now,
       updated_at: now,
       last_seen_at: now,
@@ -927,8 +926,19 @@ export const db = {
       const dbRow = domainCustomerToDbRow(newCustomer);
       const { data, error } = await client.from('customers').insert([dbRow]).select().single();
       if (!error && data) return dbCustomerToDomain(data);
+      if (error && (error.code === '23505' || error.message.includes('unique'))) {
+        const existing = await this.getCustomerByPhone(customer.phone, tenantId);
+        if (existing) return existing;
+      }
+      throw new Error(`Failed to create customer: ${error?.message || 'Database insert failed'}`);
     }
     assertProductionDbReady();
+    const existing = globalStore.customers.find(
+      (c) => c.tenant_id === tenantId && (c.phone_normalized === normalizedPhone || normalizePhoneNumber(c.phone) === normalizedPhone)
+    );
+    if (existing) {
+      return existing;
+    }
     globalStore.customers.push(newCustomer);
     return newCustomer;
   },
@@ -1061,17 +1071,24 @@ export const db = {
           }
         }
         if (newCall.transcript && newCall.transcript.length > 0) {
-          const transcriptRows = newCall.transcript.map((t) => ({
-            id: crypto.randomUUID(),
-            call_id: id,
-            tenant_id: tenantId,
-            speaker: t.speaker,
-            text: t.text,
-            timestamp: t.timestamp,
-            language: t.language || null,
-            created_at: new Date().toISOString(),
-          }));
-          const { error: transcriptErr } = await client.from('transcript_segments').insert(transcriptRows);
+          const transcriptRows = newCall.transcript.map((t) => {
+            const hashId = crypto
+              .createHash('sha256')
+              .update(`${id}:${t.timestamp}:${t.speaker}:${t.text}`)
+              .digest('hex')
+              .substring(0, 36);
+            return {
+              id: hashId,
+              call_id: id,
+              tenant_id: tenantId,
+              speaker: t.speaker,
+              text: t.text,
+              timestamp: t.timestamp,
+              language: t.language || null,
+              created_at: new Date().toISOString(),
+            };
+          });
+          const { error: transcriptErr } = await client.from('transcript_segments').upsert(transcriptRows, { onConflict: 'id' });
           if (transcriptErr) {
             throw new Error(`Failed to persist transcript_segments for call ${id}: ${transcriptErr.message}`);
           }
@@ -1133,17 +1150,24 @@ export const db = {
           }
         }
         if (updates.transcript && updates.transcript.length > 0) {
-          const transcriptRows = updates.transcript.map((t) => ({
-            id: crypto.randomUUID(),
-            call_id: callId,
-            tenant_id: tenantId,
-            speaker: t.speaker,
-            text: t.text,
-            timestamp: t.timestamp,
-            language: t.language || null,
-            created_at: new Date().toISOString(),
-          }));
-          const { error: transcriptErr } = await client.from('transcript_segments').insert(transcriptRows);
+          const transcriptRows = updates.transcript.map((t) => {
+            const hashId = crypto
+              .createHash('sha256')
+              .update(`${callId}:${t.timestamp}:${t.speaker}:${t.text}`)
+              .digest('hex')
+              .substring(0, 36);
+            return {
+              id: hashId,
+              call_id: callId,
+              tenant_id: tenantId,
+              speaker: t.speaker,
+              text: t.text,
+              timestamp: t.timestamp,
+              language: t.language || null,
+              created_at: new Date().toISOString(),
+            };
+          });
+          const { error: transcriptErr } = await client.from('transcript_segments').upsert(transcriptRows, { onConflict: 'id' });
           if (transcriptErr) {
             throw new Error(`Failed to update transcript_segments for call ${callId}: ${transcriptErr.message}`);
           }
@@ -1489,8 +1513,17 @@ export const db = {
         const customer = Array.isArray(data.customer) ? data.customer[0] : data.customer;
         return dbRequestToDomain(data, customer);
       }
+      if (error && (error.code === '23505' || error.message.includes('unique')) && requestData.idempotency_key) {
+        const existing = await this.getRequestByIdempotencyKey(requestData.idempotency_key, tenantId);
+        if (existing) return existing;
+      }
+      throw new Error(`Failed to create request: ${error?.message || 'Database insert failed'}`);
     }
     assertProductionDbReady();
+    if (requestData.idempotency_key) {
+      const existing = await this.getRequestByIdempotencyKey(requestData.idempotency_key, tenantId);
+      if (existing) return existing;
+    }
     globalStore.operations_requests.unshift(newReq);
     return newReq;
   },
@@ -1607,6 +1640,21 @@ export const db = {
         throw new Error(`Database bulk insert failed: ${error.message}`);
       }
       if (data) {
+        await this.logAuditEvent(
+          {
+            tenant_id: tenantId,
+            event_type: 'BULK_RATE_IMPORT',
+            actor: 'SYSTEM:rate-engine',
+            actor_type: 'SYSTEM',
+            actor_id: 'rate-engine',
+            severity: 'INFO',
+            details: {
+              imported_count: data.length,
+              sample_lanes: cardsToInsert.slice(0, 3).map((c) => `${c.origin} -> ${c.destination}`),
+            },
+          },
+          tenantId
+        );
         return { inserted: data as RateCard[], count: data.length };
       }
     }
@@ -1615,6 +1663,21 @@ export const db = {
     for (const c of cardsToInsert) {
       globalStore.rate_cards.unshift(c);
     }
+    await this.logAuditEvent(
+      {
+        tenant_id: tenantId,
+        event_type: 'BULK_RATE_IMPORT',
+        actor: 'SYSTEM:rate-engine',
+        actor_type: 'SYSTEM',
+        actor_id: 'rate-engine',
+        severity: 'INFO',
+        details: {
+          imported_count: cardsToInsert.length,
+          sample_lanes: cardsToInsert.slice(0, 3).map((c) => `${c.origin} -> ${c.destination}`),
+        },
+      },
+      tenantId
+    );
     return { inserted: cardsToInsert, count: cardsToInsert.length };
   },
 
@@ -1622,91 +1685,15 @@ export const db = {
     params: { origin: string; destination: string; vehicleType?: string; weightTons?: number; date?: string; includeExpired?: boolean },
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<RateCard | null> {
-    const origin = params.origin.trim().toLowerCase();
-    const dest = params.destination.trim().toLowerCase();
-    const vehicle = params.vehicleType?.trim().toLowerCase();
-    const weight = params.weightTons;
-    const queryDateStr = params.date || new Date().toISOString().split('T')[0];
-
     const cards = await this.listRateCards(tenantId);
-    // Filter active cards
-    const activeCards = cards.filter((rc) => rc.status === 'ACTIVE');
-    const validCards = activeCards.filter((rc) => {
-      if (rc.effective_from && rc.effective_from > queryDateStr) return false;
-      if (rc.effective_to && rc.effective_to < queryDateStr) return false;
-      return true;
-    });
-
-    const matchesRoute = (rc: RateCard) =>
-      rc.origin.trim().toLowerCase() === origin &&
-      rc.destination.trim().toLowerCase() === dest;
-
-    const matchesVehicle = (rc: RateCard) => {
-      if (!vehicle) return true;
-      return rc.vehicle_type.trim().toLowerCase() === vehicle;
-    };
-
-    // Deterministic half-open interval for weight bounds [min, max)
-    // with boundary check: weight >= rc.weight_min_tons && weight < rc.weight_max_tons
-    // If at upper boundary, include only if no other active card starts at that weight
-    const matchesWeight = (rc: RateCard, cardPool: RateCard[]) => {
-      if (weight === undefined) return true;
-      if (weight < rc.weight_min_tons) return false;
-      if (weight < rc.weight_max_tons) return true;
-      if (weight === rc.weight_max_tons) {
-        const hasUpperStart = cardPool.some(
-          (other) =>
-            other.id !== rc.id &&
-            matchesRoute(other) &&
-            matchesVehicle(other) &&
-            other.weight_min_tons === rc.weight_max_tons
-        );
-        return !hasUpperStart;
-      }
-      return false;
-    };
-
-    // Deterministic precedence ordering: vehicle match -> weight match -> effective_from recency -> price
-    const candidateMatches = validCards.filter((rc) => matchesRoute(rc));
-    candidateMatches.sort((a, b) => {
-      const aVehicle = vehicle && a.vehicle_type.trim().toLowerCase() === vehicle ? 1 : 0;
-      const bVehicle = vehicle && b.vehicle_type.trim().toLowerCase() === vehicle ? 1 : 0;
-      if (aVehicle !== bVehicle) return bVehicle - aVehicle;
-
-      const aWeight = matchesWeight(a, validCards) ? 1 : 0;
-      const bWeight = matchesWeight(b, validCards) ? 1 : 0;
-      if (aWeight !== bWeight) return bWeight - aWeight;
-
-      const aDate = a.effective_from || '';
-      const bDate = b.effective_from || '';
-      if (aDate !== bDate) return bDate.localeCompare(aDate);
-
-      return a.price_inr - b.price_inr;
-    });
-
-    // 1. Exact match origin + destination + vehicleType + weight among currently valid cards
-    if (vehicle) {
-      const exactMatch = candidateMatches.find((rc) => matchesVehicle(rc) && matchesWeight(rc, validCards));
-      if (exactMatch) return exactMatch;
+    const outcome = evaluateApprovedRate(cards, params);
+    if (outcome.status === 'MATCH') {
+      return outcome.card;
     }
-
-    // 2. Route match within weight limits among currently valid cards (highest precedence first)
-    const routeMatch = candidateMatches.find((rc) => matchesWeight(rc, validCards));
-    if (routeMatch) return routeMatch;
-
-    // 3. If no valid card found and includeExpired is requested, check for an expired card on this corridor
-    // so get_rate_quote can return explicit EXPIRED status rather than reporting corridor unavailable.
-    if (!params.includeExpired) {
-      return null;
+    if (outcome.status === 'EXPIRED' && params.includeExpired) {
+      return outcome.card;
     }
-
-    const expiredCards = activeCards.filter((rc) => rc.effective_to && rc.effective_to < queryDateStr);
-    if (vehicle) {
-      const exactExpired = expiredCards.find((rc) => matchesRoute(rc) && matchesVehicle(rc) && matchesWeight(rc, expiredCards));
-      if (exactExpired) return exactExpired;
-    }
-    const routeExpired = expiredCards.find((rc) => matchesRoute(rc) && matchesWeight(rc, expiredCards));
-    return routeExpired || null;
+    return null;
   },
 
   async createRateCard(
@@ -2161,4 +2148,325 @@ export const db = {
       tool_success_rate_percent: toolSuccessRate,
     };
   },
+
+  // -----------------------------------------------------------------------
+  // SIDE EFFECT CLAIMS & IDEMPOTENCY
+  // -----------------------------------------------------------------------
+  async claimSideEffect(
+    tenantId: string = DEFAULT_TENANT_ID,
+    claimKey: string,
+    effectType: string,
+    callId?: string,
+    expiresMs: number = 300000
+  ): Promise<{ claimed: boolean; status: SideEffectStatus; claim?: SideEffectClaim }> {
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + expiresMs).toISOString();
+    const nowIso = now.toISOString();
+
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data: existing } = await client
+        .from('side_effect_claims')
+        .select('*')
+        .eq('tenant_id', tenantId)
+        .eq('claim_key', claimKey)
+        .maybeSingle();
+
+      if (existing) {
+        if (existing.status === 'COMPLETED' || existing.status === 'SUCCEEDED') {
+          return { claimed: false, status: existing.status, claim: existing as SideEffectClaim };
+        }
+        if (existing.status === 'PROCESSING' && existing.expires_at && existing.expires_at > nowIso) {
+          return { claimed: false, status: 'PROCESSING', claim: existing as SideEffectClaim };
+        }
+        const { data: updated, error: updateErr } = await client
+          .from('side_effect_claims')
+          .update({
+            status: 'PROCESSING',
+            claimed_at: nowIso,
+            expires_at: expiresAt,
+            attempt_count: (existing.attempt_count || 1) + 1,
+            updated_at: nowIso,
+          })
+          .eq('id', existing.id)
+          .eq('status', existing.status)
+          .select()
+          .single();
+
+        if (!updateErr && updated) {
+          return { claimed: true, status: 'PROCESSING', claim: updated as SideEffectClaim };
+        }
+        return { claimed: false, status: existing.status, claim: existing as SideEffectClaim };
+      }
+
+      const newClaim = {
+        id: crypto.randomUUID(),
+        tenant_id: tenantId,
+        claim_key: claimKey,
+        effect_type: effectType,
+        call_id: callId && !callId.startsWith('call-') ? callId : undefined,
+        status: 'PROCESSING' as SideEffectStatus,
+        attempt_count: 1,
+        claimed_at: nowIso,
+        expires_at: expiresAt,
+        created_at: nowIso,
+        updated_at: nowIso,
+      };
+
+      const { data: inserted, error: insertErr } = await client
+        .from('side_effect_claims')
+        .insert([newClaim])
+        .select()
+        .single();
+
+      if (!insertErr && inserted) {
+        return { claimed: true, status: 'PROCESSING', claim: inserted as SideEffectClaim };
+      }
+
+      const { data: recheck } = await client
+        .from('side_effect_claims')
+        .select('*')
+        .eq('tenant_id', tenantId)
+        .eq('claim_key', claimKey)
+        .maybeSingle();
+
+      return {
+        claimed: false,
+        status: recheck?.status || 'PROCESSING',
+        claim: recheck as SideEffectClaim,
+      };
+    }
+
+    assertProductionDbReady();
+    const existing = globalStore.side_effect_claims.find(
+      (c) => c.tenant_id === tenantId && c.claim_key === claimKey
+    );
+
+    if (existing) {
+      if (existing.status === 'COMPLETED' || existing.status === 'SUCCEEDED') {
+        return { claimed: false, status: existing.status, claim: existing };
+      }
+      if (existing.status === 'PROCESSING' && existing.expires_at && existing.expires_at > nowIso) {
+        return { claimed: false, status: 'PROCESSING', claim: existing };
+      }
+      existing.status = 'PROCESSING';
+      existing.claimed_at = nowIso;
+      existing.expires_at = expiresAt;
+      existing.attempt_count += 1;
+      existing.updated_at = nowIso;
+      return { claimed: true, status: 'PROCESSING', claim: existing };
+    }
+
+    const newClaim: SideEffectClaim = {
+      id: crypto.randomUUID(),
+      tenant_id: tenantId,
+      claim_key: claimKey,
+      effect_type: effectType,
+      call_id: callId,
+      status: 'PROCESSING',
+      attempt_count: 1,
+      claimed_at: nowIso,
+      expires_at: expiresAt,
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+    globalStore.side_effect_claims.unshift(newClaim);
+    return { claimed: true, status: 'PROCESSING', claim: newClaim };
+  },
+
+  async completeSideEffect(
+    tenantId: string = DEFAULT_TENANT_ID,
+    claimKey: string,
+    responsePayload?: Record<string, unknown>
+  ): Promise<void> {
+    const nowIso = new Date().toISOString();
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      await client
+        .from('side_effect_claims')
+        .update({
+          status: 'COMPLETED',
+          completed_at: nowIso,
+          response_payload: responsePayload || {},
+          updated_at: nowIso,
+        })
+        .eq('tenant_id', tenantId)
+        .eq('claim_key', claimKey);
+      return;
+    }
+    assertProductionDbReady();
+    const claim = globalStore.side_effect_claims.find(
+      (c) => c.tenant_id === tenantId && c.claim_key === claimKey
+    );
+    if (claim) {
+      claim.status = 'COMPLETED';
+      claim.completed_at = nowIso;
+      claim.response_payload = responsePayload;
+      claim.updated_at = nowIso;
+    }
+  },
+
+  async failSideEffect(
+    tenantId: string = DEFAULT_TENANT_ID,
+    claimKey: string,
+    errorMessage: string,
+    isRetryable: boolean = false
+  ): Promise<void> {
+    const nowIso = new Date().toISOString();
+    const status: SideEffectStatus = isRetryable ? 'FAILED' : 'REJECTED';
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      await client
+        .from('side_effect_claims')
+        .update({
+          status,
+          last_error: errorMessage,
+          updated_at: nowIso,
+        })
+        .eq('tenant_id', tenantId)
+        .eq('claim_key', claimKey);
+      return;
+    }
+    assertProductionDbReady();
+    const claim = globalStore.side_effect_claims.find(
+      (c) => c.tenant_id === tenantId && c.claim_key === claimKey
+    );
+    if (claim) {
+      claim.status = status;
+      claim.last_error = errorMessage;
+      claim.updated_at = nowIso;
+    }
+  },
+
+  async getSideEffectClaim(
+    tenantId: string = DEFAULT_TENANT_ID,
+    claimKey: string
+  ): Promise<SideEffectClaim | null> {
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data } = await client
+        .from('side_effect_claims')
+        .select('*')
+        .eq('tenant_id', tenantId)
+        .eq('claim_key', claimKey)
+        .maybeSingle();
+      return (data as SideEffectClaim) || null;
+    }
+    assertProductionDbReady();
+    return (
+      globalStore.side_effect_claims.find(
+        (c) => c.tenant_id === tenantId && c.claim_key === claimKey
+      ) || null
+    );
+  },
+
+  // -----------------------------------------------------------------------
+  // CUSTOMER SUPPRESSIONS & CONSENT
+  // -----------------------------------------------------------------------
+  async isPhoneSuppressed(
+    tenantId: string = DEFAULT_TENANT_ID,
+    phone: string,
+    channel: string = 'WHATSAPP'
+  ): Promise<boolean> {
+    const normalized = normalizePhoneNumber(phone);
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client
+        .from('customer_suppressions')
+        .select('opt_out')
+        .eq('tenant_id', tenantId)
+        .eq('phone_normalized', normalized)
+        .eq('channel', channel)
+        .maybeSingle();
+      if (!error && data) {
+        return Boolean(data.opt_out);
+      }
+    }
+    assertProductionDbReady();
+    const record = globalStore.customer_suppressions.find(
+      (s) =>
+        s.tenant_id === tenantId &&
+        s.phone_normalized === normalized &&
+        s.channel === channel
+    );
+    return record ? Boolean(record.opt_out) : false;
+  },
+
+  async setCustomerSuppression(
+    tenantId: string = DEFAULT_TENANT_ID,
+    phone: string,
+    channel: string,
+    optOut: boolean,
+    reason?: string,
+    source?: string
+  ): Promise<CustomerSuppression> {
+    const normalized = normalizePhoneNumber(phone);
+    const nowIso = new Date().toISOString();
+    const id = crypto.randomUUID();
+
+    const record: CustomerSuppression = {
+      id,
+      tenant_id: tenantId,
+      phone_normalized: normalized,
+      channel,
+      opt_out: optOut,
+      reason,
+      source: source || 'SYSTEM',
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client
+        .from('customer_suppressions')
+        .upsert(
+          [
+            {
+              tenant_id: tenantId,
+              phone_normalized: normalized,
+              channel,
+              opt_out: optOut,
+              reason: reason || null,
+              source: source || 'SYSTEM',
+              updated_at: nowIso,
+            },
+          ],
+          { onConflict: 'tenant_id,phone_normalized,channel' }
+        )
+        .select()
+        .single();
+      if (!error && data) return data as CustomerSuppression;
+    }
+
+    assertProductionDbReady();
+    const idx = globalStore.customer_suppressions.findIndex(
+      (s) =>
+        s.tenant_id === tenantId &&
+        s.phone_normalized === normalized &&
+        s.channel === channel
+    );
+    if (idx >= 0) {
+      globalStore.customer_suppressions[idx] = {
+        ...globalStore.customer_suppressions[idx],
+        opt_out: optOut,
+        reason,
+        source: source || 'SYSTEM',
+        updated_at: nowIso,
+      };
+      return globalStore.customer_suppressions[idx];
+    }
+    globalStore.customer_suppressions.unshift(record);
+    return record;
+  },
 };
+
+/**
+ * Resets database state and test idempotency stores.
+ */
+export function resetDb(): void {
+  globalStore.side_effect_claims = [];
+  globalStore.customer_suppressions = [];
+  globalStore.followups = [];
+}
+

@@ -84,11 +84,12 @@ export default function DashboardPage() {
       setRequests(fetchedRequests);
       setLeads(fetchedLeads);
 
-      // Compute authoritative KPIs dynamically from live data
-      const todayDateStr = new Date().toISOString().slice(0, 10);
-      const callsTodayCount = fetchedCalls.filter(
-        (c) => (c.started_at || '').slice(0, 10) === todayDateStr
-      ).length;
+      // Compute authoritative KPIs dynamically from live data (Asia/Kolkata timezone)
+      const todayDateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+      const callsTodayCount = fetchedCalls.filter((c) => {
+        if (!c.started_at) return false;
+        return new Date(c.started_at).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) === todayDateStr;
+      }).length;
 
       const missed = fetchedCalls.filter((c) => c.outcome === 'MISSED' || c.outcome === 'FAILED').length;
       const escalated = fetchedCalls.filter(
@@ -138,7 +139,7 @@ export default function DashboardPage() {
   };
 
   useEffect(() => {
-    fetchDashboardData();
+    void fetchDashboardData();
   }, []);
 
   const urgentRequests = requests.filter((r) => r.priority === 'URGENT' || r.priority === 'HIGH');

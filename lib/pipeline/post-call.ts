@@ -1,25 +1,25 @@
 /**
- * LOGIVOICE V1 — POST-CALL PROCESSING PIPELINE
- * Authoritative pipeline executed after an inbound call terminates.
+ * LOGIVOICE V1 — AUTHORITATIVE POST-CALL PROCESSING PIPELINE
  *
  * Sequence:
- * 1. Ingest call payload & transcript
+ * 1. Ingest call payload & transcript with durable database claim
  * 2. Classify intent & extract structured operational facts
  * 3. Calculate deterministic lead temperature
- * 4. Persist to Supabase / authoritative DB
- * 5. Sync to Google Sheets operational view (idempotent)
- * 6. Evaluate follow-up eligibility & suppression rules
- * 7. Dispatch follow-up via WhatsApp/SMS adapter
+ * 4. Persist call, facts, and transcript segments (deterministic deduplication)
+ * 5. Sync to Google Sheets operational view (idempotent claim-before-append)
+ * 6. Evaluate follow-up eligibility & durable suppression
+ * 7. Dispatch controlled follow-up template via WhatsApp provider
  * 8. Log comprehensive audit trail event
  */
 
 import { db, DEFAULT_TENANT_ID } from '@/lib/db';
 import { getTenantConfig } from '@/lib/config/tenant';
-import { Call, CallIntent, CallFacts, TranscriptTurn, CallOutcome, Lead } from '@/types/logivoice';
+import { Call, CallIntent, CallFacts, TranscriptTurn, CallOutcome, Lead, FollowupStatus } from '@/types/logivoice';
 import { computeLeadTemperature } from '@/lib/rules/lead-temperature';
 import { syncCallToGoogleSheets } from '@/lib/integrations/google-sheets';
-import { sendFollowupMessage } from '@/lib/integrations/messaging';
+import { sendControlledFollowup, FollowupTemplateId } from '@/lib/integrations/messaging';
 import { createCorrelationContext, logTrace, logError } from '@/lib/observability/correlation';
+import { normalizePhoneNumber } from '@/lib/utils';
 
 export interface PostCallPayload {
   external_call_id: string;
@@ -53,152 +53,150 @@ export interface PostCallResult {
   message: string;
 }
 
-// In-memory set of processed call IDs to ensure idempotency across webhook retries
-const processedCallIds = new Set<string>();
-const inFlightPipelines = new Map<string, Promise<PostCallResult>>();
-
-export function resetPostCallPipelineIdempotency(): void {
-  processedCallIds.clear();
-  inFlightPipelines.clear();
-}
-
 export async function processPostCallPipeline(
   payload: PostCallPayload
 ): Promise<PostCallResult> {
   const tenantId = payload.tenant_id || DEFAULT_TENANT_ID;
-  const flightKey = `${tenantId}:${payload.external_call_id}`;
-
-  const existingFlight = inFlightPipelines.get(flightKey);
-  if (existingFlight) {
-    return existingFlight;
-  }
-
-  const execution = executePostCallPipeline(payload, tenantId);
-  inFlightPipelines.set(flightKey, execution);
-  try {
-    const result = await execution;
-    return result;
-  } finally {
-    inFlightPipelines.delete(flightKey);
-  }
-}
-
-async function executePostCallPipeline(
-  payload: PostCallPayload,
-  tenantId: string
-): Promise<PostCallResult> {
   const correlation = createCorrelationContext(tenantId, undefined, 'POST_CALL_PIPELINE');
   logTrace(correlation, 'POST_CALL_STARTED', { external_call_id: payload.external_call_id });
 
-  // 1. Idempotency Check: Prevent duplicate pipeline execution (Durable DB + In-Memory)
-  // Only terminal follow-up states (SENT, DELIVERED, SUPPRESSED, OPTED_OUT, SKIPPED_NOT_ELIGIBLE) block retry
-  const TERMINAL_FOLLOWUP_STATUSES = ['SENT', 'DELIVERED', 'SUPPRESSED', 'OPTED_OUT', 'SKIPPED_NOT_ELIGIBLE'];
-  const existing = await db.getCallByExternalId(payload.external_call_id, tenantId);
-  const isTerminal = existing?.followup_state && TERMINAL_FOLLOWUP_STATUSES.includes(existing.followup_state.status);
+  // 1. Durable DB Claim-Before-Processing (PostgreSQL Outbox/Job Engine)
+  const pipelineClaimKey = `pipeline:${tenantId}:${payload.external_call_id}`;
+  const claimResult = await db.claimSideEffect(tenantId, pipelineClaimKey, 'POST_CALL_PIPELINE');
 
-  if (existing && (processedCallIds.has(payload.external_call_id) || (existing.outcome !== 'IN_PROGRESS' && isTerminal))) {
-    logTrace(correlation, 'POST_CALL_IDEMPOTENT_SKIP', { external_call_id: payload.external_call_id });
+  if (!claimResult.claimed) {
+    logTrace(correlation, 'POST_CALL_IDEMPOTENT_SKIP', {
+      external_call_id: payload.external_call_id,
+      status: claimResult.status,
+    });
+
+    let existingCall = await db.getCallByExternalId(payload.external_call_id, tenantId);
+    if (!existingCall) {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise((res) => setTimeout(res, 25));
+        existingCall = await db.getCallByExternalId(payload.external_call_id, tenantId);
+        if (existingCall) break;
+      }
+    }
+
     return {
       success: true,
-      call_id: existing.id,
+      call_id: existingCall?.id || 'idempotent-replay',
       external_call_id: payload.external_call_id,
-      lead_temperature: existing.lead_temperature,
+      lead_temperature: existingCall?.lead_temperature || 'COLD',
       sheets_status: 'SKIPPED_DUPLICATE',
-      followup_status: existing.followup_state?.status || 'ALREADY_PROCESSED',
-      message: 'Idempotent replay: Call outcome already processed.',
+      followup_status: existingCall?.followup_state?.status || 'SKIPPED',
+      message: `Idempotent replay: Call ${payload.external_call_id} already finalized.`,
     };
   }
 
   try {
-    // 2. Resolve Customer Identity
-    let customer = payload.from_number
-      ? await db.getCustomerByPhone(payload.from_number, tenantId)
+    const rawNumber = payload.from_number || '';
+    const normalizedPhone = rawNumber ? normalizePhoneNumber(rawNumber) : undefined;
+
+    // 2. Identify or Create Customer with Phone Normalization
+    let customer = normalizedPhone
+      ? await db.getCustomerByPhone(normalizedPhone, tenantId)
       : null;
 
-    if (!customer && payload.from_number) {
+    if (!customer && normalizedPhone) {
       customer = await db.createCustomer(
         {
           tenant_id: tenantId,
-          phone: payload.from_number,
-          name: payload.caller_name || 'Inbound Shipper',
+          phone: normalizedPhone,
+          phone_normalized: normalizedPhone,
+          name: payload.caller_name || 'Inbound Caller',
+          customer_type: 'SHIPPER',
         },
         tenantId
       );
     }
 
-    // 3. Normalize Intent and Facts
+    // 3. Normalized Intent and Sentiment
     const primaryIntent: CallIntent = payload.intent || 'GENERAL';
     const sentiment = payload.sentiment || 'NEUTRAL';
-    const outcome: CallOutcome = payload.outcome || 'COMPLETED';
+    const outcome = payload.outcome || 'COMPLETED';
 
-    // 4. Calculate Deterministic Lead Temperature
+    // 4. Calculate Authoritative Lead Temperature
     const leadTemperature = computeLeadTemperature({
       intent: primaryIntent,
-      facts: payload.facts,
       sentiment,
-      isEscalated: payload.is_escalated,
-      hasBookingRequest: Boolean(payload.facts?.booking_reference),
+      isEscalated: Boolean(payload.is_escalated),
+      facts: payload.facts,
     });
 
-    // 5. Persist Call Record
-    let call: Call;
+    // 5. Parse and Normalize Transcript
+    let transcriptTurns: TranscriptTurn[] = [];
+    if (Array.isArray(payload.transcript)) {
+      transcriptTurns = payload.transcript;
+    } else if (typeof payload.transcript === 'string') {
+      try {
+        const parsed = JSON.parse(payload.transcript);
+        if (Array.isArray(parsed)) transcriptTurns = parsed;
+      } catch {
+        transcriptTurns = [{ speaker: 'caller', text: payload.transcript, timestamp: '00:00' }];
+      }
+    }
+
+    // 6. Authoritative Database Upsert (Call, Facts, Transcript)
     const existingCall = await db.getCallByExternalId(payload.external_call_id, tenantId);
+    let call: Call;
 
     if (existingCall) {
       const updated = await db.updateCall(
         existingCall.id,
         {
+          customer_id: customer ? customer.id : existingCall.customer_id,
           ended_at: payload.ended_at || new Date().toISOString(),
-          duration_seconds: payload.duration_seconds !== undefined ? payload.duration_seconds : existingCall.duration_seconds,
+          duration_seconds: payload.duration_seconds ?? existingCall.duration_seconds,
           primary_intent: primaryIntent,
           sentiment,
           outcome,
           lead_temperature: leadTemperature,
           summary: payload.summary || existingCall.summary,
-          recording_url: payload.recording_url || existingCall.recording_url,
-          facts: payload.facts ? { call_id: existingCall.id, ...payload.facts } : existingCall.facts,
+          facts: payload.facts ? { ...existingCall.facts, ...payload.facts } : existingCall.facts,
+          transcript: transcriptTurns.length > 0 ? transcriptTurns : existingCall.transcript,
           escalation_status: {
             is_escalated: Boolean(payload.is_escalated),
-            reason: payload.escalation_reason,
-            target_role: payload.target_role,
+            reason: payload.escalation_reason || existingCall.escalation_status?.reason,
+            target_role: payload.target_role || existingCall.escalation_status?.target_role,
           },
+          recording_url: payload.recording_url || existingCall.recording_url,
         },
         tenantId
       );
-      call = updated!;
+      call = updated || existingCall;
     } else {
       call = await db.createCall(
         {
           external_call_id: payload.external_call_id,
           tenant_id: tenantId,
           customer_id: customer ? customer.id : undefined,
-          started_at: payload.started_at || new Date(Date.now() - (payload.duration_seconds || 0) * 1000).toISOString(),
+          started_at: payload.started_at || new Date().toISOString(),
           ended_at: payload.ended_at || new Date().toISOString(),
-          duration_seconds: payload.duration_seconds ?? 0,
+          duration_seconds: payload.duration_seconds || 0,
           primary_intent: primaryIntent,
           sentiment,
           outcome,
           lead_temperature: leadTemperature,
-          summary: payload.summary || 'Inbound logistics operations call completed.',
-          recording_url: payload.recording_url,
-          facts: {
-            call_id: '',
-            ...payload.facts,
-          },
+          summary: payload.summary || 'Inbound logistics operations call.',
+          facts: payload.facts ? { call_id: '', ...payload.facts } : { call_id: '' },
+          transcript: transcriptTurns,
           escalation_status: {
             is_escalated: Boolean(payload.is_escalated),
             reason: payload.escalation_reason,
             target_role: payload.target_role,
           },
+          recording_url: payload.recording_url,
           agent_version: 'v1.0.0',
         },
         tenantId
       );
     }
 
-    // 6. Create or Update Commercial Lead Record if Hot or Warm (Durable DB uniqueness)
+    // 7. Lead Creation / Nurturing Record
     let lead: Lead | null = null;
-    const contactPhone = customer ? customer.phone : payload.from_number;
+    const contactPhone = customer?.phone || normalizedPhone;
     if ((leadTemperature === 'HOT' || leadTemperature === 'WARM') && contactPhone) {
       const existingLead = await db.getLeadByCallId(call.id, tenantId);
       if (existingLead) {
@@ -237,172 +235,117 @@ async function executePostCallPipeline(
       }
     }
 
-    // 7. Google Sheets Synchronization (Idempotent)
+    // 8. Google Sheets Synchronization (Durable Claim-Before-Append)
     const sheetsResult = await syncCallToGoogleSheets(call, lead);
     logTrace(correlation, 'SHEETS_SYNC_COMPLETED', { sheetsResult });
 
-    // 8. Follow-up Message Eligibility, Suppression & Durable DB Persistence
-    let followupStatus = 'SKIPPED_NOT_ELIGIBLE';
+    // 9. Controlled Follow-up Message Dispatch
+    let followupStatus: FollowupStatus = 'SKIPPED_NOT_ELIGIBLE';
 
-    // Durable check: has follow-up already been dispatched for this call?
-    const existingFollowup = await db.getFollowupByCallId(call.id, tenantId);
-    if (existingFollowup) {
-      followupStatus = existingFollowup.status;
-      logTrace(correlation, 'FOLLOWUP_ALREADY_EXISTS', { call_id: call.id, status: followupStatus });
-    } else {
-      const isEligibleForFollowup =
-        Boolean(customer?.phone) &&
-        !payload.is_escalated &&
-        sentiment !== 'ANGRY' &&
-        (leadTemperature === 'HOT' || leadTemperature === 'WARM' || Boolean(payload.facts?.quoted_amount));
-
-      if (isEligibleForFollowup && customer?.phone) {
-        const tenantConfig = await getTenantConfig(tenantId);
-        const brand = tenantConfig.brand_name || tenantConfig.business_name || 'LogiVoice';
-        const bookingNotice = tenantConfig.booking_url
-          ? ` Booking confirmation link: ${tenantConfig.booking_url}`
-          : ' Booking confirmation ke liye is number par reply karein.';
-
-        let messageSnippet = '';
-        if (payload.facts?.quoted_amount) {
-          messageSnippet = `Namaste! Aaj aapne ${payload.facts.route_from || 'route'} se ${payload.facts.route_to || 'destination'} ke liye freight rate poocha tha. Quoted amount: ₹${payload.facts.quoted_amount.toLocaleString('en-IN')}.${bookingNotice}`;
-        } else if (payload.facts?.tracking_id) {
-          messageSnippet = `Namaste! Aapke consignment ${payload.facts.tracking_id} ka status update WhatsApp par share kar diya gaya hai. Sahayata ke liye ${brand} se judey rahein.`;
-        } else {
-          messageSnippet = `Namaste! ${brand} se call karne ke liye dhanyawad. Aapke requirement ka context dispatch team ko assign ho gaya hai.`;
-        }
-
-        const msgResult = await sendFollowupMessage({
-          channel: 'WHATSAPP',
-          recipient: customer.phone,
-          messageContent: messageSnippet,
-        });
-
-        const mappedStatus =
-          msgResult.status === 'SENT'
-            ? 'SENT'
-            : msgResult.status === 'MOCK'
-            ? 'MOCK'
-            : msgResult.status === 'UNCONFIGURED'
-            ? 'UNCONFIGURED'
-            : msgResult.status === 'OPTED_OUT'
-            ? 'SUPPRESSED'
-            : 'FAILED';
-
-        followupStatus = mappedStatus;
-
-        // Persist or update follow-up in authoritative followups table
-        const existingFollowup = await db.getFollowupByCallId(call.id, tenantId);
-        if (existingFollowup) {
-          await db.updateFollowup(
-            existingFollowup.id,
-            {
-              status: mappedStatus,
-              recipient: customer.phone,
-              message_content: messageSnippet,
-              provider_message_id: msgResult.providerMessageId,
-              suppression_reason: msgResult.error,
-              sent_at: mappedStatus === 'SENT' ? new Date().toISOString() : undefined,
-            },
-            tenantId
-          );
-        } else {
-          await db.createFollowup(
-            {
-              tenant_id: tenantId,
-              call_id: call.id,
-              customer_id: customer?.id,
-              channel: 'WHATSAPP',
-              status: mappedStatus,
-              recipient: customer.phone,
-              message_content: messageSnippet,
-              provider_message_id: msgResult.providerMessageId,
-              suppression_reason: msgResult.error,
-              sent_at: mappedStatus === 'SENT' ? new Date().toISOString() : undefined,
-            },
-            tenantId
-          );
-        }
-
-        await db.updateCall(
-          call.id,
-          {
-            followup_state: {
-              eligible: true,
-              channel: 'WHATSAPP',
-              status: mappedStatus,
-              message_snippet: messageSnippet.slice(0, 100),
-              sent_at: mappedStatus === 'SENT' ? new Date().toISOString() : undefined,
-              suppression_reason: msgResult.error,
-            },
+    if (payload.is_escalated || sentiment === 'ANGRY') {
+      followupStatus = 'SUPPRESSED';
+      await db.updateCall(
+        call.id,
+        {
+          followup_state: {
+            eligible: false,
+            status: 'SUPPRESSED',
+            suppression_reason: payload.is_escalated
+              ? 'Call escalated to human dispatcher'
+              : 'Caller sentiment indicates frustration/complaint',
           },
-          tenantId
-        );
-      } else {
-        followupStatus = 'SUPPRESSED';
-        const suppressionReason = payload.is_escalated
-          ? 'Call escalated to live human'
-          : !customer?.phone
-          ? 'Caller phone number missing'
-          : 'Lead temperature / intent not eligible for automated messaging';
+        },
+        tenantId
+      );
+    }
 
-        // Persist or update suppression state in followups table without synthetic recipient
-        const existingFollowup = await db.getFollowupByCallId(call.id, tenantId);
-        if (existingFollowup) {
-          await db.updateFollowup(
-            existingFollowup.id,
-            {
-              status: 'SUPPRESSED',
-              recipient: customer?.phone || '',
-              message_content: '',
-              suppression_reason: suppressionReason,
-            },
-            tenantId
-          );
-        } else {
-          await db.createFollowup(
-            {
-              tenant_id: tenantId,
-              call_id: call.id,
-              customer_id: customer?.id,
-              channel: 'WHATSAPP',
-              status: 'SUPPRESSED',
-              recipient: customer?.phone || '',
-              message_content: '',
-              suppression_reason: suppressionReason,
-            },
-            tenantId
-          );
-        }
+    const isEligibleForFollowup =
+      followupStatus !== 'SUPPRESSED' &&
+      Boolean(contactPhone) &&
+      (leadTemperature === 'HOT' || leadTemperature === 'WARM' || Boolean(payload.facts?.quoted_amount));
 
-        await db.updateCall(
-          call.id,
-          {
-            followup_state: {
-              eligible: false,
-              status: 'SUPPRESSED',
-              suppression_reason: suppressionReason,
-            },
-          },
-          tenantId
-        );
+    if (isEligibleForFollowup && contactPhone) {
+      const tenantConfig = await getTenantConfig(tenantId);
+      const brand = tenantConfig.brand_name || tenantConfig.business_name || 'LogiVoice';
+
+      let templateId: FollowupTemplateId = 'INQUIRY_RECEIVED';
+      if (payload.facts?.quoted_amount) {
+        templateId = payload.facts.quote_type === 'CONFIRMED' ? 'QUOTE_CONFIRMED' : 'QUOTE_ESTIMATE';
+      } else if (payload.facts?.tracking_id) {
+        templateId = 'TRACKING_STATUS';
       }
+
+      const msgResult = await sendControlledFollowup({
+        tenantId,
+        callId: call.id,
+        recipientPhone: contactPhone,
+        templateId,
+        templateData: {
+          customerName: customer?.name || payload.caller_name,
+          brand,
+          origin: payload.facts?.route_from,
+          destination: payload.facts?.route_to,
+          vehicleType: payload.facts?.vehicle_type,
+          quotedAmount: payload.facts?.quoted_amount,
+          trackingId: payload.facts?.tracking_id,
+          bookingUrl: tenantConfig.booking_url,
+        },
+      });
+
+      followupStatus = (msgResult.status === 'SKIPPED' ? 'SUPPRESSED' : msgResult.status) as FollowupStatus;
+
+      // Update call record with authoritative follow-up state
+      await db.updateCall(
+        call.id,
+        {
+          followup_state: {
+            eligible: true,
+            channel: 'WHATSAPP',
+            status: followupStatus,
+            message_snippet: msgResult.renderedText.slice(0, 100),
+            sent_at: msgResult.success ? new Date().toISOString() : undefined,
+          },
+        },
+        tenantId
+      );
+
+      // Persist follow-up record in DB
+      await db.createFollowup(
+        {
+          tenant_id: tenantId,
+          call_id: call.id,
+          customer_id: customer?.id,
+          channel: 'WHATSAPP',
+          status: followupStatus as any,
+          recipient: contactPhone,
+          template_id: templateId,
+          message_content: msgResult.renderedText,
+          provider_message_id: msgResult.providerMessageId,
+          sent_at: msgResult.success ? new Date().toISOString() : undefined,
+        },
+        tenantId
+      );
     }
 
-    // 9. Mark call as processed in idempotency set if reached terminal outcome or terminal followup
-    if (TERMINAL_FOLLOWUP_STATUSES.includes(followupStatus)) {
-      processedCallIds.add(payload.external_call_id);
-    }
+    // 10. Complete durable pipeline claim
+    await db.completeSideEffect(tenantId, pipelineClaimKey, {
+      call_id: call.id,
+      lead_id: lead?.id,
+      lead_temperature: leadTemperature,
+      sheets_status: sheetsResult.status,
+      followup_status: followupStatus,
+    });
 
-    // 10. Persist Pipeline Audit Log
+    // 11. Audit Event Logging
     await db.logAuditEvent(
       {
         tenant_id: tenantId,
         call_id: call.id,
-        event_type: 'POST_CALL_PIPELINE_SUCCESS',
+        event_type: 'POST_CALL_PIPELINE_COMPLETED',
         actor: 'SYSTEM',
         actor_type: 'SYSTEM',
-        actor_id: 'post-call-worker',
+        actor_id: 'post-call-pipeline',
+        tool_name: 'post_call_pipeline',
         severity: 'INFO',
         details: {
           external_call_id: payload.external_call_id,
@@ -414,15 +357,6 @@ async function executePostCallPipeline(
       tenantId
     );
 
-    logTrace(correlation, 'POST_CALL_COMPLETED', {
-      call_id: call.id,
-      lead_temperature: leadTemperature,
-      sheets_status: sheetsResult.status,
-      followup_status: followupStatus,
-    });
-
-    processedCallIds.add(payload.external_call_id);
-
     return {
       success: true,
       call_id: call.id,
@@ -431,18 +365,18 @@ async function executePostCallPipeline(
       lead_temperature: leadTemperature,
       sheets_status: sheetsResult.status,
       followup_status: followupStatus,
-      message: 'Post-call pipeline executed cleanly.',
+      message: `Call ${payload.external_call_id} processed authoritatively. Temperature: ${leadTemperature}, Sheets: ${sheetsResult.status}, Follow-up: ${followupStatus}.`,
     };
   } catch (error) {
-    logError(correlation, 'POST_CALL_PIPELINE_FAILURE', error);
-    return {
-      success: false,
-      call_id: '',
-      external_call_id: payload.external_call_id,
-      lead_temperature: 'REVIEW',
-      sheets_status: 'FAILED',
-      followup_status: 'FAILED',
-      message: error instanceof Error ? error.message : 'Post-call processing failed',
-    };
+    logError(correlation, 'POST_CALL_PIPELINE_ERROR', error);
+    await db.failSideEffect(tenantId, pipelineClaimKey, error instanceof Error ? error.message : 'Unknown pipeline error', true);
+    throw error;
   }
+}
+
+/**
+ * Resets durable idempotency locks for testing suites.
+ */
+export function resetPostCallPipelineIdempotency(): void {
+  // Handled via database reset in test environment
 }

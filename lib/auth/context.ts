@@ -51,6 +51,12 @@ export async function verifyRetellWebhookSignature(rawBody: string, signature: s
     }
 
     // 2. Direct HMAC-SHA256 hex verification (legacy & custom signature format)
+    // Strictly gated behind RETELL_ALLOW_LEGACY_SIGNATURE=true (prohibited by default in production)
+    const allowLegacy = process.env.RETELL_ALLOW_LEGACY_SIGNATURE === 'true';
+    if (!allowLegacy) {
+      return false;
+    }
+
     const expected = crypto.createHmac('sha256', apiKey).update(rawBody).digest('hex');
     const sigBuffer = Buffer.from(signature);
     const expBuffer = Buffer.from(expected);

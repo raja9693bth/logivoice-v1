@@ -1,9 +1,9 @@
 # LogiVoice V1 — Comprehensive Test & Verification Report
 
 > **Execution Date**: October 2026  
-> **Environment**: Windows / Node.js 22 LTS  
-> **Test Framework**: Native TypeScript Test Suite & Scenario Verification  
-> **Overall Result**: **195 PASSED, 0 FAILED (100% SUCCESS)**
+> **Environment**: Windows / Node.js 20 LTS  
+> **Test Framework**: Native Node.js Test Suite & Scenario Verification  
+> **Overall Result**: **196 PASSED, 0 FAILED (100% SUCCESS)**
 
 ---
 
@@ -11,9 +11,9 @@
 
 | Test Group | Total Scenarios | Passed | Failed | Status |
 | :--- | :---: | :---: | :---: | :---: |
-| **Backend Integration & Unit Suite** (`backend.test.ts`) | 163 | 163 | 0 | **PASS** |
+| **Backend Integration & Unit Suite** (`backend.test.ts`) | 164 | 164 | 0 | **PASS** |
 | **Voice QA & Operational Scenarios Suite** (`voice-qa-scenarios.test.ts`) | 32 | 32 | 0 | **PASS** |
-| **Total Automated Tests** | **195** | **195** | **0** | **PASS** |
+| **Total Automated Tests** | **196** | **196** | **0** | **PASS** |
 
 ---
 
@@ -34,7 +34,7 @@
 | **11** | Confirmed Booking Intake | Creates `BKG-` reference with status `REQUEST_CREATED` | **PASS** |
 | **12** | Unconfirmed Booking Intake | Routes to `PENDING_HUMAN_CONFIRMATION` for dispatcher review | **PASS** |
 | **13** | Caller Requests Live Human | Initiates transfer or creates urgent callback request | **PASS** |
-| **14** | Confirmed Telephony Transfer | When telephony credentials present, returns `TRANSFERRED` | **PASS** |
+| **14** | Confirmed Telephony Transfer | When telephony provider confirms invocation and returns transfer SID, returns `TRANSFERRED` | **PASS** |
 | **15** | Unconfigured Telephony Fallback | When telephony unconfigured, creates durable callback `CB-` ticket | **PASS** |
 | **16** | General Inquiry Business Hours | Agent prompt embeds operating schedule and brand guidelines | **PASS** |
 | **17** | Unsupported Freight / Hazmat Policy | Returns `UNAVAILABLE` for non-tariff vehicle/cargo types | **PASS** |
@@ -62,5 +62,5 @@
 | :--- | :--- | :---: |
 | **Static Code Linter** | `npm run lint` | **PASS (0 errors, 0 warnings)** |
 | **TypeScript Compilation** | `npm run typecheck` | **PASS (0 errors)** |
-| **Automated Unit & QA Tests** | `npm test` | **PASS (195 / 195 passed)** |
+| **Automated Unit & QA Tests** | `npm test` | **PASS (196 / 196 passed)** |
 | **Production Application Build** | `npm run build` | **PASS (All 24 routes compiled)** |

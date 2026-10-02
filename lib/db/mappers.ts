@@ -25,6 +25,7 @@ import {
   FollowupStatus,
   AuditSeverity,
 } from '@/types/logivoice';
+import { normalizePhoneNumber } from '@/lib/utils';
 
 // =========================================================================
 // 1. DATABASE ROW INTERFACES (Normalized SQL Schema Contract)
@@ -34,6 +35,7 @@ export interface CustomersDbRow {
   id: string;
   tenant_id: string;
   phone: string;
+  phone_normalized: string;
   name: string;
   company: string | null;
   customer_type: 'BROKER' | 'SHIPPER' | 'CONSIGNEE' | 'FLEET_OPERATOR' | null;
@@ -155,7 +157,7 @@ export interface AuditEventsDbRow {
   tenant_id: string;
   call_id: string | null;
   event_type: string;
-  actor_type: 'AI_AGENT' | 'DISPATCHER' | 'SYSTEM' | 'WEBHOOK';
+  actor_type: 'AI_AGENT' | 'DISPATCHER' | 'ADMIN' | 'OPS_MANAGER' | 'SYSTEM' | 'WEBHOOK';
   actor_id: string;
   tool_name: string | null;
   severity: AuditSeverity;
@@ -466,10 +468,13 @@ export function domainCustomerToDbRow(
   customer: Partial<Customer> & { id: string; tenant_id: string; phone: string; name: string }
 ): CustomersDbRow {
   const now = new Date().toISOString();
+  const phoneNormalized = customer.phone_normalized || normalizePhoneNumber(customer.phone);
+
   return {
     id: customer.id,
     tenant_id: customer.tenant_id,
     phone: customer.phone,
+    phone_normalized: phoneNormalized,
     name: customer.name,
     company: customer.company || null,
     customer_type: customer.customer_type || null,
@@ -534,6 +539,7 @@ export function dbCustomerToDomain(row: CustomersDbRow): Customer {
     id: row.id,
     tenant_id: row.tenant_id,
     phone: row.phone,
+    phone_normalized: row.phone_normalized || undefined,
     name: row.name,
     company: row.company || undefined,
     customer_type: row.customer_type || undefined,

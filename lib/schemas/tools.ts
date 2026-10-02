@@ -62,10 +62,11 @@ export type GetRateQuoteOutput = z.infer<typeof GetRateQuoteOutputSchema>;
 // =========================================================================
 export const GetTrackingStatusInputSchema = z.object({
   tracking_reference: z.string().min(3, 'Tracking/LR reference is required').describe('LR number, Consignment number, or Docket ID'),
+  caller_phone: z.string().optional().describe('Caller phone number for ownership verification'),
 });
 
 export const GetTrackingStatusOutputSchema = z.object({
-  status: z.enum(['FOUND', 'NOT_FOUND', 'PROVIDER_UNAVAILABLE', 'FAILED']),
+  status: z.enum(['FOUND', 'NOT_FOUND', 'PROVIDER_UNAVAILABLE', 'UNAUTHORIZED_ACCESS', 'FAILED']),
   tracking_reference: z.string(),
   current_status: z.string().optional(),
   current_location: z.string().optional(),

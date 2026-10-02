@@ -39,7 +39,17 @@ export type RequestType = 'BOOKING_REQUEST' | 'SUPPORT_TICKET' | 'CALLBACK_REQUE
 
 export type FollowupChannel = 'WHATSAPP' | 'SMS' | 'EMAIL';
 
-export type FollowupStatus = 'PENDING' | 'SENT' | 'DELIVERED' | 'FAILED' | 'SUPPRESSED' | 'UNCONFIGURED' | 'MOCK' | 'COMPLETED' | 'SKIPPED_NOT_ELIGIBLE';
+export type FollowupStatus =
+  | 'PENDING'
+  | 'SENT'
+  | 'DELIVERED'
+  | 'FAILED'
+  | 'SUPPRESSED'
+  | 'UNCONFIGURED'
+  | 'MOCK'
+  | 'COMPLETED'
+  | 'SKIPPED'
+  | 'SKIPPED_NOT_ELIGIBLE';
 
 export type AuditSeverity = 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
 
@@ -47,6 +57,7 @@ export interface Customer {
   id: string;
   tenant_id: string;
   phone: string;
+  phone_normalized?: string;
   name: string;
   company?: string;
   customer_type?: 'BROKER' | 'SHIPPER' | 'CONSIGNEE' | 'FLEET_OPERATOR';
@@ -54,6 +65,51 @@ export interface Customer {
   updated_at: string;
   last_seen_at?: string;
 }
+
+export type SideEffectStatus =
+  | 'PENDING'
+  | 'PROCESSING'
+  | 'COMPLETED'
+  | 'SUCCEEDED'
+  | 'FAILED'
+  | 'REJECTED'
+  | 'RETRYABLE'
+  | 'UNKNOWN';
+
+export interface SideEffectClaim {
+  id: string;
+  tenant_id: string;
+  claim_key: string;
+  job_type?: string;
+  effect_type?: string;
+  call_id?: string;
+  status: SideEffectStatus;
+  attempt_count: number;
+  payload?: Record<string, unknown>;
+  response_payload?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  error?: string;
+  last_error?: string;
+  claimed_at: string;
+  claimed_by?: string;
+  expires_at?: string;
+  completed_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CustomerSuppression {
+  id: string;
+  tenant_id: string;
+  phone_normalized: string;
+  channel: string;
+  opt_out: boolean;
+  reason?: string;
+  source: string;
+  created_at: string;
+  updated_at: string;
+}
+
 
 export interface CallFacts {
   call_id: string;
@@ -236,7 +292,7 @@ export interface AuditEvent {
   call_id?: string;
   event_type: string;
   actor: string;
-  actor_type?: 'AI_AGENT' | 'DISPATCHER' | 'SYSTEM' | 'WEBHOOK';
+  actor_type?: 'AI_AGENT' | 'DISPATCHER' | 'ADMIN' | 'OPS_MANAGER' | 'SYSTEM' | 'WEBHOOK';
   actor_id?: string;
   severity: AuditSeverity;
   tool_name?: string;

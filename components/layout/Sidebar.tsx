@@ -186,7 +186,18 @@ export function Sidebar() {
 
       {/* Mobile Drawer Sidebar */}
       {isMobileOpen && (
-        <div className="fixed inset-0 z-50 md:hidden flex">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Navigation sidebar"
+          className="fixed inset-0 z-50 md:hidden flex"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              closeMobile();
+            }
+          }}
+        >
           <div
             className="fixed inset-0 bg-black/50 backdrop-blur-xs transition-opacity"
             onClick={closeMobile}

@@ -121,7 +121,7 @@ export default function SettingsPage() {
   };
 
   useEffect(() => {
-    loadSettings();
+    void loadSettings();
   }, []);
 
   const handleSave = async (e: React.FormEvent) => {
@@ -246,7 +246,7 @@ export default function SettingsPage() {
         {saveSuccess && (
           <div className="px-3 py-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/80 border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 text-xs font-medium flex items-center gap-1.5 animate-in fade-in">
             <CheckCircle2 className="w-3.5 h-3.5" />
-            <span>Settings Saved &amp; Verified</span>
+            <span>Settings Saved</span>
           </div>
         )}
         {saveError && (

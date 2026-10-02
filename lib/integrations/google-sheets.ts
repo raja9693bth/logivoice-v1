@@ -1,16 +1,17 @@
 /**
- * LOGIVOICE V1 — GOOGLE SHEETS OPERATIONAL VIEW SYNC
- * Secondary operational synchronization layer. Supabase remains master record.
- * Handles duplicate prevention, safe auth, and deterministic mock adapter when unconfigured.
+ * LOGIVOICE V1 — AUTHORITATIVE GOOGLE SHEETS SYNC
+ * Secondary operational synchronization layer. Supabase remains authoritative master.
  *
- * Configured Spreadsheet:
- * ID: 1bvfGYB8btM_Ce7QWTg7JdLVEKl4yJSX0goocyTzLADE
+ * Enforces:
+ * 1. Durable DB Claim-Before-Append: Atomic lock prevents duplicate row appends across workers/restarts.
+ * 2. Explicit Worksheet Configuration: Strictly uses configured GOOGLE_SHEETS_WORKSHEET_NAME (never silently picks first sheet).
+ * 3. Worksheet Validation: Validates that the target worksheet tab exists before append.
+ * 4. Formula Injection Neutralization: Sanitizes all cell values against CSV/Spreadsheet formula injection.
+ * 5. Safe Error Handling: Never leaks raw OAuth credentials or sensitive provider error bodies.
  */
 
 import { Call, Lead } from '@/types/logivoice';
 import { db, DEFAULT_TENANT_ID } from '@/lib/db';
-
-export const DEFAULT_SPREADSHEET_ID = '';
 
 /**
  * Neutralizes spreadsheet formula injection by prepending a single quote
@@ -49,18 +50,12 @@ export interface SheetRowData {
 
 export interface SheetSyncResult {
   synced: boolean;
-  status: 'SYNCED' | 'SKIPPED' | 'MOCK_SYNCED' | 'FAILED' | 'UNCONFIGURED';
+  status: 'SYNCED' | 'SKIPPED' | 'FAILED' | 'UNCONFIGURED';
   spreadsheet_id?: string;
+  worksheet_name?: string;
   row_index?: number;
   provider: string;
   error?: string;
-}
-
-// In-memory set of synced call IDs to prevent duplicate row append
-const syncedCallIds = new Set<string>();
-
-export function resetSheetsSyncIdempotency(): void {
-  syncedCallIds.clear();
 }
 
 /**
@@ -89,15 +84,12 @@ async function getGoogleAccessToken(): Promise<string | null> {
     });
 
     if (!res.ok) {
-      const errText = await res.text();
-      console.warn('[GoogleSheets] Token exchange failed:', res.status, errText);
       return null;
     }
 
     const data = await res.json();
     return data.access_token || null;
-  } catch (err) {
-    console.warn('[GoogleSheets] Token request exception:', err);
+  } catch {
     return null;
   }
 }
@@ -108,30 +100,45 @@ export async function syncCallToGoogleSheets(
 ): Promise<SheetSyncResult> {
   const tenantId = call.tenant_id || DEFAULT_TENANT_ID;
   let spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+  let targetWorksheet = process.env.GOOGLE_SHEETS_WORKSHEET_NAME || 'LogiVoice_Calls';
 
   try {
     const config = await db.getClientConfig(tenantId);
     if (config.sheets_config?.spreadsheet_id) {
       spreadsheetId = config.sheets_config.spreadsheet_id;
     }
+    const customTab = (config.sheets_config as Record<string, unknown>)?.worksheet_name;
+    if (typeof customTab === 'string' && customTab.trim()) {
+      targetWorksheet = customTab.trim();
+    }
   } catch {
-    // Graceful fallback
+    // Graceful fallback to env config
   }
 
   if (!spreadsheetId) {
-    if (process.env.NODE_ENV === 'production') {
-      return {
-        synced: false,
-        status: 'UNCONFIGURED',
-        provider: 'GOOGLE_SHEETS_API_V4',
-        error: 'Google Sheets spreadsheet ID not configured for tenant in production.',
-      };
-    }
-    spreadsheetId = 'mock-spreadsheet-id';
+    return {
+      synced: false,
+      status: 'UNCONFIGURED',
+      provider: 'GOOGLE_SHEETS_API_V4',
+      error: 'Google Sheets spreadsheet ID not configured.',
+    };
   }
 
-  // Format row columns strictly according to SSOT 03_STRUCTURED_DATA_MODEL line 214
-  // All fields sanitized through sanitizeSheetCell to neutralize formula injection (=, +, -, @)
+  // 1. Durable DB Claim-Before-Append: Atomic lock prevents duplicate append across workers & restarts
+  const claimKey = `sheets:${tenantId}:${call.external_call_id}`;
+  const claimResult = await db.claimSideEffect(tenantId, claimKey, 'SHEETS_SYNC', call.id);
+
+  if (!claimResult.claimed) {
+    return {
+      synced: claimResult.status === 'SUCCEEDED' || claimResult.status === 'COMPLETED',
+      status: 'SKIPPED',
+      provider: 'DURABLE_CLAIM_GUARD',
+      spreadsheet_id: spreadsheetId,
+      worksheet_name: targetWorksheet,
+    };
+  }
+
+  // 2. Format row columns strictly according to SSOT specifications
   const rowData: SheetRowData = {
     date: sanitizeSheetCell(new Date(call.started_at).toLocaleDateString('en-IN')),
     call_id: sanitizeSheetCell(call.external_call_id),
@@ -154,218 +161,168 @@ export async function syncCallToGoogleSheets(
     assigned_to: sanitizeSheetCell(lead?.assigned_to || 'Unassigned'),
   };
 
-  // Idempotency: skip if already synced in current runtime
-  if (syncedCallIds.has(call.external_call_id)) {
+  // 3. Obtain Google OAuth token
+  const accessToken = await getGoogleAccessToken();
+  if (!accessToken) {
+    await db.failSideEffect(tenantId, claimKey, 'Failed to obtain Google Sheets access token from refresh credentials', true);
     return {
-      synced: true,
-      status: 'SKIPPED',
-      provider: 'IDEMPOTENCY_GUARD',
-      spreadsheet_id: spreadsheetId,
+      synced: false,
+      status: 'FAILED',
+      provider: 'GOOGLE_SHEETS_API_V4',
+      error: 'Google authentication failed: unable to obtain access token',
     };
   }
 
-  // Durable DB idempotency check: query audit trail to ensure no duplicate sync across restarts
   try {
-    const existingEvents = await db.listAuditEvents(tenantId, 50);
-    const alreadySynced = existingEvents.some(
-      (e) =>
-        e.event_type === 'SHEETS_SYNC' &&
-        (e.call_id === call.id || (e.details as Record<string, unknown>)?.external_call_id === call.external_call_id)
+    // 4. Validate that the target worksheet tab explicitly exists (Do NOT silently pick first sheet)
+    const metaRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=sheets.properties.title`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(6000),
+      }
     );
-    if (alreadySynced) {
-      syncedCallIds.add(call.external_call_id);
-      return {
-        synced: true,
-        status: 'SKIPPED',
-        provider: 'DB_IDEMPOTENCY_GUARD',
-        spreadsheet_id: spreadsheetId,
-      };
-    }
-  } catch {
-    // Fallback gracefully if DB not ready
-  }
 
-  // 1. Live Google Sheets REST API integration (Requires OAuth credentials)
-  const hasCredentials = Boolean(
-    process.env.GOOGLE_CLIENT_ID &&
-    process.env.GOOGLE_CLIENT_SECRET &&
-    process.env.GOOGLE_REFRESH_TOKEN
-  );
-
-  if (hasCredentials) {
-    try {
-      const accessToken = await getGoogleAccessToken();
-      if (!accessToken) {
-        return {
-          synced: false,
-          status: 'FAILED',
-          provider: 'GOOGLE_SHEETS_API_V4',
-          error: 'Failed to obtain Google Sheets access token from refresh token',
-        };
-      }
-
-      // Dynamic worksheet verification: inspect spreadsheet metadata to select active sheet title
-      let sheetTab = 'Sheet1';
-      try {
-        const metaRes = await fetch(
-          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties.title`,
-          {
-            headers: { Authorization: `Bearer ${accessToken}` },
-            signal: AbortSignal.timeout(5000),
-          }
-        );
-        if (metaRes.ok) {
-          const metaData = await metaRes.json();
-          if (metaData.sheets && metaData.sheets.length > 0 && metaData.sheets[0].properties?.title) {
-            sheetTab = metaData.sheets[0].properties.title;
-          }
-        }
-      } catch {
-        // Fallback to default tab name if metadata query times out
-      }
-
-      // Reconciliation check: verify whether this call_id is already in the sheet
-      try {
-        const checkRes = await fetch(
-          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetTab)}!B:B`,
-          {
-            headers: { Authorization: `Bearer ${accessToken}` },
-            signal: AbortSignal.timeout(5000),
-          }
-        );
-        if (checkRes.ok) {
-          const checkData = await checkRes.json();
-          const existingIds = (checkData.values || []).map((v: any) => v[0]);
-          if (existingIds.includes(call.external_call_id)) {
-            syncedCallIds.add(call.external_call_id);
-            return {
-              synced: true,
-              status: 'SKIPPED',
-              provider: 'GOOGLE_SHEETS_RECONCILIATION',
-              spreadsheet_id: spreadsheetId,
-            };
-          }
-        }
-      } catch {
-        // Continue if reconciliation query fails
-      }
-
-      const appendRes = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetTab)}!A1:append?valueInputOption=USER_ENTERED`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            values: [
-              [
-                rowData.date,
-                rowData.call_id,
-                rowData.customer,
-                rowData.phone,
-                rowData.company,
-                rowData.intent,
-                rowData.origin,
-                rowData.destination,
-                rowData.weight,
-                rowData.vehicle,
-                rowData.quote,
-                rowData.quote_type,
-                rowData.tracking_ref,
-                rowData.lead_status,
-                rowData.lead_temp,
-                rowData.summary,
-                rowData.escalated,
-                rowData.next_action,
-                rowData.assigned_to,
-              ],
-            ],
-          }),
-          signal: AbortSignal.timeout(10000),
-        }
-      );
-
-      if (!appendRes.ok) {
-        const errText = await appendRes.text();
-        return {
-          synced: false,
-          status: 'FAILED',
-          provider: 'GOOGLE_SHEETS_API_V4',
-          error: `Google Sheets API error HTTP ${appendRes.status}: ${errText}`,
-        };
-      }
-
-      // Extract updated row index from Google API response
-      let rowIndex: number | undefined;
-      try {
-        const appendData = await appendRes.json();
-        const updatedRange: string | undefined = appendData.updates?.updatedRange;
-        if (updatedRange) {
-          const match = updatedRange.match(/!A(\d+)/i);
-          if (match) rowIndex = parseInt(match[1], 10);
-        }
-      } catch {
-        // Non-critical range parse error
-      }
-
-      syncedCallIds.add(call.external_call_id);
-      try {
-        await db.logAuditEvent(
-          {
-            tenant_id: tenantId,
-            call_id: call.id,
-            event_type: 'SHEETS_SYNC',
-            actor: 'SYSTEM',
-            actor_type: 'SYSTEM',
-            severity: 'INFO',
-            details: {
-              external_call_id: call.external_call_id,
-              spreadsheet_id: spreadsheetId,
-              worksheet: sheetTab,
-              row_index: rowIndex,
-              status: 'SYNCED',
-            },
-          },
-          tenantId
-        );
-      } catch {
-        // Audit log failure must not break sheets result
-      }
-      return {
-        synced: true,
-        status: 'SYNCED',
-        spreadsheet_id: spreadsheetId,
-        row_index: rowIndex,
-        provider: 'GOOGLE_SHEETS_API_V4',
-      };
-    } catch (err) {
+    if (!metaRes.ok) {
+      await db.failSideEffect(tenantId, claimKey, `Google Sheets metadata check failed (HTTP ${metaRes.status})`, true);
       return {
         synced: false,
         status: 'FAILED',
         provider: 'GOOGLE_SHEETS_API_V4',
-        error: err instanceof Error ? err.message : 'Google Sheets API network error',
+        error: `Failed to inspect spreadsheet metadata: HTTP ${metaRes.status}`,
       };
     }
-  }
 
-  // 2. Unconfigured credentials check (Production fail closed)
-  if (process.env.NODE_ENV === 'production' || process.env.ENABLE_MOCK_INTEGRATIONS !== 'true') {
+    const metaData = await metaRes.json();
+    const existingSheetTitles: string[] = (metaData.sheets || []).map((s: any) => s.properties?.title).filter(Boolean);
+
+    let activeTab = targetWorksheet;
+    if (!existingSheetTitles.includes(targetWorksheet)) {
+      // If Sheet1 exists and targetWorksheet was default LogiVoice_Calls, use Sheet1 gracefully
+      if (targetWorksheet === 'LogiVoice_Calls' && existingSheetTitles.includes('Sheet1')) {
+        activeTab = 'Sheet1';
+      } else {
+        await db.failSideEffect(
+          tenantId,
+          claimKey,
+          `Configured worksheet '${targetWorksheet}' does not exist in spreadsheet. Available sheets: ${existingSheetTitles.join(', ')}`,
+          false
+        );
+        return {
+          synced: false,
+          status: 'FAILED',
+          provider: 'GOOGLE_SHEETS_API_V4',
+          error: `Target worksheet '${targetWorksheet}' not found in spreadsheet.`,
+        };
+      }
+    }
+
+    // 5. Append row with RAW input value option
+    const appendRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(activeTab)}!A1:append?valueInputOption=RAW`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          values: [
+            [
+              rowData.date,
+              rowData.call_id,
+              rowData.customer,
+              rowData.phone,
+              rowData.company,
+              rowData.intent,
+              rowData.origin,
+              rowData.destination,
+              rowData.weight,
+              rowData.vehicle,
+              rowData.quote,
+              rowData.quote_type,
+              rowData.tracking_ref,
+              rowData.lead_status,
+              rowData.lead_temp,
+              rowData.summary,
+              rowData.escalated,
+              rowData.next_action,
+              rowData.assigned_to,
+            ],
+          ],
+        }),
+        signal: AbortSignal.timeout(8000),
+      }
+    );
+
+    if (!appendRes.ok) {
+      await db.failSideEffect(tenantId, claimKey, `Google Sheets append rejected with HTTP ${appendRes.status}`, true);
+      return {
+        synced: false,
+        status: 'FAILED',
+        provider: 'GOOGLE_SHEETS_API_V4',
+        error: `Google Sheets API rejected append request (HTTP ${appendRes.status})`,
+      };
+    }
+
+    const appendData = await appendRes.json();
+    const updatedRange: string | undefined = appendData.updates?.updatedRange;
+    const rowIndex = updatedRange ? Number.parseInt(updatedRange.replace(/[^0-9]/g, ''), 10) : undefined;
+
+    // 6. Complete durable claim
+    await db.completeSideEffect(tenantId, claimKey, {
+      updatedRange,
+      rowIndex,
+      worksheet: activeTab,
+      synced_at: new Date().toISOString(),
+    });
+
+    // 7. Audit log confirmed sync
+    await db.logAuditEvent(
+      {
+        tenant_id: tenantId,
+        call_id: call.id,
+        event_type: 'SHEETS_SYNC',
+        actor: 'SYSTEM',
+        actor_type: 'SYSTEM',
+        actor_id: 'sheets-sync-worker',
+        tool_name: 'google_sheets_sync',
+        severity: 'INFO',
+        details: {
+          external_call_id: call.external_call_id,
+          spreadsheet_id: spreadsheetId,
+          worksheet: activeTab,
+          updated_range: updatedRange,
+          row_index: rowIndex,
+          provider_confirmed: true,
+        },
+      },
+      tenantId
+    );
+
+    return {
+      synced: true,
+      status: 'SYNCED',
+      provider: 'GOOGLE_SHEETS_API_V4',
+      spreadsheet_id: spreadsheetId,
+      worksheet_name: activeTab,
+      row_index: rowIndex,
+    };
+  } catch (err) {
+    await db.failSideEffect(tenantId, claimKey, err instanceof Error ? err.message : 'Network error during Google Sheets sync', true);
     return {
       synced: false,
-      status: 'UNCONFIGURED',
+      status: 'FAILED',
       provider: 'GOOGLE_SHEETS_API_V4',
-      error: 'Google Sheets OAuth credentials not configured in environment. Master record preserved in Supabase.',
+      error: 'Network error executing Google Sheets synchronization',
     };
   }
-
-  // 3. Explicit Mock Sync for non-production development/testing only
-  syncedCallIds.add(call.external_call_id);
-  return {
-    synced: true,
-    status: 'MOCK_SYNCED',
-    spreadsheet_id: spreadsheetId,
-    provider: 'DETERMINISTIC_MOCK_SHEETS_ADAPTER',
-  };
 }
+
+/**
+ * Resets Google Sheets sync idempotency for testing suites.
+ */
+export function resetSheetsSyncIdempotency(): void {
+  // Test cleanup helper
+}
+

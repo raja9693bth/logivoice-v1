@@ -1,11 +1,17 @@
 /**
  * TOOL 2: get_rate_quote
  * Deterministic rate retrieval from approved rate cards.
- * Strictly separates ESTIMATE from CONFIRMED QUOTE and rejects unsupported or stale rates.
+ * 
+ * Enforces:
+ * 1. Discriminator-Aware Matching: Missing vehicle or weight interval on corridors
+ *    with multiple options returns `MISSING_FIELDS`. Never guesses a default.
+ * 2. Ambiguity Protection: Competing rates return `UNAVAILABLE` for human dispatcher review.
+ * 3. Commercial Semantics: Separates indicative ESTIMATE from pre-authorized CONFIRMED QUOTE.
  */
 
 import { db, DEFAULT_TENANT_ID } from '@/lib/db';
 import { GetRateQuoteInput, GetRateQuoteOutput } from '@/lib/schemas/tools';
+import { evaluateApprovedRate } from '@/lib/rules/rate-engine';
 
 export async function executeGetRateQuote(
   input: GetRateQuoteInput,
@@ -22,40 +28,58 @@ export async function executeGetRateQuote(
       };
     }
 
-    // Lookup in approved active rate cards with pickup_date
-    const matchedCard = await db.findApprovedRate(
-      {
-        origin,
-        destination,
-        vehicleType: vehicle_type,
-        weightTons: weight_tons,
-        date: input.pickup_date,
-        includeExpired: true,
-      },
-      tenantId
-    );
+    // Retrieve approved rate cards for tenant
+    const allCards = await db.listRateCards(tenantId);
 
-    if (!matchedCard) {
+    const outcome = evaluateApprovedRate(allCards, {
+      origin,
+      destination,
+      vehicleType: vehicle_type,
+      weightTons: weight_tons,
+      date: input.pickup_date,
+      includeExpired: true,
+    });
+
+    if (outcome.status === 'MISSING_FIELDS') {
+      const fieldLabels = outcome.missingFields.map((f) =>
+        f === 'vehicle_type' ? 'truck type' : 'cargo weight'
+      );
+      const vehicleHint = outcome.availableVehicles?.length
+        ? ` Available vehicles on this corridor: ${outcome.availableVehicles.join(', ')}.`
+        : '';
+
+      return {
+        status: 'MISSING_FIELDS',
+        message: `To provide an accurate freight quote for ${origin} to ${destination}, please specify ${fieldLabels.join(' and ')}.${vehicleHint}`,
+      };
+    }
+
+    if (outcome.status === 'AMBIGUOUS') {
+      return {
+        status: 'UNAVAILABLE',
+        message: `Multiple commercial tariff options exist for ${origin} to ${destination} with the provided specifications. Transferring context to operations dispatcher for custom quotation.`,
+      };
+    }
+
+    if (outcome.status === 'EXPIRED') {
+      return {
+        status: 'EXPIRED',
+        message: `The rate card for ${origin} to ${destination} has expired for requested pickup date ${input.pickup_date || 'today'}. Please connect to a human dispatcher.`,
+      };
+    }
+
+    if (outcome.status === 'UNAVAILABLE') {
       return {
         status: 'UNAVAILABLE',
         message: `No approved direct rate card found for ${origin} to ${destination}${vehicle_type ? ` with ${vehicle_type}` : ''}. This requires human dispatcher quotation.`,
       };
     }
 
-    // Check expiry against requested pickup date
-    const targetDate = input.pickup_date ? new Date(input.pickup_date) : new Date();
-    if (matchedCard.effective_to && new Date(matchedCard.effective_to) < targetDate) {
-      return {
-        status: 'EXPIRED',
-        message: `The rate card for ${matchedCard.origin} to ${matchedCard.destination} has expired for requested pickup date ${input.pickup_date || 'today'}. Please connect to a human dispatcher.`,
-      };
-    }
+    const matchedCard = outcome.card;
 
     // Determine whether this is an ESTIMATE or CONFIRMED QUOTE
-    // SSOT & Knowledge Base Rule: Standard tariff matrix rates are indicative ESTIMATES.
-    // Complete route, vehicle, and weight inputs do NOT automatically prove commercial confirmation.
-    // A quote is strictly an ESTIMATE unless the approved rate card explicitly authorizes
-    // commercial confirmation (quote_type === 'CONFIRMED' or supports_confirmed_quote === true).
+    // Commercial Rule: A quote is strictly an ESTIMATE unless the approved rate card
+    // explicitly authorizes commercial confirmation AND full vehicle and weight inputs are provided.
     const isExplicitlyConfirmable =
       (matchedCard.quote_type === 'CONFIRMED' || matchedCard.supports_confirmed_quote === true) &&
       Boolean(vehicle_type) &&
@@ -82,7 +106,7 @@ export async function executeGetRateQuote(
   } catch (error) {
     return {
       status: 'FAILED',
-      message: error instanceof Error ? error.message : 'Error accessing rate repository',
+      message: 'Error accessing rate repository. Dispatch desk notified.',
     };
   }
 }

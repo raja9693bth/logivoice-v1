@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthContext, requireRole, AuthorizationError } from '@/lib/auth/context';
+import { getAuthContext, requireRole } from '@/lib/auth/context';
 import { db } from '@/lib/db';
 import { CallIntent, CallOutcome } from '@/types/logivoice';
 import { CreateCallApiSchema, ListCallsQuerySchema } from '@/lib/schemas/api';
+import { handleApiError } from '@/lib/api/error-handler';
 
 export async function GET(req: NextRequest) {
   try {
@@ -38,13 +39,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ calls });
   } catch (error) {
-    if (error instanceof AuthorizationError) {
-      return NextResponse.json({ error: error.message }, { status: error.statusCode });
-    }
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Internal Server Error' },
-      { status: 500 }
-    );
+    return handleApiError(error, 'api/calls:GET');
   }
 }
 
@@ -91,12 +86,6 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ call: newCall }, { status: 201 });
   } catch (error) {
-    if (error instanceof AuthorizationError) {
-      return NextResponse.json({ error: error.message }, { status: error.statusCode });
-    }
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Internal Server Error' },
-      { status: 500 }
-    );
+    return handleApiError(error, 'api/calls:POST');
   }
 }

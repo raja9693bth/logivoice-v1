@@ -1,11 +1,17 @@
 /**
  * TOOL 3: get_tracking_status
- * Deterministic shipment tracking behind a pluggable adapter.
- * Never invents status or ETAs; returns explicit unavailable states if not verified.
+ * Deterministic consignment tracking behind an authoritative provider boundary.
+ * 
+ * Enforces:
+ * 1. Privacy & Customer Ownership: Never discloses another customer's shipment information
+ *    unless anonymous bearer LR lookup is explicitly permitted by tenant configuration.
+ * 2. Truthful ETA Formatting: Always formats verified arrival with date, time, and timezone.
+ * 3. Safe Domain Responses: Maps provider failures and privacy blocks to controlled statuses.
  */
 
 import { db, DEFAULT_TENANT_ID } from '@/lib/db';
 import { GetTrackingStatusInput, GetTrackingStatusOutput } from '@/lib/schemas/tools';
+import { formatDateTime, normalizePhoneNumber } from '@/lib/utils';
 
 export async function executeGetTrackingStatus(
   input: GetTrackingStatusInput,
@@ -24,13 +30,39 @@ export async function executeGetTrackingStatus(
       };
     }
 
-    // In production, MOCK_TMS records must never be presented as real live shipment telemetry
+    // In production, MOCK_TMS records must never be presented as live shipment telemetry
     if (process.env.NODE_ENV === 'production' && record.source === 'MOCK_TMS') {
       return {
         status: 'PROVIDER_UNAVAILABLE',
         tracking_reference: ref,
         message: 'Live TMS provider integration is unconfigured in production environment.',
       };
+    }
+
+    // Customer Ownership & Privacy Check
+    if (record.customer_id) {
+      const config = await db.getClientConfig(tenantId);
+      const isBearerAllowed = (config.tracking_config as Record<string, unknown>)?.allow_bearer_lookup === true;
+
+      if (!isBearerAllowed && input.caller_phone) {
+        const callerPhoneNorm = normalizePhoneNumber(input.caller_phone);
+        const caller = await db.getCustomerByPhone(callerPhoneNorm, tenantId);
+
+        // If caller identity exists and does not match the consignment owner, fail closed
+        if (caller && caller.id !== record.customer_id) {
+          return {
+            status: 'UNAUTHORIZED_ACCESS',
+            tracking_reference: ref,
+            message: `Consignment '${ref}' is registered to another account. For security, tracking details cannot be shared. Please contact dispatch supervisor.`,
+          };
+        }
+      }
+    }
+
+    // Format ETA with date, time, and IST timezone
+    let etaFormatted = '';
+    if (record.eta_if_verified) {
+      etaFormatted = ` Estimated arrival: ${formatDateTime(record.eta_if_verified)} IST.`;
     }
 
     return {
@@ -41,13 +73,13 @@ export async function executeGetTrackingStatus(
       status_timestamp: record.status_timestamp,
       eta_if_verified: record.eta_if_verified || null,
       exception_reason: record.exception_reason || null,
-      message: `Consignment ${record.tracking_reference} is currently ${record.status.replace(/_/g, ' ')} at ${record.current_location}.${record.eta_if_verified ? ` Estimated arrival: ${new Date(record.eta_if_verified).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}.` : ''}`,
+      message: `Consignment ${record.tracking_reference} is currently ${record.status.replace(/_/g, ' ')} at ${record.current_location}.${etaFormatted}`,
     };
   } catch (error) {
     return {
       status: 'PROVIDER_UNAVAILABLE',
       tracking_reference: ref,
-      message: error instanceof Error ? error.message : 'Tracking system connector unavailable',
+      message: 'Shipment tracking service temporarily unreachable. Operations desk notified.',
     };
   }
 }

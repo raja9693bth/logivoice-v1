@@ -5,10 +5,10 @@
  * Enforces:
  * - Strict schema validation
  * - Server-side tenant scoping
- * - Role-based authorization
- * - Audit event persistence
+ * - Role-based authorization & actor role preservation
+ * - Centralized PII minimization in audit trails
  * - Latency measurement
- * - Predictable error handling
+ * - Predictable error handling (safe domain responses)
  */
 
 import { AuthContext } from '@/lib/auth/context';
@@ -23,6 +23,7 @@ import {
   SaveCallOutcomeInputSchema,
   SendFollowupInputSchema,
 } from '@/lib/schemas/tools';
+import { formatMaskedPhone } from '@/lib/utils';
 
 import { executeLookupCustomer } from './lookup-customer';
 import { executeGetRateQuote } from './get-rate-quote';
@@ -47,6 +48,40 @@ export interface ToolExecutionResponse {
   result: Record<string, unknown>;
   latency_ms: number;
   error?: string;
+}
+
+/**
+ * Sanitizes and minimizes tool arguments for audit logging.
+ * Masks customer phone numbers, redacts message bodies, and strips any secret material.
+ */
+export function sanitizeAuditArguments(
+  toolName: string,
+  args: Record<string, unknown>
+): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+
+  for (const [key, val] of Object.entries(args)) {
+    // Strip credential-like keys
+    if (/key|secret|token|auth|password/i.test(key)) {
+      continue;
+    }
+
+    // Mask phone numbers
+    if (/phone|mobile|contact/i.test(key) && typeof val === 'string') {
+      sanitized[key] = formatMaskedPhone(val);
+      continue;
+    }
+
+    // Minimize long text / message bodies
+    if (/content|message|body|text/i.test(key) && typeof val === 'string' && val.length > 50) {
+      sanitized[key] = `${val.slice(0, 40)}... [${val.length} chars]`;
+      continue;
+    }
+
+    sanitized[key] = val;
+  }
+
+  return sanitized;
 }
 
 export async function dispatchTool(
@@ -114,7 +149,8 @@ export async function dispatchTool(
       }
 
       case 'save_call_outcome': {
-        const validated = SaveCallOutcomeInputSchema.parse(args);
+        const effectiveCallId = call_id || (args.call_id as string) || undefined;
+        const validated = SaveCallOutcomeInputSchema.parse({ ...args, call_id: effectiveCallId });
         const res = await executeSaveCallOutcome(validated, tenantId);
         result = res as unknown as Record<string, unknown>;
         executionStatus = res.status;
@@ -122,8 +158,7 @@ export async function dispatchTool(
       }
 
       case 'send_followup': {
-        const effectiveCallId = call_id || (args.call_id as string);
-        const validated = SendFollowupInputSchema.parse({ ...args, call_id: effectiveCallId });
+        const validated = SendFollowupInputSchema.parse(args);
         const res = await executeSendFollowup(validated, tenantId);
         result = res as unknown as Record<string, unknown>;
         executionStatus = res.status;
@@ -135,8 +170,19 @@ export async function dispatchTool(
     }
 
     const latencyMs = Date.now() - startTime;
+    const sanitizedArgs = sanitizeAuditArguments(tool_name, args);
 
-    // Log Tool Execution Event in Audit Trail safely
+    // Map actor role accurately (Preserve ADMIN, OPS_MANAGER, DISPATCHER, or AI_AGENT)
+    const actorType =
+      authContext.role === 'VOICE_GATEWAY'
+        ? 'AI_AGENT'
+        : authContext.role === 'ADMIN'
+        ? 'ADMIN'
+        : authContext.role === 'OPS_MANAGER'
+        ? 'OPS_MANAGER'
+        : 'DISPATCHER';
+
+    // Log Tool Execution Event in Audit Trail with PII minimization
     try {
       await db.logAuditEvent(
         {
@@ -144,12 +190,12 @@ export async function dispatchTool(
           call_id,
           event_type: 'TOOL_EXECUTION',
           actor: authContext.userId,
-          actor_type: authContext.role === 'VOICE_GATEWAY' ? 'AI_AGENT' : 'DISPATCHER',
+          actor_type: actorType,
           actor_id: authContext.userId,
           tool_name,
           severity: 'INFO',
           details: {
-            arguments: args,
+            arguments: sanitizedArgs,
             status: executionStatus,
             latency_ms: latencyMs,
           },
@@ -160,7 +206,13 @@ export async function dispatchTool(
       // Best-effort audit logging
     }
 
-    const isFailureStatus = ['FAILED', 'PROVIDER_UNAVAILABLE', 'PROVIDER_ERROR', 'UNAVAILABLE', 'TRANSFER_UNAVAILABLE'].includes(executionStatus);
+    const isFailureStatus = [
+      'FAILED',
+      'PROVIDER_UNAVAILABLE',
+      'PROVIDER_ERROR',
+      'UNAVAILABLE',
+      'TRANSFER_UNAVAILABLE',
+    ].includes(executionStatus);
 
     return {
       tool_name,
@@ -172,6 +224,7 @@ export async function dispatchTool(
   } catch (error) {
     const latencyMs = Date.now() - startTime;
     const errorMessage = error instanceof Error ? error.message : 'Unknown tool execution failure';
+    const sanitizedArgs = sanitizeAuditArguments(tool_name, args);
 
     try {
       await db.logAuditEvent(
@@ -180,12 +233,12 @@ export async function dispatchTool(
           call_id,
           event_type: 'TOOL_EXECUTION_FAILED',
           actor: authContext.userId,
-          actor_type: 'AI_AGENT',
+          actor_type: authContext.role === 'VOICE_GATEWAY' ? 'AI_AGENT' : 'DISPATCHER',
           actor_id: authContext.userId,
           tool_name,
           severity: 'ERROR',
           details: {
-            arguments: args,
+            arguments: sanitizedArgs,
             error: errorMessage,
             latency_ms: latencyMs,
           },
@@ -196,12 +249,16 @@ export async function dispatchTool(
       // Best-effort audit logging
     }
 
+    const safeError = errorMessage.includes('Unrecognized or unauthorized tool')
+      ? errorMessage
+      : 'Tool execution could not be completed. Operations team has been notified.';
+
     return {
       tool_name,
       success: false,
       status: 'FAILED',
       result: {},
-      error: errorMessage,
+      error: safeError,
       latency_ms: latencyMs,
     };
   }

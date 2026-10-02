@@ -34,6 +34,7 @@ export interface CustomersDbRow {
   id: string;
   tenant_id: string;
   phone: string;
+  phone_normalized: string;
   name: string;
   company: string | null;
   customer_type: 'BROKER' | 'SHIPPER' | 'CONSIGNEE' | 'FLEET_OPERATOR' | null;
@@ -155,7 +156,7 @@ export interface AuditEventsDbRow {
   tenant_id: string;
   call_id: string | null;
   event_type: string;
-  actor_type: 'AI_AGENT' | 'DISPATCHER' | 'SYSTEM' | 'WEBHOOK';
+  actor_type: 'AI_AGENT' | 'DISPATCHER' | 'ADMIN' | 'OPS_MANAGER' | 'SYSTEM' | 'WEBHOOK';
   actor_id: string;
   tool_name: string | null;
   severity: AuditSeverity;
@@ -466,10 +467,24 @@ export function domainCustomerToDbRow(
   customer: Partial<Customer> & { id: string; tenant_id: string; phone: string; name: string }
 ): CustomersDbRow {
   const now = new Date().toISOString();
+  const rawClean = customer.phone.replace(/[^\d+]/g, '');
+  const phoneNormalized = customer.phone_normalized || (
+    rawClean.startsWith('+')
+      ? `+${rawClean.slice(1).replace(/\D/g, '')}`
+      : rawClean.length === 10
+      ? `+91${rawClean}`
+      : rawClean.length === 11 && rawClean.startsWith('0')
+      ? `+91${rawClean.slice(1)}`
+      : rawClean.length === 12 && rawClean.startsWith('91')
+      ? `+${rawClean}`
+      : `+${rawClean}`
+  );
+
   return {
     id: customer.id,
     tenant_id: customer.tenant_id,
     phone: customer.phone,
+    phone_normalized: phoneNormalized,
     name: customer.name,
     company: customer.company || null,
     customer_type: customer.customer_type || null,
@@ -534,6 +549,7 @@ export function dbCustomerToDomain(row: CustomersDbRow): Customer {
     id: row.id,
     tenant_id: row.tenant_id,
     phone: row.phone,
+    phone_normalized: row.phone_normalized || undefined,
     name: row.name,
     company: row.company || undefined,
     customer_type: row.customer_type || undefined,

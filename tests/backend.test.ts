@@ -171,11 +171,19 @@ async function runAllTests() {
     const isMalformedRejected = await verifyRetellWebhookSignature(rawPayload, malformedOfficialSig);
     assert(!isMalformedRejected, 'Malformed official Retell SDK signature header fails closed');
 
-    // B. Direct HMAC-SHA256 Hex Contract (Legacy & Custom format)
+    // B. Direct HMAC-SHA256 Hex Contract (Legacy compatibility mode gated behind RETELL_ALLOW_LEGACY_SIGNATURE)
     const validHexSignature = crypto.createHmac('sha256', secretKey).update(rawPayload).digest('hex');
 
-    const isHexValid = await verifyRetellWebhookSignature(rawPayload, validHexSignature);
-    assert(isHexValid, 'Direct raw-body HMAC-SHA256 hex signature verification succeeds');
+    // With flag OFF (default), hex signature fails closed
+    delete process.env.RETELL_ALLOW_LEGACY_SIGNATURE;
+    const isHexRejectedWhenOff = await verifyRetellWebhookSignature(rawPayload, validHexSignature);
+    assert(!isHexRejectedWhenOff, 'Direct raw-body HMAC-SHA256 hex signature fails closed when legacy flag is OFF');
+
+    // With flag ON, hex signature verifies successfully
+    process.env.RETELL_ALLOW_LEGACY_SIGNATURE = 'true';
+    const isHexValidWhenOn = await verifyRetellWebhookSignature(rawPayload, validHexSignature);
+    assert(isHexValidWhenOn, 'Direct raw-body HMAC-SHA256 hex signature verification succeeds when legacy flag is ON');
+    delete process.env.RETELL_ALLOW_LEGACY_SIGNATURE;
 
     const isHexInvalid = await verifyRetellWebhookSignature(rawPayload, 'invalid-signature-hash');
     assert(!isHexInvalid, 'Tampered or invalid hex signature is rejected');
@@ -1107,12 +1115,31 @@ async function runAllTests() {
 
   // 20. Transfer success only when provider confirms
   process.env.ENABLE_LIVE_TELEPHONY_TRANSFER = 'true';
+  process.env.TELEPHONY_PROVIDER_ACCOUNT_SID = 'AC_test_mock_sid';
+  process.env.TELEPHONY_PROVIDER_AUTH_TOKEN = 'auth_token_mock';
+
+  const origFetch20 = global.fetch;
+  (global as any).fetch = async (url: string) => {
+    if (typeof url === 'string' && url.includes('api.twilio.com')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ sid: 'mock-transfer-sid-777', status: 'in-progress' }),
+      } as any;
+    }
+    return origFetch20(url as any);
+  };
+
   const r20 = await dispatchTool({
     tool_name: 'transfer_to_human',
     arguments: { reason: 'Live escalation test', target_role: 'Operations Manager', caller_phone: '+91 98201 55432' },
   }, auth);
   assert(r20.status === 'TRANSFERRED', 'REGRESSION 20: Transfer returns TRANSFERRED only when telephony provider confirms execution');
+
+  global.fetch = origFetch20;
   delete process.env.ENABLE_LIVE_TELEPHONY_TRANSFER;
+  delete process.env.TELEPHONY_PROVIDER_ACCOUNT_SID;
+  delete process.env.TELEPHONY_PROVIDER_AUTH_TOKEN;
 
   // 21. Callback fallback
   const r21 = await dispatchTool({

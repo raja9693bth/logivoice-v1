@@ -35,11 +35,15 @@ function CallsPageContent() {
   const [outcomeFilter, setOutcomeFilter] = useState<string>('ALL');
   const [tempFilter, setTempFilter] = useState<string>('ALL');
   const [selectedCall, setSelectedCall] = useState<Call | null>(null);
+  const [totalCount, setTotalCount] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const PAGE_SIZE = 20;
 
   useEffect(() => {
     const q = searchParams.get('search');
     if (q) {
       setSearchQuery(q);
+      setOffset(0);
     }
   }, [searchParams]);
 
@@ -52,12 +56,20 @@ function CallsPageContent() {
 
     if (demoActive) {
       setCalls(MOCK_CALLS);
+      setTotalCount(MOCK_CALLS.length);
       setIsLoading(false);
       return;
     }
 
     try {
-      const res = await fetch('/api/calls');
+      const params = new URLSearchParams();
+      params.set('limit', String(PAGE_SIZE));
+      params.set('offset', String(offset));
+      if (intentFilter !== 'ALL') params.set('intent', intentFilter);
+      if (outcomeFilter !== 'ALL') params.set('outcome', outcomeFilter);
+      if (searchQuery.trim()) params.set('search', searchQuery.trim());
+
+      const res = await fetch(`/api/calls?${params.toString()}`);
       if (res.status === 401) {
         window.location.href = '/login';
         return;
@@ -67,6 +79,7 @@ function CallsPageContent() {
       }
       const data = await res.json();
       setCalls(data?.calls || []);
+      setTotalCount(data?.pagination?.total ?? (data?.calls?.length || 0));
     } catch (err) {
       console.warn('[CallsPage] API fetch error:', err);
       setError(err instanceof Error ? err.message : 'Error loading calls from backend.');
@@ -77,34 +90,19 @@ function CallsPageContent() {
 
   useEffect(() => {
     void fetchCalls();
-  }, []);
+  }, [offset, intentFilter, outcomeFilter, searchQuery]);
 
   const filteredCalls = useMemo(() => {
-    return calls.filter((call) => {
-      const query = searchQuery.toLowerCase();
-      const matchesSearch =
-        !searchQuery ||
-        call.id.toLowerCase().includes(query) ||
-        call.customer?.name.toLowerCase().includes(query) ||
-        call.customer?.phone.toLowerCase().includes(query) ||
-        call.customer?.company?.toLowerCase().includes(query) ||
-        call.facts?.tracking_id?.toLowerCase().includes(query) ||
-        call.facts?.route_from?.toLowerCase().includes(query) ||
-        call.facts?.route_to?.toLowerCase().includes(query);
-
-      const matchesIntent = intentFilter === 'ALL' || call.primary_intent === intentFilter;
-      const matchesOutcome = outcomeFilter === 'ALL' || call.outcome === outcomeFilter;
-      const matchesTemp = tempFilter === 'ALL' || call.lead_temperature === tempFilter;
-
-      return matchesSearch && matchesIntent && matchesOutcome && matchesTemp;
-    });
-  }, [calls, searchQuery, intentFilter, outcomeFilter, tempFilter]);
+    if (tempFilter === 'ALL') return calls;
+    return calls.filter((call) => call.lead_temperature === tempFilter);
+  }, [calls, tempFilter]);
 
   const resetFilters = () => {
     setSearchQuery('');
     setIntentFilter('ALL');
     setOutcomeFilter('ALL');
     setTempFilter('ALL');
+    setOffset(0);
   };
 
   return (
@@ -341,6 +339,35 @@ function CallsPageContent() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Pagination Controls */}
+      {totalCount > PAGE_SIZE && (
+        <div className="flex items-center justify-between px-3 py-3 rounded-xl bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-xs">
+          <span className="text-slate-500 dark:text-slate-400">
+            Showing <span className="font-semibold text-slate-900 dark:text-white">{offset + 1}</span> to{' '}
+            <span className="font-semibold text-slate-900 dark:text-white">{Math.min(offset + calls.length, totalCount)}</span> of{' '}
+            <span className="font-semibold text-slate-900 dark:text-white">{totalCount}</span> sessions
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+              disabled={offset === 0 || isLoading}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              onClick={() => setOffset(offset + PAGE_SIZE)}
+              disabled={offset + calls.length >= totalCount || isLoading}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+            >
+              Next
+            </button>
+          </div>
         </div>
       )}
 

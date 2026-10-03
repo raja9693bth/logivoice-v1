@@ -31,7 +31,7 @@ import {
   CustomerSuppression,
 } from '@/types/logivoice';
 import { normalizePhoneNumber } from '@/lib/utils';
-import { evaluateApprovedRate } from '@/lib/rules/rate-engine';
+import { evaluateApprovedRate, isValidIsoDate } from '@/lib/rules/rate-engine';
 import {
   domainCallToDbRow,
   dbCallToDomain,
@@ -679,6 +679,9 @@ class Store {
     ai_disclosure_wording: 'Namaste! Main Apex Logistics ki automated voice assistant hoon.',
     primary_language: 'hi',
     secondary_language: 'en',
+    allow_language_switching: true,
+    voice_persona: 'Professional, calm, and respectful logistics dispatcher with clear acoustic tone',
+    barge_in_enabled: true,
     inbound_phone_number: '+91-11-4567-8900',
     escalation_contacts: [
       { role: 'Primary Dispatcher', name: 'Vikas Sharma', phone: '+91 98111 22334', channel: 'PHONE', priority: 1 },
@@ -983,15 +986,15 @@ export const db = {
     transcript: TranscriptTurn[]
   ): Promise<void> {
     const transcriptRows = transcript.map((t) => {
-      const hashId = crypto
+      const segmentKey = crypto
         .createHash('sha256')
         .update(`${callId}:${t.timestamp}:${t.speaker}:${t.text}`)
-        .digest('hex')
-        .substring(0, 36);
+        .digest('hex');
       return {
-        id: hashId,
+        id: crypto.randomUUID(),
         call_id: callId,
         tenant_id: tenantId,
+        segment_key: segmentKey,
         speaker: t.speaker,
         text: t.text,
         timestamp: t.timestamp,
@@ -999,16 +1002,18 @@ export const db = {
         created_at: new Date().toISOString(),
       };
     });
-    const { error: transcriptErr } = await client.from('transcript_segments').upsert(transcriptRows, { onConflict: 'id' });
+    const { error: transcriptErr } = await client
+      .from('transcript_segments')
+      .upsert(transcriptRows, { onConflict: 'call_id,segment_key' });
     if (transcriptErr) {
       throw new Error(`Failed to persist transcript_segments for call ${callId}: ${transcriptErr.message}`);
     }
   },
 
-  async listCalls(
+  async listCallsWithCount(
     tenantId: string = DEFAULT_TENANT_ID,
     filters?: { intent?: CallIntent; outcome?: CallOutcome; search?: string; limit?: number; offset?: number }
-  ): Promise<Call[]> {
+  ): Promise<{ calls: Call[]; total: number }> {
     const limit = Math.min(Math.max(filters?.limit || 50, 1), 100);
     const offset = Math.max(filters?.offset || 0, 0);
 
@@ -1016,7 +1021,7 @@ export const db = {
       const client = createAdminClient();
       let query = client
         .from('calls')
-        .select('*, customer:customers(*), facts:call_facts(*)')
+        .select('*, customer:customers(*), facts:call_facts(*)', { count: 'exact' })
         .eq('tenant_id', tenantId)
         .order('started_at', { ascending: false })
         .range(offset, offset + limit - 1);
@@ -1024,18 +1029,19 @@ export const db = {
       if (filters?.intent) query = query.eq('primary_intent', filters.intent);
       if (filters?.outcome) query = query.eq('outcome', filters.outcome);
       if (filters?.search) {
-        const s = filters.search.trim();
+        const s = filters.search.replace(/[^a-zA-Z0-9\s+-_]/g, '').trim();
         if (s) {
           query = query.or(`summary.ilike.%${s}%,external_call_id.ilike.%${s}%`);
         }
       }
-      const { data, error } = await query;
+      const { data, count, error } = await query;
       if (!error && data) {
-        return data.map((d: any) => {
+        const calls = data.map((d: any) => {
           const factsRow = Array.isArray(d.facts) ? d.facts[0] : d.facts;
           const customerRow = Array.isArray(d.customer) ? d.customer[0] : d.customer;
           return dbCallToDomain(d, factsRow, customerRow);
         });
+        return { calls, total: count ?? calls.length };
       }
     }
     assertProductionDbReady();
@@ -1044,18 +1050,34 @@ export const db = {
     if (filters?.outcome) calls = calls.filter((c) => c.outcome === filters.outcome);
     if (filters?.search) {
       const s = filters.search.toLowerCase();
-      calls = calls.filter(
-        (c) =>
+      calls = calls.filter((c) => {
+        const cust = globalStore.customers.find((cu) => cu.id === c.customer_id);
+        return (
           c.summary.toLowerCase().includes(s) ||
           c.external_call_id.toLowerCase().includes(s) ||
-          c.customer?.name.toLowerCase().includes(s) ||
-          c.customer?.phone.includes(s)
-      );
+          (cust?.name && cust.name.toLowerCase().includes(s)) ||
+          (cust?.phone && cust.phone.includes(s)) ||
+          (cust?.company && cust.company.toLowerCase().includes(s)) ||
+          (c.facts?.tracking_id && c.facts.tracking_id.toLowerCase().includes(s)) ||
+          (c.facts?.route_from && c.facts.route_from.toLowerCase().includes(s)) ||
+          (c.facts?.route_to && c.facts.route_to.toLowerCase().includes(s))
+        );
+      });
     }
-    return calls.slice(offset, offset + limit).map((c) => ({
+    const total = calls.length;
+    const pagedCalls = calls.slice(offset, offset + limit).map((c) => ({
       ...c,
       customer: globalStore.customers.find((cust) => cust.id === c.customer_id),
     }));
+    return { calls: pagedCalls, total };
+  },
+
+  async listCalls(
+    tenantId: string = DEFAULT_TENANT_ID,
+    filters?: { intent?: CallIntent; outcome?: CallOutcome; search?: string; limit?: number; offset?: number }
+  ): Promise<Call[]> {
+    const res = await this.listCallsWithCount(tenantId, filters);
+    return res.calls;
   },
 
   async createCall(callData: Omit<Call, 'id'>, tenantId: string = DEFAULT_TENANT_ID): Promise<Call> {
@@ -1671,12 +1693,37 @@ export const db = {
     return null;
   },
 
+  async getRateCardById(
+    id: string,
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<RateCard | null> {
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client
+        .from('rate_cards')
+        .select('*')
+        .eq('id', id)
+        .eq('tenant_id', tenantId)
+        .maybeSingle();
+      if (!error && data) return data as RateCard;
+      return null;
+    }
+    assertProductionDbReady();
+    return globalStore.rate_cards.find((rc) => rc.id === id && rc.tenant_id === tenantId) || null;
+  },
+
   async createRateCard(
     rateCardData: Omit<RateCard, 'id' | 'tenant_id' | 'source_version'> & { tenant_id?: string; source_version?: string },
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<RateCard> {
     if (rateCardData.weight_max_tons < rateCardData.weight_min_tons) {
       throw new Error('Invalid rate interval: weight_max_tons cannot be less than weight_min_tons.');
+    }
+    if (rateCardData.effective_from && !isValidIsoDate(rateCardData.effective_from)) {
+      throw new Error(`Invalid effective_from date: '${rateCardData.effective_from}' is not a valid ISO calendar date (YYYY-MM-DD).`);
+    }
+    if (rateCardData.effective_to && !isValidIsoDate(rateCardData.effective_to)) {
+      throw new Error(`Invalid effective_to date: '${rateCardData.effective_to}' is not a valid ISO calendar date (YYYY-MM-DD).`);
     }
     if (rateCardData.effective_to && rateCardData.effective_from && rateCardData.effective_to < rateCardData.effective_from) {
       throw new Error('Invalid rate interval: effective_to cannot be earlier than effective_from.');
@@ -1704,18 +1751,24 @@ export const db = {
     updates: Partial<RateCard>,
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<RateCard | null> {
-    if (
-      updates.weight_min_tons !== undefined &&
-      updates.weight_max_tons !== undefined &&
-      updates.weight_max_tons < updates.weight_min_tons
-    ) {
+    const existing = await this.getRateCardById(id, tenantId);
+    if (!existing) return null;
+
+    const mergedMin = updates.weight_min_tons !== undefined ? updates.weight_min_tons : existing.weight_min_tons;
+    const mergedMax = updates.weight_max_tons !== undefined ? updates.weight_max_tons : existing.weight_max_tons;
+    if (mergedMax < mergedMin) {
       throw new Error('Invalid rate interval: weight_max_tons cannot be less than weight_min_tons.');
     }
-    if (
-      updates.effective_from !== undefined &&
-      updates.effective_to !== undefined &&
-      updates.effective_to < updates.effective_from
-    ) {
+
+    const mergedFrom = updates.effective_from !== undefined ? updates.effective_from : existing.effective_from;
+    const mergedTo = updates.effective_to !== undefined ? updates.effective_to : existing.effective_to;
+    if (mergedFrom && !isValidIsoDate(mergedFrom)) {
+      throw new Error(`Invalid effective_from date: '${mergedFrom}' is not a valid ISO calendar date (YYYY-MM-DD).`);
+    }
+    if (mergedTo && !isValidIsoDate(mergedTo)) {
+      throw new Error(`Invalid effective_to date: '${mergedTo}' is not a valid ISO calendar date (YYYY-MM-DD).`);
+    }
+    if (mergedTo && mergedFrom && mergedTo < mergedFrom) {
       throw new Error('Invalid rate interval: effective_to cannot be earlier than effective_from.');
     }
 
@@ -1840,6 +1893,12 @@ export const db = {
       if (updates.content) updatePayload.content = updates.content;
       if (updates.status) updatePayload.status = updates.status;
       if (updates.version) updatePayload.version = updates.version;
+      if (updates.approved_by) updatePayload.approved_by = updates.approved_by;
+      if (updates.approved_at) updatePayload.approved_at = updates.approved_at;
+      if (updates.status === 'APPROVED') {
+        if (!updates.approved_at) updatePayload.approved_at = new Date().toISOString();
+        if (!updates.approved_by) updatePayload.approved_by = 'admin';
+      }
 
       const { data, error } = await client
         .from('knowledge_items')
@@ -1853,9 +1912,15 @@ export const db = {
     assertProductionDbReady();
     const idx = globalStore.knowledge_items.findIndex((k) => k.id === id && k.tenant_id === tenantId);
     if (idx === -1) return null;
+    const approvedUpdates: Partial<KnowledgeItem> = {};
+    if (updates.status === 'APPROVED') {
+      approvedUpdates.approved_at = updates.approved_at || new Date().toISOString();
+      approvedUpdates.approved_by = updates.approved_by || 'admin';
+    }
     globalStore.knowledge_items[idx] = {
       ...globalStore.knowledge_items[idx],
       ...updates,
+      ...approvedUpdates,
       last_updated: now,
     };
     return globalStore.knowledge_items[idx];
@@ -2047,10 +2112,78 @@ export const db = {
   // DISPATCHER KPIS
   // -----------------------------------------------------------------------
   async getKPIs(tenantId: string = DEFAULT_TENANT_ID): Promise<DispatcherKPIs> {
-    const calls = await this.listCalls(tenantId);
-    const leads = await this.listLeads(tenantId);
-    const reqs = await this.listRequests(tenantId);
-    const auditEvents = await this.listAuditEvents(tenantId, 100);
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const todayKolkata = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+
+      const [
+        callsTodayRes,
+        missedRes,
+        escalatedRes,
+        openReqsRes,
+        hotLeadsRes,
+        warmLeadsRes,
+        toolAuditRes,
+      ] = await Promise.all([
+        client.from('calls').select('*', { count: 'exact', head: true }).eq('tenant_id', tenantId).gte('started_at', `${todayKolkata}T00:00:00+05:30`),
+        client.from('calls').select('*', { count: 'exact', head: true }).eq('tenant_id', tenantId).in('outcome', ['MISSED', 'FAILED']),
+        client.from('calls').select('*', { count: 'exact', head: true }).eq('tenant_id', tenantId).eq('outcome', 'TRANSFERRED'),
+        client.from('operations_requests').select('*', { count: 'exact', head: true }).eq('tenant_id', tenantId).in('status', ['PENDING', 'IN_REVIEW']),
+        client.from('leads').select('*', { count: 'exact', head: true }).eq('tenant_id', tenantId).eq('temperature', 'HOT'),
+        client.from('leads').select('*', { count: 'exact', head: true }).eq('tenant_id', tenantId).eq('temperature', 'WARM'),
+        client.from('audit_events').select('event_type, details').eq('tenant_id', tenantId).ilike('event_type', 'TOOL_%').limit(500),
+      ]);
+
+      const callsTodayCount = callsTodayRes.count ?? 0;
+      const missedCount = missedRes.count ?? 0;
+      const escalatedCount = escalatedRes.count ?? 0;
+      const openReqsCount = openReqsRes.count ?? 0;
+      const hotLeadsCount = hotLeadsRes.count ?? 0;
+      const warmLeadsCount = warmLeadsRes.count ?? 0;
+
+      const measuredLatencies: number[] = [];
+      let totalToolAttempts = 0;
+      let successfulToolExecutions = 0;
+
+      if (toolAuditRes.data) {
+        for (const ae of toolAuditRes.data) {
+          totalToolAttempts++;
+          const details = (ae.details as Record<string, unknown>) || {};
+          if (details.success !== false) {
+            successfulToolExecutions++;
+          }
+          if (typeof details.latency_ms === 'number' && details.latency_ms > 0) {
+            measuredLatencies.push(details.latency_ms);
+          }
+        }
+      }
+
+      const toolSuccessRate = totalToolAttempts > 0
+        ? Math.round((successfulToolExecutions / totalToolAttempts) * 100)
+        : null;
+
+      const avgToolLatencyMs = measuredLatencies.length > 0
+        ? Math.round(measuredLatencies.reduce((acc, l) => acc + l, 0) / measuredLatencies.length)
+        : null;
+
+      return {
+        calls_today: callsTodayCount,
+        calls_trend: callsTodayCount > 0 ? `${callsTodayCount} active calls today` : 'No calls today',
+        missed_calls: missedCount,
+        escalated_calls: escalatedCount,
+        open_requests: openReqsCount,
+        hot_leads: hotLeadsCount,
+        warm_leads: warmLeadsCount,
+        avg_response_latency_ms: avgToolLatencyMs,
+        tool_success_rate_percent: toolSuccessRate,
+      };
+    }
+
+    assertProductionDbReady();
+    const calls = globalStore.calls.filter((c) => c.tenant_id === tenantId);
+    const leads = globalStore.leads.filter((l) => l.tenant_id === tenantId);
+    const reqs = globalStore.operations_requests.filter((r) => r.tenant_id === tenantId);
+    const auditEvents = globalStore.audit_events.filter((a) => a.tenant_id === tenantId);
 
     const missed = calls.filter((c) => c.outcome === 'MISSED' || c.outcome === 'FAILED').length;
     const escalated = calls.filter((c) => c.outcome === 'TRANSFERRED' || c.escalation_status?.is_escalated).length;
@@ -2105,11 +2238,11 @@ export const db = {
 
     const toolSuccessRate = totalToolAttempts > 0
       ? Math.round((successfulToolExecutions / totalToolAttempts) * 100)
-      : 100;
+      : null;
 
     const avgToolLatencyMs = measuredLatencies.length > 0
       ? Math.round(measuredLatencies.reduce((acc, l) => acc + l, 0) / measuredLatencies.length)
-      : 0;
+      : null;
 
     return {
       calls_today: callsToday.length,
@@ -2130,13 +2263,16 @@ export const db = {
   async claimSideEffect(
     tenantId: string = DEFAULT_TENANT_ID,
     claimKey: string,
-    effectType: string,
+    effectType: string = 'GENERIC_SIDE_EFFECT',
     callId?: string,
-    expiresMs: number = 300000
+    expiresMs: number = 300000,
+    maxAttempts: number = 3
   ): Promise<{ claimed: boolean; status: SideEffectStatus; claim?: SideEffectClaim }> {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + expiresMs).toISOString();
     const nowIso = now.toISOString();
+    const isUuid = Boolean(callId && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(callId));
+    const sanitizedCallId = isUuid ? callId : undefined;
 
     if (await isSupabaseLive()) {
       const client = createAdminClient();
@@ -2149,17 +2285,34 @@ export const db = {
 
       if (existing) {
         if (existing.status === 'COMPLETED' || existing.status === 'SUCCEEDED') {
-          return { claimed: false, status: existing.status, claim: existing as SideEffectClaim };
+          return { claimed: false, status: 'SUCCEEDED', claim: existing as SideEffectClaim };
         }
-        if (existing.status === 'PROCESSING' && existing.expires_at && existing.expires_at > nowIso) {
+        if (existing.status === 'FAILED' || existing.status === 'REJECTED') {
+          return { claimed: false, status: 'FAILED', claim: existing as SideEffectClaim };
+        }
+        const leaseExpiresAt = existing.lease_expires_at || existing.expires_at;
+        if (existing.status === 'PROCESSING' && leaseExpiresAt && leaseExpiresAt > nowIso) {
           return { claimed: false, status: 'PROCESSING', claim: existing as SideEffectClaim };
         }
+        if (existing.status === 'RETRYABLE') {
+          if (existing.next_retry_at && existing.next_retry_at > nowIso) {
+            return { claimed: false, status: 'RETRYABLE', claim: existing as SideEffectClaim };
+          }
+          if ((existing.attempt_count || 1) >= (existing.max_attempts || maxAttempts)) {
+            await client
+              .from('side_effect_claims')
+              .update({ status: 'FAILED', updated_at: nowIso })
+              .eq('id', existing.id);
+            return { claimed: false, status: 'FAILED', claim: { ...existing, status: 'FAILED' } as SideEffectClaim };
+          }
+        }
+
         const { data: updated, error: updateErr } = await client
           .from('side_effect_claims')
           .update({
             status: 'PROCESSING',
             claimed_at: nowIso,
-            expires_at: expiresAt,
+            lease_expires_at: expiresAt,
             attempt_count: (existing.attempt_count || 1) + 1,
             updated_at: nowIso,
           })
@@ -2171,19 +2324,20 @@ export const db = {
         if (!updateErr && updated) {
           return { claimed: true, status: 'PROCESSING', claim: updated as SideEffectClaim };
         }
-        return { claimed: false, status: existing.status, claim: existing as SideEffectClaim };
+        return { claimed: false, status: (existing.status as SideEffectStatus) || 'PROCESSING', claim: existing as SideEffectClaim };
       }
 
       const newClaim = {
         id: crypto.randomUUID(),
         tenant_id: tenantId,
         claim_key: claimKey,
-        effect_type: effectType,
-        call_id: callId && !callId.startsWith('call-') ? callId : undefined,
+        job_type: effectType || 'GENERIC_SIDE_EFFECT',
+        call_id: sanitizedCallId,
         status: 'PROCESSING' as SideEffectStatus,
         attempt_count: 1,
+        max_attempts: maxAttempts,
         claimed_at: nowIso,
-        expires_at: expiresAt,
+        lease_expires_at: expiresAt,
         created_at: nowIso,
         updated_at: nowIso,
       };
@@ -2207,7 +2361,7 @@ export const db = {
 
       return {
         claimed: false,
-        status: recheck?.status || 'PROCESSING',
+        status: (recheck?.status as SideEffectStatus) || 'PROCESSING',
         claim: recheck as SideEffectClaim,
       };
     }
@@ -2218,15 +2372,29 @@ export const db = {
     );
 
     if (existing) {
-      if (existing.status === 'COMPLETED' || existing.status === 'SUCCEEDED') {
-        return { claimed: false, status: existing.status, claim: existing };
+      if (existing.status === 'SUCCEEDED') {
+        return { claimed: false, status: 'SUCCEEDED', claim: existing };
       }
-      if (existing.status === 'PROCESSING' && existing.expires_at && existing.expires_at > nowIso) {
+      if (existing.status === 'FAILED') {
+        return { claimed: false, status: 'FAILED', claim: existing };
+      }
+      const leaseExpiresAt = existing.lease_expires_at;
+      if (existing.status === 'PROCESSING' && leaseExpiresAt && leaseExpiresAt > nowIso) {
         return { claimed: false, status: 'PROCESSING', claim: existing };
+      }
+      if (existing.status === 'RETRYABLE') {
+        if (existing.next_retry_at && existing.next_retry_at > nowIso) {
+          return { claimed: false, status: 'RETRYABLE', claim: existing };
+        }
+        if ((existing.attempt_count || 1) >= (existing.max_attempts || maxAttempts)) {
+          existing.status = 'FAILED';
+          existing.updated_at = nowIso;
+          return { claimed: false, status: 'FAILED', claim: existing };
+        }
       }
       existing.status = 'PROCESSING';
       existing.claimed_at = nowIso;
-      existing.expires_at = expiresAt;
+      existing.lease_expires_at = expiresAt;
       existing.attempt_count += 1;
       existing.updated_at = nowIso;
       return { claimed: true, status: 'PROCESSING', claim: existing };
@@ -2236,12 +2404,13 @@ export const db = {
       id: crypto.randomUUID(),
       tenant_id: tenantId,
       claim_key: claimKey,
-      effect_type: effectType,
+      job_type: effectType || 'GENERIC_SIDE_EFFECT',
       call_id: callId,
       status: 'PROCESSING',
       attempt_count: 1,
+      max_attempts: maxAttempts,
       claimed_at: nowIso,
-      expires_at: expiresAt,
+      lease_expires_at: expiresAt,
       created_at: nowIso,
       updated_at: nowIso,
     };
@@ -2260,9 +2429,9 @@ export const db = {
       await client
         .from('side_effect_claims')
         .update({
-          status: 'COMPLETED',
+          status: 'SUCCEEDED',
           completed_at: nowIso,
-          response_payload: responsePayload || {},
+          result: responsePayload || {},
           updated_at: nowIso,
         })
         .eq('tenant_id', tenantId)
@@ -2274,9 +2443,9 @@ export const db = {
       (c) => c.tenant_id === tenantId && c.claim_key === claimKey
     );
     if (claim) {
-      claim.status = 'COMPLETED';
+      claim.status = 'SUCCEEDED';
       claim.completed_at = nowIso;
-      claim.response_payload = responsePayload;
+      claim.result = responsePayload;
       claim.updated_at = nowIso;
     }
   },
@@ -2285,10 +2454,13 @@ export const db = {
     tenantId: string = DEFAULT_TENANT_ID,
     claimKey: string,
     errorMessage: string,
-    isRetryable: boolean = false
+    isRetryable: boolean = false,
+    retryDelayMs: number = 60000
   ): Promise<void> {
     const nowIso = new Date().toISOString();
-    const status: SideEffectStatus = isRetryable ? 'FAILED' : 'REJECTED';
+    const status: SideEffectStatus = isRetryable ? 'RETRYABLE' : 'FAILED';
+    const nextRetry = isRetryable ? new Date(Date.now() + retryDelayMs).toISOString() : null;
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
       await client
@@ -2296,6 +2468,7 @@ export const db = {
         .update({
           status,
           last_error: errorMessage,
+          next_retry_at: nextRetry,
           updated_at: nowIso,
         })
         .eq('tenant_id', tenantId)
@@ -2309,6 +2482,7 @@ export const db = {
     if (claim) {
       claim.status = status;
       claim.last_error = errorMessage;
+      claim.next_retry_at = nextRetry || undefined;
       claim.updated_at = nowIso;
     }
   },
@@ -2433,6 +2607,15 @@ export const db = {
     }
     globalStore.customer_suppressions.unshift(record);
     return record;
+  },
+
+  async suppressCustomer(
+    tenantId: string = DEFAULT_TENANT_ID,
+    phone: string,
+    reason?: string,
+    source?: string
+  ): Promise<CustomerSuppression> {
+    return this.setCustomerSuppression(tenantId, phone, 'WHATSAPP', true, reason, source);
   },
 };
 

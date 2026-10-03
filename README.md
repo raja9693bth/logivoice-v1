@@ -86,7 +86,7 @@ In accordance with LogiVoice V1 SSOT principles, all capabilities are classified
 - **Language**: TypeScript (Strict Mode)
 - **Database**: PostgreSQL 15+ (Supabase)
 - **Voice Platform**: Retell AI Voice Streaming SDK Contract
-- **Testing**: Native TypeScript Regression & Voice QA Suite (182 tests)
+- **Testing**: Native TypeScript Regression, PostgreSQL DB Integration & Voice QA Suite (206 tests)
 
 ---
 
@@ -105,7 +105,7 @@ In accordance with LogiVoice V1 SSOT principles, all capabilities are classified
 
 2. **Install dependencies**:
    ```bash
-   npm ci
+   npm ci --ignore-scripts
    ```
 
 3. **Configure environment variables**:
@@ -133,10 +133,16 @@ npm run lint
 # 2. TypeScript typecheck
 npm run typecheck
 
-# 3. Unit, integration & Voice QA tests (182 test cases)
+# 3. Unit, integration & Voice QA tests
 npm test
 
-# 4. Production standalone build
+# 4. Real PostgreSQL database integration suite
+DATABASE_URL=postgresql://postgres@127.0.0.1:5433/postgres npm run test:integration
+
+# 5. Test coverage generation (LCOV)
+npm run test:coverage
+
+# 6. Production standalone build
 npm run build
 ```
 
@@ -148,6 +154,6 @@ npm run build
 - [IMPLEMENTATION_STATUS.md](file:///./IMPLEMENTATION_STATUS.md): Complete feature-by-feature status breakdown.
 - [GO_LIVE_BLOCKERS.md](file:///./GO_LIVE_BLOCKERS.md): Remaining client/provider approvals before DNS cutover.
 - [SECURITY_NOTES.md](file:///./SECURITY_NOTES.md): Credential hygiene, HMAC verification, and formula injection mitigations.
-- [TEST_REPORT.md](file:///./TEST_REPORT.md): 182 passed automated test cases and 32 voice QA scenarios.
+- [TEST_REPORT.md](file:///./TEST_REPORT.md): 206 passed automated test cases, PostgreSQL integration suite, and 32 voice QA scenarios.
 - [RUNBOOK.md](file:///./RUNBOOK.md): SRE deployment guide, liveness probes, and rollback procedures.
 - [MIGRATION_NOTES.md](file:///./MIGRATION_NOTES.md): Database schema updates, idempotency constraints, and RLS architecture.

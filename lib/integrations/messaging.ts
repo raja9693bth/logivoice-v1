@@ -61,8 +61,8 @@ export function renderApprovedTemplate(
   const brand = data.brand || 'LogiVoice';
   const name = data.customerName || 'Inbound Shipper';
   const bookingNotice = data.bookingUrl
-    ? ` Booking confirmation: ${data.bookingUrl}`
-    : ' Booking confirmation ke liye is number par sampark karein.';
+    ? ` Booking link: ${data.bookingUrl}`
+    : ' Booking information ke liye is number par sampark karein.';
 
   switch (templateId) {
     case 'QUOTE_ESTIMATE': {
@@ -76,7 +76,11 @@ export function renderApprovedTemplate(
     }
 
     case 'TRACKING_STATUS': {
-      const statusStr = (data.currentStatus || 'IN TRANSIT').replace(/_/g, ' ');
+      // Never invent tracking status: require verified currentStatus
+      if (!data.currentStatus) {
+        return renderApprovedTemplate('INQUIRY_RECEIVED', data);
+      }
+      const statusStr = data.currentStatus.replace(/_/g, ' ');
       const locStr = data.currentLocation ? ` at ${data.currentLocation}` : '';
       const etaStr = data.etaFormatted ? ` Estimated arrival: ${data.etaFormatted}.` : '';
       return `Namaste ${name}! Aapke consignment ${data.trackingId || 'reference'} ka current status: ${statusStr}${locStr}.${etaStr} Sahayata ke liye ${brand} se judey rahein.`;
@@ -84,7 +88,7 @@ export function renderApprovedTemplate(
 
     case 'INQUIRY_RECEIVED':
     default: {
-      return `Namaste ${name}! ${brand} se call karne ke liye dhanyawad. Aapki logistics requirement record kar li gayi hai. Operations desk jald hi aap se sampark karega.`;
+      return `Namaste ${name}! ${brand} se sampark karne ke liye dhanyawad. Aapki logistics inquiry record kar li gayi hai. Sahayata ke liye ${brand} se judey rahein.`;
     }
   }
 }
@@ -101,10 +105,8 @@ export async function sendControlledFollowup(
 
   const renderedText = renderApprovedTemplate(req.templateId, req.templateData);
 
-  // 1. Durable Suppression / Opt-Out Check in Database
-  const isSuppressed =
-    normalizedPhone === '+919000000000' ||
-    (await db.isPhoneSuppressed(tenantId, normalizedPhone, channel));
+  // 1. Durable Suppression / Opt-Out Check in Database (Canonical customer_suppressions table)
+  const isSuppressed = await db.isPhoneSuppressed(tenantId, normalizedPhone, channel);
   if (isSuppressed) {
     return {
       success: false,
@@ -120,10 +122,35 @@ export async function sendControlledFollowup(
   const claimResult = await db.claimSideEffect(tenantId, claimKey, 'FOLLOWUP_SEND', req.callId);
 
   if (!claimResult.claimed) {
-    const isSuccess = claimResult.status === 'COMPLETED' || claimResult.status === 'SUCCEEDED';
+    const claim = claimResult.claim;
+    const businessStatus =
+      (claim?.result as Record<string, unknown> | undefined)?.business_status ||
+      (claim?.result as Record<string, unknown> | undefined)?.status;
+
+    if (businessStatus === 'UNCONFIGURED') {
+      return {
+        success: false,
+        status: 'UNCONFIGURED',
+        provider: 'DURABLE_CLAIM_GUARD',
+        renderedText,
+        error: `${channel} provider credentials unconfigured in environment.`,
+      };
+    }
+
+    if (businessStatus === 'SUPPRESSED') {
+      return {
+        success: false,
+        status: 'SUPPRESSED',
+        provider: 'DURABLE_CLAIM_GUARD',
+        renderedText,
+        error: 'Recipient phone is on the tenant suppression opt-out registry.',
+      };
+    }
+
+    const isSuccess = businessStatus === 'SENT' || businessStatus === 'DELIVERED' || businessStatus === 'MOCK';
     return {
       success: isSuccess,
-      status: isSuccess ? 'SENT' : 'SKIPPED',
+      status: isSuccess ? (businessStatus as any) : 'SKIPPED',
       provider: 'DURABLE_CLAIM_GUARD',
       renderedText,
     };
@@ -154,6 +181,7 @@ export async function sendControlledFollowup(
       if (res.ok && data.messages?.[0]?.id) {
         const providerMessageId = data.messages[0].id;
         await db.completeSideEffect(tenantId, claimKey, {
+          business_status: 'SENT',
           provider_message_id: providerMessageId,
           provider: 'META_WHATSAPP_CLOUD_API',
           sent_at: new Date().toISOString(),
@@ -192,7 +220,11 @@ export async function sendControlledFollowup(
 
   // Unconfigured state
   if (process.env.NODE_ENV === 'production' || process.env.ENABLE_MOCK_INTEGRATIONS !== 'true') {
-    await db.completeSideEffect(tenantId, claimKey, { status: 'UNCONFIGURED' });
+    await db.completeSideEffect(tenantId, claimKey, {
+      business_status: 'UNCONFIGURED',
+      status: 'UNCONFIGURED',
+      error: `${channel} provider credentials unconfigured in environment.`,
+    });
     return {
       success: false,
       status: 'UNCONFIGURED',
@@ -205,8 +237,10 @@ export async function sendControlledFollowup(
   // Deterministic Development Mock Adapter
   const mockMessageId = `mock-msg-${Date.now()}`;
   await db.completeSideEffect(tenantId, claimKey, {
+    business_status: 'MOCK',
     provider_message_id: mockMessageId,
     provider: 'DETERMINISTIC_MOCK_ADAPTER',
+    sent_at: new Date().toISOString(),
   });
 
   return {
@@ -237,9 +271,7 @@ export async function sendFollowupMessage(params: LegacyFollowupParams): Promise
   const normPhone = normalizePhoneNumber(params.recipient);
   const tenantId = params.tenantId || DEFAULT_TENANT_ID;
 
-  const isSuppressed =
-    normPhone === '+919000000000' ||
-    (await db.isPhoneSuppressed(tenantId, normPhone, params.channel || 'WHATSAPP'));
+  const isSuppressed = await db.isPhoneSuppressed(tenantId, normPhone, params.channel || 'WHATSAPP');
 
   if (isSuppressed) {
     return {

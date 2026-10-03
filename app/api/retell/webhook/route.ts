@@ -20,38 +20,39 @@ import { verifyRetellWebhookSignature } from '@/lib/auth/context';
 import { processPostCallPipeline } from '@/lib/pipeline/post-call';
 import { db, DEFAULT_TENANT_ID } from '@/lib/db';
 import { createCorrelationContext, logTrace, logError } from '@/lib/observability/correlation';
-import { CallIntent, CallOutcome, TranscriptTurn } from '@/types/logivoice';
+import { CallFacts, CallIntent, CallOutcome, TranscriptTurn } from '@/types/logivoice';
 import { normalizePhoneNumber } from '@/lib/utils';
 
-// Strict schema validation for Retell webhook payloads
+// Strict schema validation for Retell webhook payloads with bounded limits
 const RetellCallDataSchema = z.object({
-  call_id: z.string().min(1),
-  agent_id: z.string().optional(),
+  call_id: z.string().min(1).max(128),
+  agent_id: z.string().max(128).optional(),
   start_timestamp: z.number().optional(),
   end_timestamp: z.number().optional(),
-  duration_ms: z.number().optional(),
-  duration_seconds: z.number().optional(),
-  from_number: z.string().optional(),
-  to_number: z.string().optional(),
-  caller_name: z.string().optional(),
-  disconnection_reason: z.string().optional(),
-  recording_url: z.string().optional(),
+  duration_ms: z.number().max(86400000).optional(),
+  duration_seconds: z.number().max(86400).optional(),
+  from_number: z.string().max(32).optional(),
+  to_number: z.string().max(32).optional(),
+  caller_name: z.string().max(128).optional(),
+  disconnection_reason: z.string().max(256).optional(),
+  recording_url: z.string().max(2048).optional(),
   call_analysis: z
     .object({
-      call_summary: z.string().optional(),
-      in_call_sentiment: z.string().optional(),
-      user_sentiment: z.string().optional(),
+      call_summary: z.string().max(4000).optional(),
+      in_call_sentiment: z.string().max(64).optional(),
+      user_sentiment: z.string().max(64).optional(),
     })
     .optional(),
-  custom_analysis_data: z.record(z.string(), z.unknown()).optional(),
+  custom_analysis_data: z.record(z.string().max(64), z.unknown()).optional(),
   transcript_object: z
     .array(
       z.object({
-        role: z.string(),
-        content: z.string(),
+        role: z.string().max(32),
+        content: z.string().max(10000),
         words: z.array(z.unknown()).optional(),
       })
     )
+    .max(500)
     .optional(),
 });
 
@@ -284,12 +285,29 @@ export async function POST(req: NextRequest) {
       const durationMs = call?.duration_ms || (callData.duration_ms as number);
       const durationSeconds = durationMs ? Math.round(durationMs / 1000) : (call?.duration_seconds || (callData.duration_seconds as number) || 0);
 
-      // Deterministic outcome mapping
+      // Deterministic outcome mapping governed by code and DB, NOT LLM analysis
       let outcome: CallOutcome = 'COMPLETED';
       const reason = (call?.disconnection_reason || (callData.disconnection_reason as string) || '').toLowerCase();
-      if (customData.is_transferred || reason.includes('transfer')) {
+
+      // Check verified transfer / callback from DB
+      const existingCallRecord = await db.getCallByExternalId(externalCallId, tenantId);
+      const callAuditEvents = await db.listAuditEvents(tenantId, 50);
+      const relevantAudit = callAuditEvents.filter(
+        (a) => a.call_id === externalCallId || (existingCallRecord && a.call_id === existingCallRecord.id)
+      );
+
+      const hasConfirmedTransfer = relevantAudit.some(
+        (a) => a.event_type === 'CALL_ESCALATED' && (a.details as Record<string, unknown>)?.provider_confirmed === true
+      );
+
+      const requestsForCall = await db.listRequests(tenantId);
+      const hasDurableCallback = requestsForCall.some(
+        (r) => (r.call_id === externalCallId || (existingCallRecord && r.call_id === existingCallRecord.id)) && r.type === 'CALLBACK_REQUEST'
+      );
+
+      if (hasConfirmedTransfer) {
         outcome = 'TRANSFERRED';
-      } else if (customData.callback_scheduled || reason.includes('callback')) {
+      } else if (hasDurableCallback) {
         outcome = 'CALLBACK_SCHEDULED';
       } else if (reason.includes('miss') || reason.includes('no_answer') || reason.includes('timeout')) {
         outcome = 'MISSED';
@@ -297,6 +315,51 @@ export async function POST(req: NextRequest) {
         outcome = 'FAILED';
       } else if (reason.includes('user_hangup') && durationSeconds < 10) {
         outcome = 'ABANDONED';
+      }
+
+      // Distinguish caller-captured/unverified facts from verified operational facts
+      const rawFacts = ((customData.facts as any) || {}) as Record<string, unknown>;
+      const capturedFacts: Partial<CallFacts> = {
+        route_from: typeof rawFacts.route_from === 'string' ? rawFacts.route_from : undefined,
+        route_to: typeof rawFacts.route_to === 'string' ? rawFacts.route_to : undefined,
+        weight: typeof rawFacts.weight === 'string' ? rawFacts.weight : undefined,
+        quantity: typeof rawFacts.quantity === 'string' ? rawFacts.quantity : undefined,
+        vehicle_type: typeof rawFacts.vehicle_type === 'string' ? rawFacts.vehicle_type : undefined,
+        material_type: typeof rawFacts.material_type === 'string' ? rawFacts.material_type : undefined,
+        pickup_date: typeof rawFacts.pickup_date === 'string' ? rawFacts.pickup_date : undefined,
+        pickup_time: typeof rawFacts.pickup_time === 'string' ? rawFacts.pickup_time : undefined,
+        special_requirements: typeof rawFacts.special_requirements === 'string' ? rawFacts.special_requirements : undefined,
+      };
+
+      // Verified operational facts MUST come from tool execution / DB records
+      const quoteAuditEvent = relevantAudit.find(
+        (a) => a.event_type === 'TOOL_EXECUTION' && a.tool_name === 'get_rate_quote' && (a.details as Record<string, unknown>)?.success === true
+      );
+      if (quoteAuditEvent) {
+        const d = (quoteAuditEvent.details as Record<string, unknown>) || {};
+        if (typeof d.price_inr === 'number') {
+          capturedFacts.quoted_amount = d.price_inr;
+          capturedFacts.quote_type = d.supports_confirmed_quote ? 'CONFIRMED' : 'ESTIMATE';
+        }
+      }
+
+      const trackingAuditEvent = relevantAudit.find(
+        (a) => a.event_type === 'TOOL_EXECUTION' && a.tool_name === 'get_tracking_status' && (a.details as Record<string, unknown>)?.success === true
+      );
+      if (trackingAuditEvent) {
+        const d = (trackingAuditEvent.details as Record<string, unknown>) || {};
+        if (typeof d.tracking_id === 'string') {
+          capturedFacts.tracking_id = d.tracking_id;
+          capturedFacts.tracking_status = typeof d.status === 'string' ? d.status : undefined;
+          capturedFacts.tracking_location = typeof d.current_location === 'string' ? d.current_location : undefined;
+          capturedFacts.verified_eta = typeof d.eta === 'string' ? d.eta : undefined;
+        }
+      }
+
+      if (hasConfirmedTransfer) {
+        capturedFacts.transfer_status = 'TRANSFERRED';
+      } else if (hasDurableCallback) {
+        capturedFacts.transfer_status = 'CALLBACK_SCHEDULED';
       }
 
       // Convert Retell transcript object to domain transcript turns
@@ -322,8 +385,8 @@ export async function POST(req: NextRequest) {
         intent,
         sentiment,
         outcome,
-        facts: (customData.facts as any) || {},
-        is_escalated: Boolean(customData.is_escalated),
+        facts: capturedFacts,
+        is_escalated: hasConfirmedTransfer || Boolean(customData.is_escalated),
         escalation_reason: customData.escalation_reason as string | undefined,
         tenant_id: tenantId,
       });

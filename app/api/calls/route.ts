@@ -29,7 +29,7 @@ export async function GET(req: NextRequest) {
 
     const { intent, outcome, search, limit, offset } = parsedQuery.data;
 
-    const calls = await db.listCalls(authContext.tenantId, {
+    const { calls, total } = await db.listCallsWithCount(authContext.tenantId, {
       intent,
       outcome,
       search,
@@ -37,7 +37,17 @@ export async function GET(req: NextRequest) {
       offset,
     });
 
-    return NextResponse.json({ calls });
+    const parsedLimit = limit || 50;
+    const parsedOffset = offset || 0;
+    return NextResponse.json({
+      calls,
+      pagination: {
+        total,
+        limit: parsedLimit,
+        offset: parsedOffset,
+        has_more: parsedOffset + calls.length < total,
+      },
+    });
   } catch (error) {
     return handleApiError(error, 'api/calls:GET');
   }

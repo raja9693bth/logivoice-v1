@@ -268,12 +268,39 @@ export async function processPostCallPipeline(
       const tenantConfig = await getTenantConfig(tenantId);
       const brand = tenantConfig.brand_name || tenantConfig.business_name || 'LogiVoice';
 
+      let verifiedTrackingStatus: string | undefined;
+      let verifiedTrackingLocation: string | undefined;
+      let verifiedTrackingEta: string | undefined;
+
+      if (payload.facts?.tracking_id) {
+        const trackingRec = await db.getTrackingRecord(payload.facts.tracking_id, tenantId);
+        if (trackingRec && trackingRec.status) {
+          verifiedTrackingStatus = trackingRec.status;
+          verifiedTrackingLocation = trackingRec.current_location;
+          verifiedTrackingEta = trackingRec.eta_if_verified;
+        }
+      }
+
       let templateId: FollowupTemplateId = 'INQUIRY_RECEIVED';
       if (payload.facts?.quoted_amount) {
         templateId = payload.facts.quote_type === 'CONFIRMED' ? 'QUOTE_CONFIRMED' : 'QUOTE_ESTIMATE';
-      } else if (payload.facts?.tracking_id) {
+      } else if (payload.facts?.tracking_id && verifiedTrackingStatus) {
         templateId = 'TRACKING_STATUS';
       }
+
+      // Upsert durable followup record in PENDING status BEFORE external provider send (Prompt Item 36)
+      const followup = await db.createFollowup(
+        {
+          tenant_id: tenantId,
+          call_id: call.id,
+          customer_id: customer?.id,
+          channel: 'WHATSAPP',
+          status: 'PENDING',
+          recipient: contactPhone,
+          template_id: templateId,
+        },
+        tenantId
+      );
 
       const msgResult = await sendControlledFollowup({
         tenantId,
@@ -288,6 +315,9 @@ export async function processPostCallPipeline(
           vehicleType: payload.facts?.vehicle_type,
           quotedAmount: payload.facts?.quoted_amount,
           trackingId: payload.facts?.tracking_id,
+          currentStatus: verifiedTrackingStatus,
+          currentLocation: verifiedTrackingLocation,
+          etaFormatted: verifiedTrackingEta,
           bookingUrl: tenantConfig.booking_url,
         },
       });
@@ -309,16 +339,11 @@ export async function processPostCallPipeline(
         tenantId
       );
 
-      // Persist follow-up record in DB
-      await db.createFollowup(
+      // Update the same durable followup record in DB with final authoritative outcome
+      await db.updateFollowup(
+        followup.id,
         {
-          tenant_id: tenantId,
-          call_id: call.id,
-          customer_id: customer?.id,
-          channel: 'WHATSAPP',
           status: followupStatus as any,
-          recipient: contactPhone,
-          template_id: templateId,
           message_content: msgResult.renderedText,
           provider_message_id: msgResult.providerMessageId,
           sent_at: msgResult.success ? new Date().toISOString() : undefined,

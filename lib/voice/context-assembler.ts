@@ -40,7 +40,15 @@ export async function assembleVoiceRuntimeContext(params: ContextAssemblyParams)
     }
   }
 
-  // 3. Layered System Prompt
+  // 3. Layered System Prompt incorporating runtime settings
+  const personaInstruction = config.voice_persona
+    ? `Persona & Acoustic Tone: ${config.voice_persona}`
+    : 'Persona: Professional, respectful, and efficient logistics coordinator.';
+
+  const languageInstruction = config.allow_language_switching
+    ? `Primary language: ${config.primary_language}. Secondary: ${config.secondary_language}. Mirror the caller's language naturally across Hindi, Hinglish, and Indian English.`
+    : `Primary language: ${config.primary_language}. Strictly maintain ${config.primary_language} throughout the conversation. Do not switch languages.`;
+
   const systemPrompt = `
 You are LogiVoice, the automated inbound voice operations assistant for ${config.brand_name}.
 You handle first-line customer and fleet inquiries.
@@ -49,7 +57,8 @@ Approved disclosure: "${config.ai_disclosure_wording}"
 OPERATING BOUNDARIES:
 - Primary hubs: ${config.primary_operating_cities.join(', ')}
 - Operating hours: ${config.business_hours.start} to ${config.business_hours.end} (${config.business_hours.days})
-- Language: Professional Hindi, Hinglish, or Indian English. Mirror the caller's language naturally.
+- ${languageInstruction}
+- ${personaInstruction}
 - Keep responses concise (1-2 sentences). Never give long monologues.
 - Confirm important commercial details (route, truck size, rate) before committing an action.
 - "LLM reasons. CODE GOVERNS." Never invent rates, tracking statuses, or booking promises. Use your authorized tools.

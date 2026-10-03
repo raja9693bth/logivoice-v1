@@ -43,9 +43,21 @@ export function BentoCard({
   return (
     <div
       onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={
+        onClick
+          ? (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onClick();
+              }
+            }
+          : undefined
+      }
       className={cn(
         'bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800/80 rounded-xl p-5 flex flex-col justify-between hover:border-slate-300 dark:hover:border-slate-700/80 transition-all group shadow-xs min-w-0 max-w-full',
-        onClick && 'cursor-pointer hover:bg-slate-50/80 dark:hover:bg-slate-800/40',
+        onClick && 'cursor-pointer hover:bg-slate-50/80 dark:hover:bg-slate-800/40 focus:outline-hidden focus:ring-2 focus:ring-sky-500',
         className
       )}
     >

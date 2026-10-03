@@ -129,9 +129,12 @@ export async function syncCallToGoogleSheets(
   const claimResult = await db.claimSideEffect(tenantId, claimKey, 'SHEETS_SYNC', call.id);
 
   if (!claimResult.claimed) {
+    const claim = claimResult.claim;
+    const businessStatus = (claim?.result as Record<string, unknown> | undefined)?.business_status;
+    const isSynced = businessStatus === 'SYNCED' || claimResult.status === 'SUCCEEDED';
     return {
-      synced: claimResult.status === 'SUCCEEDED' || claimResult.status === 'COMPLETED',
-      status: 'SKIPPED',
+      synced: isSynced,
+      status: isSynced ? 'SYNCED' : 'SKIPPED',
       provider: 'DURABLE_CLAIM_GUARD',
       spreadsheet_id: spreadsheetId,
       worksheet_name: targetWorksheet,
@@ -174,7 +177,7 @@ export async function syncCallToGoogleSheets(
   }
 
   try {
-    // 4. Validate that the target worksheet tab explicitly exists (Do NOT silently pick first sheet)
+    // 4. Validate that the target worksheet tab explicitly exists (Strict: Never silently fallback to another sheet)
     const metaRes = await fetch(
       `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=sheets.properties.title`,
       {
@@ -196,26 +199,21 @@ export async function syncCallToGoogleSheets(
     const metaData = await metaRes.json();
     const existingSheetTitles: string[] = (metaData.sheets || []).map((s: any) => s.properties?.title).filter(Boolean);
 
-    let activeTab = targetWorksheet;
     if (!existingSheetTitles.includes(targetWorksheet)) {
-      // If Sheet1 exists and targetWorksheet was default LogiVoice_Calls, use Sheet1 gracefully
-      if (targetWorksheet === 'LogiVoice_Calls' && existingSheetTitles.includes('Sheet1')) {
-        activeTab = 'Sheet1';
-      } else {
-        await db.failSideEffect(
-          tenantId,
-          claimKey,
-          `Configured worksheet '${targetWorksheet}' does not exist in spreadsheet. Available sheets: ${existingSheetTitles.join(', ')}`,
-          false
-        );
-        return {
-          synced: false,
-          status: 'FAILED',
-          provider: 'GOOGLE_SHEETS_API_V4',
-          error: `Target worksheet '${targetWorksheet}' not found in spreadsheet.`,
-        };
-      }
+      await db.failSideEffect(
+        tenantId,
+        claimKey,
+        `Configured worksheet '${targetWorksheet}' does not exist in spreadsheet. Available sheets: ${existingSheetTitles.join(', ')}`,
+        false
+      );
+      return {
+        synced: false,
+        status: 'FAILED',
+        provider: 'GOOGLE_SHEETS_API_V4',
+        error: `Target worksheet '${targetWorksheet}' not found in spreadsheet.`,
+      };
     }
+    const activeTab = targetWorksheet;
 
     // 5. Append row with RAW input value option
     const appendRes = await fetch(
@@ -271,6 +269,7 @@ export async function syncCallToGoogleSheets(
 
     // 6. Complete durable claim
     await db.completeSideEffect(tenantId, claimKey, {
+      business_status: 'SYNCED',
       updatedRange,
       rowIndex,
       worksheet: activeTab,

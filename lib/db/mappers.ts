@@ -157,7 +157,7 @@ export interface AuditEventsDbRow {
   tenant_id: string;
   call_id: string | null;
   event_type: string;
-  actor_type: 'AI_AGENT' | 'DISPATCHER' | 'ADMIN' | 'OPS_MANAGER' | 'SYSTEM' | 'WEBHOOK';
+  actor_type: 'AI_AGENT' | 'DISPATCHER' | 'ADMIN' | 'OPS_MANAGER' | 'SYSTEM' | 'WEBHOOK' | 'USER';
   actor_id: string;
   tool_name: string | null;
   severity: AuditSeverity;
@@ -173,6 +173,8 @@ export interface KnowledgeItemsDbRow {
   content: string;
   status: KnowledgeItem['status'];
   version: string;
+  approved_by?: string | null;
+  approved_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -437,8 +439,10 @@ export function domainKnowledgeToDbRow(
     category: kb.category || 'OPERATIONAL_FAQ',
     title: kb.title || '',
     content: kb.content || '',
-    status: kb.status || 'APPROVED',
+    status: kb.status || 'DRAFT',
     version: kb.version || 'v1.0',
+    approved_by: kb.approved_by || null,
+    approved_at: kb.approved_at || null,
     created_at: now,
     updated_at: kb.last_updated ? new Date(kb.last_updated).toISOString() : now,
   };
@@ -458,6 +462,8 @@ export function dbKnowledgeToDomain(row: KnowledgeItemsDbRow): KnowledgeItem {
     status: row.status,
     last_updated: row.updated_at ? row.updated_at.split('T')[0] : new Date().toISOString().split('T')[0],
     version: row.version,
+    approved_by: row.approved_by || undefined,
+    approved_at: row.approved_at || undefined,
   };
 }
 

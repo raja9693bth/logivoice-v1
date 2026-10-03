@@ -8,8 +8,23 @@ on:
 
 jobs:
   validate:
-    name: Lint, Typecheck, Test & Build
+    name: Lint, Typecheck, Test, DB Integration & Build
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Checkout repository
@@ -30,8 +45,13 @@ jobs:
       - name: Run TypeScript typecheck
         run: npm run typecheck
 
-      - name: Run automated test suite
-        run: npm test
+      - name: Run automated test suite with coverage
+        run: npm run test:coverage
+
+      - name: Run database migration & integration tests
+        run: npm run test:integration
+        env:
+          DATABASE_URL: postgresql://postgres:postgrespassword@localhost:5432/postgres
 
       - name: Verify production build
         run: npm run build

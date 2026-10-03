@@ -44,16 +44,24 @@ export async function executeGetTrackingStatus(
       const config = await db.getClientConfig(tenantId);
       const isBearerAllowed = (config.tracking_config as Record<string, unknown>)?.allow_bearer_lookup === true;
 
-      if (!isBearerAllowed && input.caller_phone) {
+      if (!isBearerAllowed) {
+        if (!input.caller_phone) {
+          return {
+            status: 'IDENTITY_REQUIRED',
+            tracking_reference: ref,
+            message: `Consignment '${ref}' requires caller identification. For security, tracking details cannot be shared anonymously. Please provide your registered phone number.`,
+          };
+        }
+
         const callerPhoneNorm = normalizePhoneNumber(input.caller_phone);
         const caller = await db.getCustomerByPhone(callerPhoneNorm, tenantId);
 
-        // If caller identity exists and does not match the consignment owner, fail closed
-        if (caller && caller.id !== record.customer_id) {
+        // If caller cannot be matched to an authenticated customer or does not match owner: fail closed
+        if (!caller || caller.id !== record.customer_id) {
           return {
             status: 'UNAUTHORIZED_ACCESS',
             tracking_reference: ref,
-            message: `Consignment '${ref}' is registered to another account. For security, tracking details cannot be shared. Please contact dispatch supervisor.`,
+            message: `Consignment '${ref}' is registered to another account or caller identity could not be verified. For security, tracking details cannot be shared. Please contact dispatch supervisor.`,
           };
         }
       }

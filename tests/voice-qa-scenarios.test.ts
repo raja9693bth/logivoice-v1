@@ -157,6 +157,7 @@ describe('Voice QA Evaluation Scenarios (32 Scenarios)', () => {
     };
 
     const res = await invokeTool('transfer_to_human', {
+      call_id: 'CA12345678901234567890123456789012',
       reason: 'Complex rate negotiation',
       caller_name: 'Amit Patel',
       caller_phone: '+91 98222 33344',

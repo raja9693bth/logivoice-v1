@@ -181,12 +181,12 @@ export async function getAuthContext(
   const authHeader = headers.get('authorization');
   const apiKey = headers.get('x-api-key');
 
-  // 1. Server-to-Server Retell API Key Verification
-  // Strictly bound to VOICE_GATEWAY role and DEFAULT_TENANT_ID; ignores any header override attempts.
-  const serverKey = process.env.RETELL_API_KEY;
-  if (apiKey && serverKey && apiKey === serverKey) {
+  // 1. Dedicated Tool Secret Verification (Never reuses master RETELL_API_KEY as generic bearer)
+  const dedicatedToolSecret = process.env.RETELL_TOOL_SECRET;
+  const toolSecretHeader = headers.get('x-tool-secret');
+  if (toolSecretHeader && dedicatedToolSecret && toolSecretHeader === dedicatedToolSecret) {
     return {
-      userId: 'voice-api-caller',
+      userId: 'voice-tool-caller',
       tenantId: DEFAULT_TENANT_ID,
       role: 'VOICE_GATEWAY',
       isAuthenticated: true,

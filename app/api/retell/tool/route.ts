@@ -103,10 +103,24 @@ export async function POST(req: NextRequest) {
     const callId = body.call_id || body.callId || args.call_id;
     const agentId = body.agent_id || args.agent_id;
 
-    // Validate agent ID mapping if configured
+    // Validate agent ID mapping in production: fail closed on missing config, missing agent, or mismatch
     const configuredAgentId = process.env.RETELL_AGENT_ID;
     if (process.env.NODE_ENV === 'production') {
-      if (configuredAgentId && agentId && agentId !== configuredAgentId) {
+      if (!configuredAgentId) {
+        logError(correlation, 'RETELL_AGENT_CONFIG_MISSING', {});
+        return NextResponse.json(
+          { error: 'Production configuration error: RETELL_AGENT_ID is unconfigured', correlation_id: correlation.correlationId },
+          { status: 500 }
+        );
+      }
+      if (!agentId) {
+        logError(correlation, 'RETELL_AGENT_ID_MISSING', {});
+        return NextResponse.json(
+          { error: 'Unauthorized: Agent identifier is required in production requests', correlation_id: correlation.correlationId },
+          { status: 401 }
+        );
+      }
+      if (agentId !== configuredAgentId) {
         logError(correlation, 'RETELL_AGENT_MISMATCH', { agentId, configuredAgentId });
         return NextResponse.json(
           { error: 'Unauthorized: Agent identifier mismatch', correlation_id: correlation.correlationId },

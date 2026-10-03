@@ -17,10 +17,35 @@ export async function updateTenantConfig(
   return await db.updateClientConfig(tenantId, updates);
 }
 
-export function isWithinBusinessHours(config: ClientConfig, date: Date = new Date()): boolean {
+export type BusinessHoursStatus = 'OPEN' | 'CLOSED' | 'CONFIGURATION_ERROR';
+
+export interface BusinessHoursEvaluation {
+  isOpen: boolean;
+  status: BusinessHoursStatus;
+  error?: string;
+}
+
+export function evaluateBusinessHours(
+  config: ClientConfig,
+  date: Date = new Date()
+): BusinessHoursEvaluation {
   try {
-    const hours = config.business_hours;
-    if (!hours?.start || !hours?.end) return true;
+    const hours = config?.business_hours;
+    if (!hours?.start || !hours?.end) {
+      return {
+        isOpen: false,
+        status: 'CONFIGURATION_ERROR',
+        error: 'Business hours configuration missing or incomplete.',
+      };
+    }
+
+    if (!/^\d{2}:\d{2}$/.test(hours.start) || !/^\d{2}:\d{2}$/.test(hours.end)) {
+      return {
+        isOpen: false,
+        status: 'CONFIGURATION_ERROR',
+        error: `Malformed business hours format ('${hours.start}' - '${hours.end}'). Expected HH:MM.`,
+      };
+    }
 
     // Convert date to config timezone (e.g. Asia/Kolkata)
     const timeStr = date.toLocaleTimeString('en-GB', {
@@ -30,8 +55,20 @@ export function isWithinBusinessHours(config: ClientConfig, date: Date = new Dat
       minute: '2-digit',
     });
 
-    return timeStr >= hours.start && timeStr <= hours.end;
-  } catch {
-    return true; // fail open for operational continuity
+    const isOpen = timeStr >= hours.start && timeStr <= hours.end;
+    return {
+      isOpen,
+      status: isOpen ? 'OPEN' : 'CLOSED',
+    };
+  } catch (err) {
+    return {
+      isOpen: false,
+      status: 'CONFIGURATION_ERROR',
+      error: err instanceof Error ? err.message : 'Business hours evaluation exception',
+    };
   }
+}
+
+export function isWithinBusinessHours(config: ClientConfig, date: Date = new Date()): boolean {
+  return evaluateBusinessHours(config, date).isOpen;
 }

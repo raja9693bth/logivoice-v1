@@ -55,45 +55,102 @@ export async function executeProviderCallTransfer(
   const timeoutId = setTimeout(() => controller.abort(), 8000);
 
   try {
-    const authHeader = `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}`;
-    const callSid = req.callId && req.callId.startsWith('CA') ? req.callId : 'current';
-    const providerUrl = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Calls/${encodeURIComponent(callSid)}.json`;
+    let providerName = 'TWILIO_REST_GATEWAY';
+    let providerTransferId: string | undefined;
 
-    const res = await fetch(providerUrl, {
-      method: 'POST',
-      headers: {
-        Authorization: authHeader,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({
-        To: req.targetPhone,
-        Twiml: `<Response><Dial callerId="${req.callerPhone || ''}">${req.targetPhone}</Dial></Response>`,
-      }).toString(),
-      signal: controller.signal,
-    });
+    // A. Twilio REST Gateway (Requires genuine Twilio CallSid starting with CA)
+    const isTwilioCallSid = Boolean(req.callId && /^CA[0-9a-fA-F]{32}$/.test(req.callId));
 
-    clearTimeout(timeoutId);
+    if (isTwilioCallSid && accountSid && authToken) {
+      providerName = 'TWILIO_REST_GATEWAY';
+      const authHeader = `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}`;
+      const providerUrl = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Calls/${encodeURIComponent(req.callId!)}.json`;
 
-    if (!res.ok) {
-      let errDetails = `HTTP ${res.status}`;
-      try {
-        const errJson = await res.json();
-        errDetails = errJson.message || errJson.error_message || errDetails;
-      } catch {
-        // Fallback to HTTP status
+      const res = await fetch(providerUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: authHeader,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          To: req.targetPhone,
+          Twiml: `<Response><Dial callerId="${req.callerPhone || ''}">${req.targetPhone}</Dial></Response>`,
+        }).toString(),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!res.ok) {
+        let errDetails = `HTTP ${res.status}`;
+        try {
+          const errJson = await res.json();
+          errDetails = errJson.message || errJson.error_message || errDetails;
+        } catch {
+          // Fallback to HTTP status
+        }
+
+        return {
+          success: false,
+          status: 'PROVIDER_REJECTED',
+          provider: providerName,
+          error: `Telephony provider rejected transfer: ${errDetails}`,
+          message: `Telephony provider rejected transfer to ${req.targetRole} (${req.targetPhone}).`,
+        };
       }
 
+      const data = await res.json();
+      providerTransferId = data.sid || data.id;
+    } else if (process.env.RETELL_API_KEY && req.callId) {
+      // B. Retell Native Call Transfer (When Retell owns the active call context)
+      providerName = 'RETELL_TELEPHONY_BRIDGE';
+      const retellUrl = 'https://api.retellai.com/v2/transfer-call';
+
+      const res = await fetch(retellUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.RETELL_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          call_id: req.callId,
+          transfer_to: req.targetPhone,
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!res.ok) {
+        let errDetails = `HTTP ${res.status}`;
+        try {
+          const errJson = await res.json();
+          errDetails = errJson.message || errDetails;
+        } catch {
+          // Fallback to HTTP status
+        }
+
+        return {
+          success: false,
+          status: 'PROVIDER_REJECTED',
+          provider: providerName,
+          error: `Retell transfer bridge rejected transfer: ${errDetails}`,
+          message: `Retell transfer bridge rejected transfer to ${req.targetRole} (${req.targetPhone}).`,
+        };
+      }
+
+      const data = await res.json();
+      providerTransferId = data.call_id || req.callId;
+    } else {
+      clearTimeout(timeoutId);
       return {
         success: false,
-        status: 'PROVIDER_REJECTED',
-        provider: 'TWILIO_REST_GATEWAY',
-        error: `Telephony provider rejected transfer: ${errDetails}`,
-        message: `Telephony provider rejected transfer to ${req.targetRole} (${req.targetPhone}).`,
+        status: 'PROVIDER_ERROR',
+        provider: 'TELEPHONY_GATEWAY',
+        error: 'Invalid telephony call identifier or unconfigured provider credentials. "current" is not a valid call identifier.',
+        message: 'No active provider telephony context found for call transfer.',
       };
     }
-
-    const data = await res.json();
-    const providerTransferId = data.sid || data.id;
 
     if (!providerTransferId) {
       return {

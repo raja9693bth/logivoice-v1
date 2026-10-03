@@ -3,6 +3,8 @@
  * Generates and tracks correlation IDs, execution latencies, and structured logs.
  */
 
+import crypto from 'crypto';
+
 export interface CorrelationContext {
   correlationId: string;
   tenantId: string;
@@ -17,7 +19,7 @@ export function createCorrelationContext(
   actor: string = 'VOICE_GATEWAY'
 ): CorrelationContext {
   return {
-    correlationId: `corr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    correlationId: `corr-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
     tenantId,
     callId,
     actor,

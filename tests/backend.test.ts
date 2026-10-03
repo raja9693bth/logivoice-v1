@@ -1,3 +1,5 @@
+import { describe, it } from 'node:test';
+import assertStrict from 'node:assert/strict';
 /**
  * LOGIVOICE V1 — COMPREHENSIVE FORENSIC AUTOMATED TEST SUITE
  * 
@@ -60,21 +62,12 @@ function assert(condition: boolean, testName: string, failureDetails?: unknown) 
     console.error(`  ✗ FAIL: ${testName}`);
     if (failureDetails) console.error('    Details:', failureDetails);
     failedTests++;
+    assertStrict.ok(condition, `${testName}: ${JSON.stringify(failureDetails || '')}`);
   }
 }
-
-async function runAllTests() {
-  console.log('\n==================================================');
-  console.log('LOGIVOICE V1 — FORENSIC BACKEND AUTOMATED TEST SUITE');
-  console.log('==================================================\n');
-
+describe('LOGIVOICE V1 — FORENSIC BACKEND AUTOMATED TEST SUITE', () => {
   const auth = getInternalSystemContext(DEFAULT_TENANT_ID);
-
-  // =========================================================================
-  // 1. RATE ENGINE & QUOTE SEMANTICS (CRITICAL FIX A)
-  // =========================================================================
-  console.log('\n--- GROUP 1: Rate Engine & Quote Semantics ---');
-  {
+  it('GROUP 1: Rate Engine & Quote Semantics', async () => {
     // A: Standard Tariff Matrix Quote -> ESTIMATE (Even with full inputs)
     const standardQuote = await dispatchTool(
       {
@@ -140,13 +133,9 @@ async function runAllTests() {
       auth
     );
     assert(!missingFields.success, 'Rate engine schema rejects missing destination');
-  }
+  });
 
-  // =========================================================================
-  // 2. RETELL WEBHOOK & TOOL SECURITY (CRITICAL FIX B + OFFICIAL RETELL CONTRACT)
-  // =========================================================================
-  console.log('\n--- GROUP 2: Retell Cryptographic Signature & Tool Verification ---');
-  {
+  it('GROUP 2: Retell Cryptographic Signature & Tool Verification', async () => {
     const secretKey = 'test-retell-secret-key-12345';
     process.env.RETELL_API_KEY = secretKey;
 
@@ -197,13 +186,9 @@ async function runAllTests() {
 
     const isUndefined = await verifyRetellWebhookSignature(rawPayload, undefined as any);
     assert(!isUndefined, 'Undefined signature header fails closed');
-  }
+  });
 
-  // =========================================================================
-  // 3. API AUTHORIZATION & RBAC (CRITICAL FIX C)
-  // =========================================================================
-  console.log('\n--- GROUP 3: API Authorization & RBAC Guards ---');
-  {
+  it('GROUP 3: API Authorization & RBAC Guards', async () => {
     // Unauthenticated context throws 401
     const unauthContext = {
       userId: 'anonymous',
@@ -250,13 +235,9 @@ async function runAllTests() {
       }
     }
     assert(crossTenantBlocked, 'Cross-tenant resource access rejected with HTTP 403');
-  }
+  });
 
-  // =========================================================================
-  // 4. PRODUCTION DATABASE FALLBACK PROTECTION (CRITICAL FIX D)
-  // =========================================================================
-  console.log('\n--- GROUP 4: Production Database Fallback Protection ---');
-  {
+  it('GROUP 4: Production Database Fallback Protection', async () => {
     // Development/Test query succeeds
     const devCalls = await db.listCalls(DEFAULT_TENANT_ID);
     assert(devCalls.length > 0, 'Database access in development/test returns valid dataset');
@@ -277,13 +258,9 @@ async function runAllTests() {
       dbErrorCaught,
       'CRITICAL: Production DB failure throws explicit DatabaseUnavailableError (never silently falls back to mock)'
     );
-  }
+  });
 
-  // =========================================================================
-  // 5. PROVIDER TRUTHFULNESS & EXPLICIT STATES (CRITICAL FIX E)
-  // =========================================================================
-  console.log('\n--- GROUP 5: Provider Truthfulness & Explicit States ---');
-  {
+  it('GROUP 5: Provider Truthfulness & Explicit States', async () => {
     const sampleCall = (await db.listCalls(DEFAULT_TENANT_ID))[0];
 
     // Google Sheets: Unconfigured mode returns UNCONFIGURED (not false SYNCED)
@@ -342,13 +319,9 @@ async function runAllTests() {
     // Restore environment
     (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
     process.env.ENABLE_MOCK_INTEGRATIONS = prevMock;
-  }
+  });
 
-  // =========================================================================
-  // 6. CUSTOMER LOOKUP
-  // =========================================================================
-  console.log('\n--- GROUP 6: Customer Lookup ---');
-  {
+  it('GROUP 6: Customer Lookup', async () => {
     const found = await dispatchTool(
       { tool_name: 'lookup_customer', arguments: { phone: '+91 98201 55432' } },
       auth
@@ -361,13 +334,9 @@ async function runAllTests() {
       auth
     );
     assert(notFound.status === 'NOT_FOUND', 'Unknown phone returns NOT_FOUND without hallucination');
-  }
+  });
 
-  // =========================================================================
-  // 7. CONSIGNMENT TRACKING
-  // =========================================================================
-  console.log('\n--- GROUP 7: Consignment Tracking ---');
-  {
+  it('GROUP 7: Consignment Tracking', async () => {
     const tracking = await dispatchTool(
       { tool_name: 'get_tracking_status', arguments: { tracking_reference: 'LR-99214' } },
       auth
@@ -387,13 +356,9 @@ async function runAllTests() {
       auth
     );
     assert(delayedLR.result.current_status === 'DELAYED', 'Delayed consignment reflects DELAYED status');
-  }
+  });
 
-  // =========================================================================
-  // 8. BOOKING INTAKE & IDEMPOTENCY
-  // =========================================================================
-  console.log('\n--- GROUP 8: Booking Intake & Idempotency ---');
-  {
+  it('GROUP 8: Booking Intake & Idempotency', async () => {
     const bkgKey = `bkg-test-${Date.now()}`;
     const bkgConfirmed = await dispatchTool(
       {
@@ -459,13 +424,9 @@ async function runAllTests() {
       bkgUnconfirmed.status === 'PENDING_HUMAN_CONFIRMATION',
       'Unconfirmed booking intake marked PENDING_HUMAN_CONFIRMATION'
     );
-  }
+  });
 
-  // =========================================================================
-  // 9. SUPPORT TICKETS & HUMAN ESCALATION
-  // =========================================================================
-  console.log('\n--- GROUP 9: Support Tickets & Human Escalation ---');
-  {
+  it('GROUP 9: Support Tickets & Human Escalation', async () => {
     const ticket = await dispatchTool(
       {
         tool_name: 'create_support_ticket',
@@ -517,13 +478,9 @@ async function runAllTests() {
       transferWithPhone.status === 'CALLBACK_SCHEDULED',
       'Human escalation with caller phone schedules urgent callback when live telephony provider disabled'
     );
-  }
+  });
 
-  // =========================================================================
-  // 10. KNOWLEDGE RETRIEVAL & CONTEXT ASSEMBLY
-  // =========================================================================
-  console.log('\n--- GROUP 10: Knowledge Retrieval & Tenant Isolation ---');
-  {
+  it('GROUP 10: Knowledge Retrieval & Tenant Isolation', async () => {
     const rateKb = await retrieveRelevantKnowledge('RATE_QUOTE', DEFAULT_TENANT_ID);
     assert(rateKb.some((k) => k.category === 'RATE_POLICY'), 'RATE_QUOTE retrieves RATE_POLICY');
     assert(!rateKb.some((k) => k.category === 'BOOKING_RULES'), 'RATE_QUOTE excludes BOOKING_RULES (scoped prompt)');
@@ -541,13 +498,9 @@ async function runAllTests() {
       probableIntent: 'RATE_QUOTE',
     });
     assert(assembled.systemPrompt.length < 4000, 'Voice context assembler maintains compact system prompt (<4000 chars)');
-  }
+  });
 
-  // =========================================================================
-  // 11. DETERMINISTIC LEAD TEMPERATURE ENGINE
-  // =========================================================================
-  console.log('\n--- GROUP 11: Deterministic Lead Temperature Engine ---');
-  {
+  it('GROUP 11: Deterministic Lead Temperature Engine', async () => {
     const hot1 = computeLeadTemperature({
       intent: 'BOOKING',
       facts: { route_from: 'Delhi', route_to: 'Mumbai', vehicle_type: '32ft MXL', weight: '16 tons' },
@@ -571,13 +524,9 @@ async function runAllTests() {
 
     const review1 = computeLeadTemperature({ intent: 'COMPLAINT', sentiment: 'ANGRY' });
     assert(review1 === 'REVIEW', 'Angry complaint classified as REVIEW');
-  }
+  });
 
-  // =========================================================================
-  // 12. POST-CALL PIPELINE & IDEMPOTENCY
-  // =========================================================================
-  console.log('\n--- GROUP 12: Post-Call Pipeline & Idempotency ---');
-  {
+  it('GROUP 12: Post-Call Pipeline & Idempotency', async () => {
     const callExtId = `post-call-test-${Date.now()}`;
     const pipelineRes = await processPostCallPipeline({
       external_call_id: callExtId,
@@ -606,13 +555,9 @@ async function runAllTests() {
       dupRes.sheets_status === 'SKIPPED_DUPLICATE',
       'Duplicate webhook event recognized and skips duplicate side effects'
     );
-  }
+  });
 
-  // =========================================================================
-  // 13. ADVANCED FORENSIC CHECKS & NEGATIVE TESTS
-  // =========================================================================
-  console.log('\n--- GROUP 13: Advanced Forensic Checks & Negative Tests ---');
-  {
+  it('GROUP 13: Advanced Forensic Checks & Negative Tests', async () => {
     // A: Rate Precedence & Weight Boundary Selection
     const exactRate = await db.findApprovedRate(
       { origin: 'Delhi', destination: 'Mumbai', vehicleType: '32ft MXL', weightTons: 16 },
@@ -669,15 +614,9 @@ async function runAllTests() {
     assert(faultPipeline.success, 'Post-call pipeline persists call record even when secondary sheets integration is unconfigured');
     const persistedCall = await db.getCallByExternalId(faultCallId, DEFAULT_TENANT_ID);
     assert(Boolean(persistedCall), 'Authoritative call record verified in primary store despite unconfigured downstream integrations');
-  }
+  });
 
-  // =========================================================================
-  // 14. THE 10 MANDATORY END-TO-END JOURNEYS (J1 TO J10)
-  // =========================================================================
-  console.log('\n==================================================');
-  console.log('--- EXECUTING THE 10 MANDATORY END-TO-END JOURNEYS ---');
-  console.log('==================================================');
-
+  it('GROUP 14: The 10 Mandatory End-to-End Journeys (J1 to J10)', async () => {
   // J1: RATE INQUIRY
   console.log('\nJOURNEY 1 (J1) — Rate Inquiry (Delhi -> Mumbai):');
   {
@@ -953,14 +892,9 @@ async function runAllTests() {
     assert(Boolean(updated && updated.status === 'CONFIRMED'), 'J16: Request status transitioned to CONFIRMED');
     assert(Boolean(updated && updated.resolution_notes?.includes('capacity check')), 'J16: Resolution notes persisted');
   }
+});
 
-  // =========================================================================
-  // PHASE 31 — COMPLETE 26-POINT REGRESSION SUITE
-  // =========================================================================
-  console.log('\n==================================================');
-  console.log('--- PHASE 31: COMPLETE 26-POINT REGRESSION SUITE ---');
-  console.log('==================================================');
-
+  it('GROUP 15: Client-Delivery Regression & Integrity Hardening Suite', async () => {
   // 1. UUID database inserts
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const testCustomer = await db.createCustomer({ tenant_id: DEFAULT_TENANT_ID, phone: '+91 91234 56789', name: 'UUID Test Customer' }, DEFAULT_TENANT_ID);
@@ -1627,17 +1561,5 @@ async function runAllTests() {
   await db.updateClientConfig(DEFAULT_TENANT_ID, { business_type: 'National Express Freight & FTL Operator' });
   const cfgWithType = await db.getClientConfig(DEFAULT_TENANT_ID);
   assert(cfgWithType.business_type === 'National Express Freight & FTL Operator', 'Section 58.35: ClientConfig persists business_type across reloads');
-
-  console.log('\n==================================================');
-  console.log(`TEST RUN COMPLETE: ${passedTests} PASSED, ${failedTests} FAILED`);
-  console.log('==================================================\n');
-
-  if (failedTests > 0) {
-    process.exit(1);
-  }
-}
-
-runAllTests().catch((err) => {
-  console.error('Test run failed with fatal error:', err);
-  process.exit(1);
+  });
 });

@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthContext, requireRole, AuthorizationError } from '@/lib/auth/context';
+import { getAuthContext, requireRole } from '@/lib/auth/context';
 import { db } from '@/lib/db';
 import { RequestStatus, RequestPriority, RequestType } from '@/types/logivoice';
 import { CreateRequestApiSchema, UpdateRequestApiSchema, ListRequestsQuerySchema } from '@/lib/schemas/api';
+import { handleApiError } from '@/lib/api/error-handler';
 
 export async function GET(req: NextRequest) {
   try {
@@ -40,13 +41,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ requests });
   } catch (error) {
-    if (error instanceof AuthorizationError) {
-      return NextResponse.json({ error: error.message }, { status: error.statusCode });
-    }
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Internal Server Error' },
-      { status: 500 }
-    );
+    return handleApiError(error, 'api/requests:GET');
   }
 }
 
@@ -98,13 +93,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ request: newRequest }, { status: 201 });
   } catch (error) {
-    if (error instanceof AuthorizationError) {
-      return NextResponse.json({ error: error.message }, { status: error.statusCode });
-    }
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Internal Server Error' },
-      { status: 500 }
-    );
+    return handleApiError(error, 'api/requests:POST');
   }
 }
 
@@ -136,12 +125,6 @@ export async function PATCH(req: NextRequest) {
 
     return NextResponse.json({ request: updated });
   } catch (error) {
-    if (error instanceof AuthorizationError) {
-      return NextResponse.json({ error: error.message }, { status: error.statusCode });
-    }
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Internal Server Error' },
-      { status: 500 }
-    );
+    return handleApiError(error, 'api/requests:PATCH');
   }
 }

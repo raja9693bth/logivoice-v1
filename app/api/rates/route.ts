@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthContext, requireRole, AuthorizationError } from '@/lib/auth/context';
+import { getAuthContext, requireRole } from '@/lib/auth/context';
 import { db } from '@/lib/db';
 import { CreateRateCardApiSchema, UpdateRateCardApiSchema, GetRateQuoteQuerySchema, BulkCreateRateCardsApiSchema } from '@/lib/schemas/api';
+import { handleApiError } from '@/lib/api/error-handler';
 
 export async function GET(req: NextRequest) {
   try {
@@ -61,13 +62,7 @@ export async function GET(req: NextRequest) {
     const rateCards = await db.listRateCards(authContext.tenantId, { status, search, limit, offset });
     return NextResponse.json({ rate_cards: rateCards });
   } catch (error) {
-    if (error instanceof AuthorizationError) {
-      return NextResponse.json({ error: error.message }, { status: error.statusCode });
-    }
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Internal Server Error' },
-      { status: 500 }
-    );
+    return handleApiError(error, 'api/rates:GET');
   }
 }
 
@@ -166,13 +161,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ rate_card: newCard }, { status: 201 });
   } catch (error) {
-    if (error instanceof AuthorizationError) {
-      return NextResponse.json({ error: error.message }, { status: error.statusCode });
-    }
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Internal Server Error' },
-      { status: 500 }
-    );
+    return handleApiError(error, 'api/rates:POST');
   }
 }
 
@@ -204,12 +193,6 @@ export async function PUT(req: NextRequest) {
 
     return NextResponse.json({ rate_card: updated });
   } catch (error) {
-    if (error instanceof AuthorizationError) {
-      return NextResponse.json({ error: error.message }, { status: error.statusCode });
-    }
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Internal Server Error' },
-      { status: 500 }
-    );
+    return handleApiError(error, 'api/rates:PUT');
   }
 }

@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthContext, requireRole, AuthorizationError } from '@/lib/auth/context';
+import { getAuthContext, requireRole } from '@/lib/auth/context';
 import { db } from '@/lib/db';
 import { UpdateCallApiSchema } from '@/lib/schemas/api';
 import { Call } from '@/types/logivoice';
+import { handleApiError } from '@/lib/api/error-handler';
 
 export async function GET(
   req: NextRequest,
@@ -20,13 +21,7 @@ export async function GET(
 
     return NextResponse.json({ call });
   } catch (error) {
-    if (error instanceof AuthorizationError) {
-      return NextResponse.json({ error: error.message }, { status: error.statusCode });
-    }
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Internal Server Error' },
-      { status: 500 }
-    );
+    return handleApiError(error, 'api/calls/[id]:GET');
   }
 }
 
@@ -68,12 +63,6 @@ export async function PATCH(
 
     return NextResponse.json({ call: updated });
   } catch (error) {
-    if (error instanceof AuthorizationError) {
-      return NextResponse.json({ error: error.message }, { status: error.statusCode });
-    }
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Internal Server Error' },
-      { status: 500 }
-    );
+    return handleApiError(error, 'api/calls/[id]:PATCH');
   }
 }

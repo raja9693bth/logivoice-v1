@@ -96,6 +96,49 @@ export function getInternalSystemContext(tenantId: string = DEFAULT_TENANT_ID): 
   };
 }
 
+function resolveUserMetadataContext(
+  user: { id: string; app_metadata?: Record<string, unknown> },
+  isProduction: boolean,
+  sourceLabel: string
+): AuthContext {
+  const metadataTenant = user.app_metadata?.tenant_id as string | undefined;
+  const metadataRole = user.app_metadata?.role as unknown;
+
+  if (!isValidUserRole(metadataRole)) {
+    console.warn(`[AuthContext] Rejected ${sourceLabel} with invalid or forbidden role metadata:`, metadataRole);
+    return {
+      userId: user.id,
+      tenantId: '',
+      role: 'DISPATCHER',
+      isAuthenticated: false,
+      source: 'UNAUTHENTICATED',
+    };
+  }
+
+  if (isProduction || metadataTenant) {
+    if (!isValidTenantId(metadataTenant)) {
+      console.warn(`[AuthContext] Rejected ${sourceLabel} with invalid or missing tenant UUID in metadata:`, metadataTenant);
+      return {
+        userId: user.id,
+        tenantId: '',
+        role: 'DISPATCHER',
+        isAuthenticated: false,
+        source: 'UNAUTHENTICATED',
+      };
+    }
+  }
+
+  const tenantId = metadataTenant || DEFAULT_TENANT_ID;
+  const role = metadataRole;
+  return {
+    userId: user.id,
+    tenantId,
+    role,
+    isAuthenticated: true,
+    source: 'SUPABASE_SESSION',
+  };
+}
+
 /**
  * Resolves the authenticated user, role, and tenant context from a Next.js request.
  * Strictly enforces that client-controlled headers cannot escalate privileges or override tenant boundaries.
@@ -184,46 +227,7 @@ export async function getAuthContext(
       const client = createAdminClient();
       const { data: { user }, error } = await client.auth.getUser(token);
       if (!error && user) {
-        const metadataTenant = user.app_metadata?.tenant_id as string | undefined;
-        const metadataRole = user.app_metadata?.role as unknown;
-
-        // Strict runtime validation: Role MUST be in ALLOWED_USER_ROLES
-        // SYSTEM and VOICE_GATEWAY can NEVER be granted via user metadata
-        if (!isValidUserRole(metadataRole)) {
-          console.warn('[AuthContext] Rejected user with invalid or forbidden role metadata:', metadataRole);
-          return {
-            userId: user.id,
-            tenantId: '',
-            role: 'DISPATCHER',
-            isAuthenticated: false,
-            source: 'UNAUTHENTICATED',
-          };
-        }
-
-        // In production, tenant_id is strictly required and must be a valid UUID
-        // NEVER silently fall back to DEFAULT_TENANT_ID for a production user
-        if (isProduction || metadataTenant) {
-          if (!isValidTenantId(metadataTenant)) {
-            console.warn('[AuthContext] Rejected user with invalid or missing tenant UUID in metadata:', metadataTenant);
-            return {
-              userId: user.id,
-              tenantId: '',
-              role: 'DISPATCHER',
-              isAuthenticated: false,
-              source: 'UNAUTHENTICATED',
-            };
-          }
-        }
-
-        const tenantId = metadataTenant || DEFAULT_TENANT_ID;
-        const role = metadataRole;
-        return {
-          userId: user.id,
-          tenantId,
-          role,
-          isAuthenticated: true,
-          source: 'SUPABASE_SESSION',
-        };
+        return resolveUserMetadataContext(user, isProduction, 'user token');
       }
     } catch (err) {
       console.warn('[AuthContext] JWT token validation failed:', err instanceof Error ? err.message : err);
@@ -248,42 +252,7 @@ export async function getAuthContext(
 
       const { data: { user }, error } = await supabase.auth.getUser();
       if (!error && user) {
-        const metadataTenant = user.app_metadata?.tenant_id as string | undefined;
-        const metadataRole = user.app_metadata?.role as unknown;
-
-        if (!isValidUserRole(metadataRole)) {
-          console.warn('[AuthContext] Rejected cookie session with invalid role metadata:', metadataRole);
-          return {
-            userId: user.id,
-            tenantId: '',
-            role: 'DISPATCHER',
-            isAuthenticated: false,
-            source: 'UNAUTHENTICATED',
-          };
-        }
-
-        if (isProduction || metadataTenant) {
-          if (!isValidTenantId(metadataTenant)) {
-            console.warn('[AuthContext] Rejected cookie session with invalid tenant UUID in metadata:', metadataTenant);
-            return {
-              userId: user.id,
-              tenantId: '',
-              role: 'DISPATCHER',
-              isAuthenticated: false,
-              source: 'UNAUTHENTICATED',
-            };
-          }
-        }
-
-        const tenantId = metadataTenant || DEFAULT_TENANT_ID;
-        const role = metadataRole;
-        return {
-          userId: user.id,
-          tenantId,
-          role,
-          isAuthenticated: true,
-          source: 'SUPABASE_SESSION',
-        };
+        return resolveUserMetadataContext(user, isProduction, 'cookie session');
       }
     } catch {
       // Cookie session verification failed or unavailable

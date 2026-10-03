@@ -84,6 +84,78 @@ export function sanitizeAuditArguments(
   return sanitized;
 }
 
+/**
+ * Sanitizes tool execution results before persisting to public.tool_executions.
+ * Strips customer PII, raw credentials, and internal stack traces.
+ */
+export function sanitizeToolExecutionResult(
+  toolName: string,
+  result: Record<string, unknown> | null
+): Record<string, unknown> {
+  if (!result) return {};
+  switch (toolName) {
+    case 'get_rate_quote':
+      return {
+        status: result.status,
+        quote_id: result.quote_id,
+        price_inr: result.price_inr,
+        quote_type: result.quote_type,
+        rate_basis: result.rate_basis,
+        origin: result.origin,
+        destination: result.destination,
+        vehicle_type: result.vehicle_type,
+      };
+    case 'get_tracking_status':
+      return {
+        status: result.status,
+        tracking_id: result.tracking_id,
+        current_status: result.current_status,
+        current_location: result.current_location,
+        verified_eta: result.verified_eta,
+      };
+    case 'create_booking_request':
+      return {
+        status: result.status,
+        reference_no: result.reference_no,
+        request_id: result.request_id,
+      };
+    case 'create_support_ticket':
+      return {
+        status: result.status,
+        ticket_id: result.ticket_id,
+        reference_no: result.reference_no,
+        priority: result.priority,
+      };
+    case 'transfer_to_human':
+      return {
+        status: result.status,
+        target_role: result.target_role,
+        callback_reference: result.callback_reference,
+      };
+    case 'save_call_outcome':
+      return {
+        status: result.status,
+        call_id: result.call_id,
+        lead_id: result.lead_id,
+        computed_temperature: result.computed_temperature,
+      };
+    case 'send_followup':
+      return {
+        status: result.status,
+        followup_id: result.followup_id,
+        channel: result.channel,
+        provider_message_id: result.provider_message_id,
+      };
+    case 'lookup_customer':
+      return {
+        status: result.status,
+        customer_found: result.status === 'FOUND',
+      };
+    default:
+      return { status: result.status };
+  }
+}
+
 export async function dispatchTool(
   request: ToolExecutionRequest,
   authContext: AuthContext
@@ -211,7 +283,20 @@ export async function dispatchTool(
       'TRANSFER_UNAVAILABLE',
     ].includes(executionStatus);
 
-    // Record structured tool execution in public.tool_executions
+    const businessStatus = String(result?.status || executionStatus);
+    const verified =
+      (tool_name === 'get_rate_quote' && businessStatus === 'SUCCESS') ||
+      (tool_name === 'get_tracking_status' && businessStatus === 'FOUND') ||
+      (tool_name === 'create_booking_request' && (businessStatus === 'CONFIRMED' || businessStatus === 'PENDING_CONFIRMATION')) ||
+      (tool_name === 'create_support_ticket' && businessStatus === 'SUCCESS') ||
+      (tool_name === 'transfer_to_human' && (businessStatus === 'TRANSFERRED' || businessStatus === 'TRANSFER_REQUEST_ACCEPTED')) ||
+      (tool_name === 'send_followup' && (businessStatus === 'SENT' || businessStatus === 'DELIVERED')) ||
+      (tool_name === 'save_call_outcome' && businessStatus === 'SAVED') ||
+      (tool_name === 'lookup_customer' && businessStatus === 'FOUND');
+
+    const sanitizedResult = sanitizeToolExecutionResult(tool_name, result);
+
+    // Record structured tool execution in public.tool_executions with explicit verification
     try {
       await db.recordToolExecution(
         {
@@ -219,9 +304,11 @@ export async function dispatchTool(
           call_id: effectiveInternalCallUuid,
           external_call_id: effectiveExternalCallId,
           tool_name,
-          execution_status: executionStatus,
-          success: !isFailureStatus,
-          safe_result: result,
+          execution_status: 'COMPLETED',
+          business_status: businessStatus,
+          verified,
+          success: verified,
+          safe_result: sanitizedResult,
           latency_ms: latencyMs,
           provider_reference: (
             result?.provider_message_id ||

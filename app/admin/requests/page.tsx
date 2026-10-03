@@ -82,6 +82,9 @@ export default function RequestsPage() {
   const filteredRequests = requests;
 
   const handleUpdateStatus = async (reqId: string, newStatus: RequestStatus) => {
+    const previousRequests = [...requests];
+    const previousInspect = inspectReq ? { ...inspectReq } : null;
+
     // Optimistic UI update
     setRequests((prev) =>
       prev.map((r) => (r.id === reqId ? { ...r, status: newStatus, updated_at: new Date().toISOString() } : r))
@@ -92,13 +95,32 @@ export default function RequestsPage() {
 
     // Persist update to authoritative backend API
     try {
-      await fetch('/api/requests', {
+      const res = await fetch('/api/requests', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: reqId, status: newStatus }),
       });
+
+      if (!res.ok) {
+        let errMessage = `Server error HTTP ${res.status}`;
+        try {
+          const errData = await res.json();
+          errMessage = errData.error || errData.message || errMessage;
+        } catch {
+          // fallback
+        }
+        // Rollback state on failure (Prompt Item 27)
+        setRequests(previousRequests);
+        if (previousInspect) setInspectReq(previousInspect);
+        setError(`Failed to update request status to ${newStatus}: ${errMessage}`);
+        return;
+      }
+      setError(null);
     } catch (err) {
       console.warn('[RequestsPage] Failed to persist request status update:', err);
+      setRequests(previousRequests);
+      if (previousInspect) setInspectReq(previousInspect);
+      setError(`Network error updating request status: ${err instanceof Error ? err.message : 'Unknown error'}`);
     }
   };
 

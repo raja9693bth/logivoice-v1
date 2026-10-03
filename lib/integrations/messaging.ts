@@ -180,12 +180,17 @@ export async function sendControlledFollowup(
       const data = await res.json();
       if (res.ok && data.messages?.[0]?.id) {
         const providerMessageId = data.messages[0].id;
-        await db.completeSideEffect(tenantId, claimKey, {
-          business_status: 'SENT',
-          provider_message_id: providerMessageId,
-          provider: 'META_WHATSAPP_CLOUD_API',
-          sent_at: new Date().toISOString(),
-        });
+        await db.completeSideEffect(
+          tenantId,
+          claimKey,
+          {
+            business_status: 'SENT',
+            provider_message_id: providerMessageId,
+            provider: 'META_WHATSAPP_CLOUD_API',
+            sent_at: new Date().toISOString(),
+          },
+          claimResult.claim_token
+        );
 
         return {
           success: true,
@@ -196,7 +201,7 @@ export async function sendControlledFollowup(
         };
       } else {
         const errMsg = data.error?.message || `WhatsApp Cloud API HTTP ${res.status}`;
-        await db.failSideEffect(tenantId, claimKey, errMsg, true);
+        await db.failSideEffect(tenantId, claimKey, errMsg, true, 60000, claimResult.claim_token);
         return {
           success: false,
           status: 'FAILED',
@@ -213,12 +218,13 @@ export async function sendControlledFollowup(
       const errMsg = err instanceof Error ? err.message : 'Network error reaching WhatsApp API';
 
       if (isTimeout) {
-        await db.completeSideEffect(tenantId, claimKey, {
-          business_status: 'UNKNOWN',
-          status: 'UNKNOWN',
-          provider: 'META_WHATSAPP_CLOUD_API',
-          error: `Provider call timed out: ${errMsg}`,
-        });
+        await db.recordSideEffectUnknown(
+          tenantId,
+          claimKey,
+          `Provider call timed out: ${errMsg}`,
+          {},
+          claimResult.claim_token
+        );
         return {
           success: false,
           status: 'UNKNOWN',
@@ -228,7 +234,7 @@ export async function sendControlledFollowup(
         };
       }
 
-      await db.failSideEffect(tenantId, claimKey, errMsg, true);
+      await db.failSideEffect(tenantId, claimKey, errMsg, true, 60000, claimResult.claim_token);
       return {
         success: false,
         status: 'FAILED',
@@ -266,11 +272,16 @@ export async function sendControlledFollowup(
 
   // Unconfigured state
   if (process.env.NODE_ENV === 'production' || process.env.ENABLE_MOCK_INTEGRATIONS !== 'true') {
-    await db.completeSideEffect(tenantId, claimKey, {
-      business_status: 'UNCONFIGURED',
-      status: 'UNCONFIGURED',
-      error: `${channel} provider credentials unconfigured in environment.`,
-    });
+    await db.completeSideEffect(
+      tenantId,
+      claimKey,
+      {
+        business_status: 'UNCONFIGURED',
+        status: 'UNCONFIGURED',
+        error: `${channel} provider credentials unconfigured in environment.`,
+      },
+      claimResult.claim_token
+    );
     return {
       success: false,
       status: 'UNCONFIGURED',
@@ -282,12 +293,17 @@ export async function sendControlledFollowup(
 
   // Deterministic Development Mock Adapter
   const mockMessageId = `mock-msg-${Date.now()}`;
-  await db.completeSideEffect(tenantId, claimKey, {
-    business_status: 'MOCK',
-    provider_message_id: mockMessageId,
-    provider: 'DETERMINISTIC_MOCK_ADAPTER',
-    sent_at: new Date().toISOString(),
-  });
+  await db.completeSideEffect(
+    tenantId,
+    claimKey,
+    {
+      business_status: 'MOCK',
+      provider_message_id: mockMessageId,
+      provider: 'DETERMINISTIC_MOCK_ADAPTER',
+      sent_at: new Date().toISOString(),
+    },
+    claimResult.claim_token
+  );
 
   return {
     success: true,

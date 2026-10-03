@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { isSupabaseLive } from '@/lib/db';
+import { validateEnvironment } from '@/lib/env';
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -18,21 +19,19 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // 2. Readiness check: verifies critical dependencies (authoritative DB)
+  // 2. Readiness check: verifies critical dependencies (authoritative DB & runtime env)
+  const envValidation = validateEnvironment();
   const isDbLive = await isSupabaseLive();
   const isProduction = process.env.NODE_ENV === 'production';
 
-  // In production, readiness MUST return 503 if required database connection is down
-  if (isProduction && !isDbLive) {
+  // In production, readiness MUST return 503 if required database connection is down or env invalid
+  if (isProduction && (!isDbLive || !envValidation.valid)) {
     return NextResponse.json(
       {
         status: 'DEGRADED',
         service: 'logivoice-v1',
         version: '1.0.0',
         timestamp: new Date().toISOString(),
-        database: 'DISCONNECTED',
-        readiness: false,
-        environment: 'production',
       },
       { status: 503 }
     );
@@ -40,14 +39,13 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(
     {
-      status: isDbLive ? 'HEALTHY' : 'DEGRADED',
+      status: isDbLive && envValidation.valid ? 'HEALTHY' : 'DEGRADED',
       service: 'logivoice-v1',
       version: '1.0.0',
       timestamp: new Date().toISOString(),
-      database: isDbLive ? 'CONNECTED' : 'STANDALONE_OR_DISCONNECTED',
-      readiness: isDbLive || !isProduction,
-      environment: process.env.NODE_ENV || 'development',
+      readiness: (isDbLive && envValidation.valid) || !isProduction,
     },
     { status: 200 }
   );
 }
+

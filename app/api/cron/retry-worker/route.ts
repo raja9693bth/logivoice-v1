@@ -5,15 +5,29 @@ import { handleApiError } from '@/lib/api/error-handler';
 export async function GET(req: NextRequest) {
   try {
     const authHeader = req.headers.get('authorization') || '';
-    const cronSecretHeader = req.headers.get('x-cron-secret') || '';
     const expectedSecret = process.env.CRON_SECRET;
 
-    // In production, require valid CRON_SECRET
-    if (process.env.NODE_ENV === 'production' && expectedSecret) {
-      const isBearerValid = authHeader === `Bearer ${expectedSecret}`;
-      const isHeaderValid = cronSecretHeader === expectedSecret;
-      if (!isBearerValid && !isHeaderValid) {
-        return NextResponse.json({ error: 'Unauthorized: Invalid CRON_SECRET' }, { status: 401 });
+    // Fail-closed authentication in production (Prompt Item 6)
+    if (process.env.NODE_ENV === 'production') {
+      if (!expectedSecret) {
+        console.error('[CronRetryWorker] CRON_SECRET is unconfigured in production environment.');
+        return NextResponse.json(
+          { error: 'Server configuration error: CRON_SECRET is not configured' },
+          { status: 500 }
+        );
+      }
+      if (authHeader !== `Bearer ${expectedSecret}`) {
+        return NextResponse.json(
+          { error: 'Unauthorized: Invalid or missing Bearer token' },
+          { status: 401 }
+        );
+      }
+    } else if (expectedSecret) {
+      if (authHeader !== `Bearer ${expectedSecret}`) {
+        return NextResponse.json(
+          { error: 'Unauthorized: Invalid or missing Bearer token' },
+          { status: 401 }
+        );
       }
     }
 

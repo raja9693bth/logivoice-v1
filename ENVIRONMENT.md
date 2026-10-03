@@ -18,6 +18,9 @@ This document provides the authoritative contract for all environment variables 
 | `DATABASE_URL` | Optional | Optional | Server-Only | No | Direct PostgreSQL connection string for running migrations and isolated integration test suites. |
 | `RETELL_API_KEY` | Optional | Required | Server-Only | Yes (Retell AI) | Cryptographic secret used for HMAC-SHA256 signature verification of inbound webhooks and tool executions from Retell AI. |
 | `RETELL_AGENT_ID` | Optional | Required | Server-Only | Yes (Retell AI) | Authoritative Agent ID registered with Retell. Inbound requests with unmapped agent IDs are rejected. |
+| `RETELL_TOOL_SECRET` | Optional | Optional | Server-Only | Yes (Retell AI) | Pre-shared secret scoped strictly to `/api/retell/tool` for Retell custom tool authentication. |
+| `CRON_SECRET` | Optional | Required (Production) | Server-Only | No | Cryptographic bearer token required to invoke `/api/cron/retry-worker`. Fails closed if missing in production. |
+| `PLAYWRIGHT_BASE_URL` | Optional | Optional | Server-Only | No | Base URL for running Playwright browser E2E test suites (default: `http://127.0.0.1:3000`). |
 | `GOOGLE_SHEETS_SPREADSHEET_ID` | Optional | Required | Server-Only | Yes (Google Cloud) | Target Google Spreadsheet ID for secondary operational sync. If unset, sync is skipped and master record remains in Supabase. |
 | `GOOGLE_SHEETS_WORKSHEET_NAME` | Optional | Optional | Server-Only | Yes (Google Cloud) | Specific sheet tab name (default: `LogiVoice_Calls`). Fails with configuration error if tab does not exist (never writes to arbitrary sheets). |
 | `GOOGLE_CLIENT_ID` | Optional | Required (if Sheets enabled) | Server-Only | Yes (Google Cloud) | Google Cloud OAuth 2.0 Client ID. |

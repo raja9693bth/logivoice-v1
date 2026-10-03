@@ -95,7 +95,7 @@ export async function executeGetRateQuote(
       status: 'QUOTED',
       quote_type: quoteType,
       price_inr: matchedCard.price_inr,
-      minimum_charge_inr: matchedCard.minimum_charge_inr,
+      minimum_charge_inr: matchedCard.minimum_charge_inr ?? undefined,
       transit_time_hours: matchedCard.transit_time_hours,
       route: `${matchedCard.origin} -> ${matchedCard.destination}`,
       vehicle_type: matchedCard.vehicle_type,

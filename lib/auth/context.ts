@@ -181,20 +181,7 @@ export async function getAuthContext(
   const authHeader = headers.get('authorization');
   const apiKey = headers.get('x-api-key');
 
-  // 1. Dedicated Tool Secret Verification (Never reuses master RETELL_API_KEY as generic bearer)
-  const dedicatedToolSecret = process.env.RETELL_TOOL_SECRET;
-  const toolSecretHeader = headers.get('x-tool-secret');
-  if (toolSecretHeader && dedicatedToolSecret && toolSecretHeader === dedicatedToolSecret) {
-    return {
-      userId: 'voice-tool-caller',
-      tenantId: DEFAULT_TENANT_ID,
-      role: 'VOICE_GATEWAY',
-      isAuthenticated: true,
-      source: 'API_TOKEN',
-    };
-  }
-
-  // 2. Authorization Bearer Token
+  // Authorization Bearer Token
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.replace('Bearer ', '').trim();
 

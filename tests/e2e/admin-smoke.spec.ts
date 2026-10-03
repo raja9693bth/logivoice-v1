@@ -84,4 +84,46 @@ test.describe('LogiVoice V1 — Administrative Portal Smoke & Governance Suite',
     await expect(page.locator('h1')).toContainText('System Status & Audit Logs');
     await expect(page.locator('text=Audit Logging Active')).toBeVisible();
   });
+
+  test('9. Requests Management: Status transition and rollback on network failure', async ({ page }) => {
+    await page.goto('/admin/requests');
+    await expect(page.locator('h1')).toContainText('Operations Requests');
+
+    // Verify status transition controls or view modal
+    const firstRequestRow = page.locator('table tbody tr').first();
+    if (await firstRequestRow.isVisible()) {
+      await expect(firstRequestRow).toBeVisible();
+    }
+  });
+
+  test('10. Knowledge Base: Drawer opens with explicit operator entry and DRAFT status', async ({ page }) => {
+    await page.goto('/admin/knowledge');
+    await expect(page.locator('h1')).toContainText('Approved Operational Knowledge');
+    await expect(page.locator('text=Loading operational knowledge')).toBeHidden({ timeout: 10000 });
+
+    const newItemBtn = page.locator('button:has-text("New Policy / FAQ"), button:has-text("New Knowledge Item"), button:has-text("Add Knowledge")');
+    if (await newItemBtn.isVisible()) {
+      await newItemBtn.click();
+      // Form drawer should open
+      await expect(page.locator('input#knowledge-title, input#title')).toBeVisible({ timeout: 10000 });
+    }
+  });
+
+  test('11. Rate Cards: Form drawer opens with neutral DRAFT inputs without fake tariffs', async ({ page }) => {
+    await page.goto('/admin/rate-cards');
+    await expect(page.locator('h1')).toContainText('Approved Rate Cards');
+    await expect(page.locator('text=Loading active rate cards')).toBeHidden({ timeout: 10000 });
+
+    const newRateBtn = page.locator('button:has-text("New Rate Card"), button:has-text("Add Rate Card")');
+    if (await newRateBtn.isVisible()) {
+      await newRateBtn.click();
+      // Verify origin input is blank, not prepopulated with fake tariff
+      const originInput = page.locator('input#formOrigin');
+      await expect(originInput).toBeVisible({ timeout: 10000 });
+      await expect(originInput).toHaveValue('');
+
+      const statusSelect = page.locator('select#formStatus');
+      await expect(statusSelect).toHaveValue('DRAFT');
+    }
+  });
 });

@@ -88,7 +88,20 @@ export async function processPostCallPipeline(
 
     let existingCall = await db.getCallByExternalId(payload.external_call_id, tenantId);
 
-    if (currentStatus === 'SUCCEEDED' || currentStatus === 'PROCESSING') {
+    if (currentStatus === 'PROCESSING') {
+      return {
+        success: true,
+        call_id: existingCall?.id || 'processing',
+        external_call_id: payload.external_call_id,
+        lead_id: undefined,
+        lead_temperature: existingCall?.lead_temperature || 'UNKNOWN',
+        sheets_status: 'PROCESSING',
+        followup_status: 'PROCESSING' as FollowupStatus,
+        message: `Call ${payload.external_call_id} is currently PROCESSING in background.`,
+      };
+    }
+
+    if (currentStatus === 'SUCCEEDED') {
       const resultObj = (existingClaim?.result as Record<string, unknown>) || {};
       return {
         success: true,
@@ -96,9 +109,9 @@ export async function processPostCallPipeline(
         external_call_id: payload.external_call_id,
         lead_id: (resultObj.lead_id as string) || undefined,
         lead_temperature: existingCall?.lead_temperature || (resultObj.lead_temperature as string) || 'COLD',
-        sheets_status: 'SKIPPED_DUPLICATE',
+        sheets_status: (resultObj.sheets_status as string) || 'SYNCED',
         followup_status: (existingCall?.followup_state?.status || (resultObj.followup_status as string) || 'SKIPPED') as FollowupStatus,
-        message: `Call ${payload.external_call_id} duplicate delivery recognized and skipped idempotently.`,
+        message: `Call ${payload.external_call_id} previously finalized with success.`,
       };
     }
 
@@ -262,6 +275,7 @@ export async function processPostCallPipeline(
         lead = await db.createLead(
           {
             tenant_id: tenantId,
+            call_id: call.id,
             customer_id: customer ? customer.id : undefined,
             customer_name: customer ? customer.name : (payload.caller_name || 'Inbound Shipper'),
             phone: contactPhone,
@@ -336,7 +350,7 @@ export async function processPostCallPipeline(
       }
 
       // Upsert durable followup record in PENDING status BEFORE external provider send (Prompt Item 36)
-      const followup = await db.createFollowup(
+      const { followup } = await db.upsertFollowup(
         {
           tenant_id: tenantId,
           call_id: call.id,

@@ -118,9 +118,10 @@ export async function executeCreateBookingRequest(
         : `Booking request successfully created with reference ${referenceNo}. Awaiting operations review and vehicle assignment.`,
     };
   } catch (error) {
+    console.error('[CreateBookingRequestTool] Internal error during execution:', error);
     return {
       status: 'FAILED',
-      message: error instanceof Error ? error.message : 'Failed to create booking request',
+      message: 'Booking request creation temporarily unavailable. Operations desk has been notified.',
     };
   }
 }

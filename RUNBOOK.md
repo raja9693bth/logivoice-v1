@@ -81,3 +81,16 @@ If a critical defect is encountered post-deployment:
 1. Revert container tag to previous stable image hash.
 2. In database, all migrations are strictly forward-safe and backward-compatible (non-destructive drops and additive columns).
 3. Notify operations desk to rely on Supabase direct portal while container rolls back.
+
+---
+
+## 5. Scheduled Retry Worker & Cron Execution SLA
+
+- **Endpoint**: `/api/cron/retry-worker`
+- **Security Requirement**: `Authorization: Bearer ${CRON_SECRET}` (HTTP 401 on mismatch; HTTP 500 fail-closed in production if `CRON_SECRET` is unset).
+- **Execution Architecture (Model A)**: Worker selects `RETRYABLE` claims and invokes business executors (`processPostCallPipeline`, `syncCallToGoogleSheets`, `sendControlledFollowup`). Executors acquire and settle their own leases atomically, preventing self-claim deadlocks.
+- **SLA & Schedule**:
+  - The exponential backoff interval for retries begins at 60 seconds (`initial_backoff_seconds = 60`, doubling up to `max_backoff_seconds = 900`).
+  - **Vercel Hobby Plan**: Restricted to daily cron (`0 0 * * *`). Retries under Hobby schedule run once every 24 hours.
+  - **Vercel Pro/Enterprise or External Scheduler**: Use 1-minute to 5-minute cron trigger (e.g. `* * * * *` or `*/5 * * * *`) via Cloud Scheduler / GitHub Actions with `Authorization: Bearer ${CRON_SECRET}` to achieve the target 60-second recovery SLA.
+

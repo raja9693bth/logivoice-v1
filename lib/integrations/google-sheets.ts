@@ -167,7 +167,14 @@ export async function syncCallToGoogleSheets(
   // 3. Obtain Google OAuth token
   const accessToken = await getGoogleAccessToken();
   if (!accessToken) {
-    await db.failSideEffect(tenantId, claimKey, 'Failed to obtain Google Sheets access token from refresh credentials', true);
+    await db.failSideEffect(
+      tenantId,
+      claimKey,
+      'Failed to obtain Google Sheets access token from refresh credentials',
+      true,
+      60000,
+      claimResult.claim_token
+    );
     return {
       synced: false,
       status: 'FAILED',
@@ -187,7 +194,14 @@ export async function syncCallToGoogleSheets(
     );
 
     if (!metaRes.ok) {
-      await db.failSideEffect(tenantId, claimKey, `Google Sheets metadata check failed (HTTP ${metaRes.status})`, true);
+      await db.failSideEffect(
+        tenantId,
+        claimKey,
+        `Google Sheets metadata check failed (HTTP ${metaRes.status})`,
+        true,
+        60000,
+        claimResult.claim_token
+      );
       return {
         synced: false,
         status: 'FAILED',
@@ -204,7 +218,9 @@ export async function syncCallToGoogleSheets(
         tenantId,
         claimKey,
         `Configured worksheet '${targetWorksheet}' does not exist in spreadsheet. Available sheets: ${existingSheetTitles.join(', ')}`,
-        false
+        false,
+        60000,
+        claimResult.claim_token
       );
       return {
         synced: false,
@@ -254,7 +270,14 @@ export async function syncCallToGoogleSheets(
     );
 
     if (!appendRes.ok) {
-      await db.failSideEffect(tenantId, claimKey, `Google Sheets append rejected with HTTP ${appendRes.status}`, true);
+      await db.failSideEffect(
+        tenantId,
+        claimKey,
+        `Google Sheets append rejected with HTTP ${appendRes.status}`,
+        true,
+        60000,
+        claimResult.claim_token
+      );
       return {
         synced: false,
         status: 'FAILED',
@@ -267,14 +290,19 @@ export async function syncCallToGoogleSheets(
     const updatedRange: string | undefined = appendData.updates?.updatedRange;
     const rowIndex = updatedRange ? Number.parseInt(updatedRange.replace(/[^0-9]/g, ''), 10) : undefined;
 
-    // 6. Complete durable claim
-    await db.completeSideEffect(tenantId, claimKey, {
-      business_status: 'SYNCED',
-      updatedRange,
-      rowIndex,
-      worksheet: activeTab,
-      synced_at: new Date().toISOString(),
-    });
+    // 6. Complete durable claim with mandatory claim_token
+    await db.completeSideEffect(
+      tenantId,
+      claimKey,
+      {
+        business_status: 'SYNCED',
+        updatedRange,
+        rowIndex,
+        worksheet: activeTab,
+        synced_at: new Date().toISOString(),
+      },
+      claimResult.claim_token
+    );
 
     // 7. Audit log confirmed sync
     await db.logAuditEvent(
@@ -307,8 +335,30 @@ export async function syncCallToGoogleSheets(
       worksheet_name: activeTab,
       row_index: rowIndex,
     };
-  } catch (err) {
-    await db.failSideEffect(tenantId, claimKey, err instanceof Error ? err.message : 'Network error during Google Sheets sync', true);
+  } catch (err: any) {
+    const isTimeout =
+      err?.name === 'TimeoutError' ||
+      err?.name === 'AbortError' ||
+      (err instanceof Error && /timeout|abort/i.test(err.message));
+    const errMsg = err instanceof Error ? err.message : 'Network error during Google Sheets sync';
+
+    if (isTimeout) {
+      await db.recordSideEffectUnknown(
+        tenantId,
+        claimKey,
+        `Google Sheets append timed out or uncertain: ${errMsg}`,
+        {},
+        claimResult.claim_token
+      );
+      return {
+        synced: false,
+        status: 'FAILED',
+        provider: 'GOOGLE_SHEETS_API_V4',
+        error: `Google Sheets append timed out: ${errMsg}`,
+      };
+    }
+
+    await db.failSideEffect(tenantId, claimKey, errMsg, true, 60000, claimResult.claim_token);
     return {
       synced: false,
       status: 'FAILED',

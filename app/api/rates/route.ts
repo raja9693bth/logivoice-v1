@@ -7,7 +7,7 @@ import { handleApiError } from '@/lib/api/error-handler';
 export async function GET(req: NextRequest) {
   try {
     const authContext = await getAuthContext(req);
-    requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'SYSTEM', 'VOICE_GATEWAY']);
+    requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'SYSTEM']);
 
     const { searchParams } = new URL(req.url);
     const rawQuery = {
@@ -119,23 +119,6 @@ export async function POST(req: NextRequest) {
       }));
 
       const res = await db.bulkCreateRateCards(itemsToInsert, authContext.tenantId);
-
-      // Log bulk audit event
-      await db.logAuditEvent(
-        {
-          tenant_id: authContext.tenantId,
-          event_type: 'RATE_BULK_IMPORTED',
-          actor: authContext.userId,
-          actor_type: (authContext.role === 'VOICE_GATEWAY' ? 'AI_AGENT' : authContext.role) as any,
-          actor_id: authContext.userId,
-          severity: 'INFO',
-          details: {
-            imported_count: res.count,
-            source: 'CSV_IMPORT',
-          },
-        },
-        authContext.tenantId
-      );
 
       return NextResponse.json({ success: true, count: res.count, rate_cards: res.inserted }, { status: 201 });
     }

@@ -162,18 +162,7 @@ export function evaluateApprovedRate(
   let candidates = validActiveCards.filter((c) => {
     if (vehicle && c.vehicle_type.trim().toLowerCase() !== vehicle) return false;
     if (weight !== undefined) {
-      if (weight < c.weight_min_tons) return false;
-      if (weight > c.weight_max_tons) return false;
-      if (weight === c.weight_max_tons) {
-        // Upper bound boundary check: if an adjacent higher band starts at this exact weight, this band yields
-        const hasAdjacentHigher = validActiveCards.some(
-          (other) =>
-            other.id !== c.id &&
-            other.vehicle_type.trim().toLowerCase() === c.vehicle_type.trim().toLowerCase() &&
-            other.weight_min_tons === weight
-        );
-        if (hasAdjacentHigher) return false;
-      }
+      if (weight < c.weight_min_tons || weight >= c.weight_max_tons) return false;
     }
     return true;
   });

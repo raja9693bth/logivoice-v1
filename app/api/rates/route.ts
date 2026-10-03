@@ -59,8 +59,20 @@ export async function GET(req: NextRequest) {
     }
 
     // Otherwise list all rate cards with filters
-    const rateCards = await db.listRateCards(authContext.tenantId, { status, search, limit, offset });
-    return NextResponse.json({ rate_cards: rateCards });
+    const mappedStatus = (status === 'INACTIVE' ? 'EXPIRED' : status) as 'ACTIVE' | 'DRAFT' | 'EXPIRED' | undefined;
+    const { rateCards, total } = await db.listRateCardsWithCount(authContext.tenantId, {
+      status: mappedStatus,
+      search,
+      limit,
+      offset,
+    });
+    return NextResponse.json({
+      rate_cards: rateCards,
+      total,
+      limit: limit || 100,
+      offset: offset || 0,
+      has_more: (offset || 0) + rateCards.length < total,
+    });
   } catch (error) {
     return handleApiError(error, 'api/rates:GET');
   }

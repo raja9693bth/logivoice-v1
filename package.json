@@ -8,9 +8,11 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "tsx tests/backend.test.ts && tsx tests/voice-qa-scenarios.test.ts",
+    "test": "tsx tests/backend.test.ts && tsx tests/voice-qa-scenarios.test.ts && tsx tests/concurrency.test.ts",
     "test:integration": "node --import tsx --test tests/db-integration.test.ts",
-    "test:coverage": "node -e \"fs.mkdirSync('coverage', { recursive: true })\" && node --import tsx --test --experimental-test-coverage --test-reporter=lcov --test-reporter-destination=coverage/lcov.info tests/backend.test.ts tests/voice-qa-scenarios.test.ts"
+    "test:concurrency": "tsx tests/concurrency.test.ts",
+    "test:coverage": "node -e \"fs.mkdirSync('coverage', { recursive: true })\" && node --import tsx --test --experimental-test-coverage --test-reporter=lcov --test-reporter-destination=coverage/lcov.info tests/backend.test.ts tests/voice-qa-scenarios.test.ts tests/concurrency.test.ts",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.3",
@@ -26,6 +28,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/pg": "^8.23.1",

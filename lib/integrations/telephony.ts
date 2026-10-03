@@ -22,7 +22,14 @@ export interface TelephonyTransferRequest {
 
 export interface TelephonyTransferResult {
   success: boolean;
-  status: 'TRANSFERRED' | 'PROVIDER_REJECTED' | 'PROVIDER_TIMEOUT' | 'PROVIDER_ERROR' | 'UNCONFIGURED';
+  status:
+    | 'TRANSFERRED'
+    | 'TRANSFER_REQUEST_ACCEPTED'
+    | 'TRANSFER_CONNECTED'
+    | 'PROVIDER_REJECTED'
+    | 'PROVIDER_TIMEOUT'
+    | 'PROVIDER_ERROR'
+    | 'UNCONFIGURED';
   providerTransferId?: string;
   provider: string;
   error?: string;
@@ -54,10 +61,11 @@ export async function executeProviderCallTransfer(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 8000);
 
-  try {
-    let providerName = 'TWILIO_REST_GATEWAY';
-    let providerTransferId: string | undefined;
+  let providerName = 'TWILIO_REST_GATEWAY';
+  let providerTransferId: string | undefined;
+  let responseData: any = null;
 
+  try {
     // A. Twilio REST Gateway (Requires genuine Twilio CallSid starting with CA)
     const isTwilioCallSid = Boolean(req.callId && /^CA[0-9a-fA-F]{32}$/.test(req.callId));
 
@@ -100,6 +108,7 @@ export async function executeProviderCallTransfer(
       }
 
       const data = await res.json();
+      responseData = data;
       providerTransferId = data.sid || data.id;
     } else if (process.env.RETELL_API_KEY && req.callId) {
       // B. Retell Native Call Transfer (When Retell owns the active call context)
@@ -140,6 +149,7 @@ export async function executeProviderCallTransfer(
       }
 
       const data = await res.json();
+      responseData = data;
       providerTransferId = data.call_id || req.callId;
     } else {
       clearTimeout(timeoutId);
@@ -156,17 +166,22 @@ export async function executeProviderCallTransfer(
       return {
         success: false,
         status: 'PROVIDER_ERROR',
-        provider: 'TWILIO_REST_GATEWAY',
+        provider: providerName,
         error: 'Malformed provider response: missing confirmation transfer ID',
         message: 'Provider responded without a transfer confirmation ID.',
       };
     }
 
+    const transferStatus =
+      responseData?.status === 'completed' || responseData?.status === 'connected'
+        ? 'TRANSFER_CONNECTED'
+        : 'TRANSFER_REQUEST_ACCEPTED';
+
     return {
       success: true,
-      status: 'TRANSFERRED',
+      status: transferStatus,
       providerTransferId,
-      provider: 'TWILIO_REST_GATEWAY',
+      provider: providerName,
       message: `Call transferred successfully to ${req.targetName || req.targetRole} at ${req.targetPhone}.`,
     };
   } catch (err) {
@@ -175,7 +190,7 @@ export async function executeProviderCallTransfer(
       return {
         success: false,
         status: 'PROVIDER_TIMEOUT',
-        provider: 'TWILIO_REST_GATEWAY',
+        provider: providerName,
         error: 'Telephony provider timed out after 8000ms while establishing transfer bridge.',
         message: 'Telephony provider timed out.',
       };
@@ -184,7 +199,7 @@ export async function executeProviderCallTransfer(
     return {
       success: false,
       status: 'PROVIDER_ERROR',
-      provider: 'TWILIO_REST_GATEWAY',
+      provider: providerName,
       error: err instanceof Error ? err.message : 'Network error reaching telephony transfer provider',
       message: 'Network error executing live call transfer.',
     };

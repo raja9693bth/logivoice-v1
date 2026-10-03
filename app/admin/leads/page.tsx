@@ -22,6 +22,8 @@ import { Lead, LeadTemperature } from '@/types/logivoice';
 
 export default function LeadsPage() {
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tempFilter, setTempFilter] = useState<string>('ALL');
@@ -29,10 +31,19 @@ export default function LeadsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [inspectLead, setInspectLead] = useState<Lead | null>(null);
 
+  const PAGE_SIZE = 10;
+
   const fetchLeads = React.useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch('/api/leads')
+    const params = new URLSearchParams();
+    params.set('limit', String(PAGE_SIZE));
+    params.set('offset', String(offset));
+    if (tempFilter !== 'ALL') params.set('temperature', tempFilter);
+    if (statusFilter !== 'ALL') params.set('status', statusFilter);
+    if (searchQuery.trim()) params.set('search', searchQuery.trim());
+
+    fetch(`/api/leads?${params.toString()}`)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
@@ -40,8 +51,10 @@ export default function LeadsPage() {
       .then((data) => {
         if (data?.leads && Array.isArray(data.leads)) {
           setLeads(data.leads);
+          setTotalCount(typeof data.total === 'number' ? data.total : data.leads.length);
         } else {
           setLeads([]);
+          setTotalCount(0);
         }
       })
       .catch((err) => {
@@ -49,28 +62,13 @@ export default function LeadsPage() {
         setError('Failed to fetch live commercial leads from server.');
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [offset, tempFilter, statusFilter, searchQuery]);
 
   React.useEffect(() => {
-    void fetchLeads();
+    fetchLeads();
   }, [fetchLeads]);
 
-  const filteredLeads = useMemo(() => {
-    return leads.filter((lead) => {
-      const matchesTemp = tempFilter === 'ALL' || lead.temperature === tempFilter;
-      const matchesStatus = statusFilter === 'ALL' || lead.status === statusFilter;
-      const q = searchQuery.toLowerCase();
-      const matchesSearch =
-        !searchQuery ||
-        lead.customer_name.toLowerCase().includes(q) ||
-        lead.phone.toLowerCase().includes(q) ||
-        lead.company?.toLowerCase().includes(q) ||
-        lead.route?.toLowerCase().includes(q) ||
-        lead.requirement.toLowerCase().includes(q);
-
-      return matchesTemp && matchesStatus && matchesSearch;
-    });
-  }, [leads, tempFilter, statusFilter, searchQuery]);
+  const filteredLeads = leads;
 
   const handleUpdateStatus = async (leadId: string, newStatus: Lead['status']) => {
     // Optimistic UI update
@@ -124,7 +122,7 @@ export default function LeadsPage() {
           <input
             type="text"
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(e) => { setSearchQuery(e.target.value); setOffset(0); }}
             placeholder="Search by customer name, phone, company, route or requirement..."
             className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg pl-9 pr-4 py-1.5 text-xs text-slate-900 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-hidden focus:border-sky-500"
           />
@@ -134,7 +132,7 @@ export default function LeadsPage() {
           <span className="text-xs text-slate-500 dark:text-slate-400 shrink-0">Temperature:</span>
           <select
             value={tempFilter}
-            onChange={(e) => setTempFilter(e.target.value)}
+            onChange={(e) => { setTempFilter(e.target.value); setOffset(0); }}
             className="bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-900 dark:text-slate-200 focus:outline-hidden focus:border-sky-500"
           >
             <option value="ALL">All Temperatures</option>
@@ -149,7 +147,7 @@ export default function LeadsPage() {
           <span className="text-xs text-slate-500 dark:text-slate-400 shrink-0">Status:</span>
           <select
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
+            onChange={(e) => { setStatusFilter(e.target.value); setOffset(0); }}
             className="bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-900 dark:text-slate-200 focus:outline-hidden focus:border-sky-500"
           >
             <option value="ALL">All Stages</option>
@@ -257,6 +255,35 @@ export default function LeadsPage() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Pagination Controls */}
+      {totalCount > PAGE_SIZE && (
+        <div className="flex items-center justify-between px-3 py-3 rounded-xl bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-xs">
+          <span className="text-slate-500 dark:text-slate-400">
+            Showing <span className="font-semibold text-slate-900 dark:text-white">{offset + 1}</span> to{' '}
+            <span className="font-semibold text-slate-900 dark:text-white">{Math.min(offset + leads.length, totalCount)}</span> of{' '}
+            <span className="font-semibold text-slate-900 dark:text-white">{totalCount}</span> leads
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+              disabled={offset === 0 || loading}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              onClick={() => setOffset(offset + PAGE_SIZE)}
+              disabled={offset + leads.length >= totalCount || loading}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              Next
+            </button>
+          </div>
         </div>
       )}
 

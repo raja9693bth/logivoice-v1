@@ -19,16 +19,26 @@ import { AuditEvent, AuditSeverity } from '@/types/logivoice';
 
 export default function SystemAuditPage() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [severityFilter, setSeverityFilter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedEvent, setSelectedEvent] = useState<AuditEvent | null>(null);
 
+  const PAGE_SIZE = 20;
+
   const fetchAuditEvents = React.useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch('/api/audit')
+    const params = new URLSearchParams();
+    params.set('limit', String(PAGE_SIZE));
+    params.set('offset', String(offset));
+    if (severityFilter !== 'ALL') params.set('severity', severityFilter);
+    if (searchQuery.trim()) params.set('search', searchQuery.trim());
+
+    fetch(`/api/audit?${params.toString()}`)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
@@ -36,8 +46,10 @@ export default function SystemAuditPage() {
       .then((data) => {
         if (data?.events && Array.isArray(data.events)) {
           setEvents(data.events);
+          setTotalCount(typeof data.total === 'number' ? data.total : data.events.length);
         } else {
           setEvents([]);
+          setTotalCount(0);
         }
       })
       .catch((err) => {
@@ -45,26 +57,13 @@ export default function SystemAuditPage() {
         setError('Failed to fetch system audit logs from server.');
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [offset, severityFilter, searchQuery]);
 
   React.useEffect(() => {
-    void fetchAuditEvents();
+    fetchAuditEvents();
   }, [fetchAuditEvents]);
 
-  const filteredEvents = useMemo(() => {
-    return events.filter((ev) => {
-      const matchesSeverity = severityFilter === 'ALL' || ev.severity === severityFilter;
-      const q = searchQuery.toLowerCase();
-      const matchesSearch =
-        !searchQuery ||
-        ev.event_type.toLowerCase().includes(q) ||
-        ev.actor.toLowerCase().includes(q) ||
-        ev.call_id?.toLowerCase().includes(q) ||
-        ev.tool_name?.toLowerCase().includes(q);
-
-      return matchesSeverity && matchesSearch;
-    });
-  }, [events, severityFilter, searchQuery]);
+  const filteredEvents = events;
 
   return (
     <div className="space-y-6 min-w-0 max-w-full">
@@ -154,7 +153,7 @@ export default function SystemAuditPage() {
           <input
             type="text"
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(e) => { setSearchQuery(e.target.value); setOffset(0); }}
             placeholder="Search by event type, actor, call ID, or tool name..."
             className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg pl-9 pr-4 py-1.5 text-xs text-slate-900 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-hidden focus:border-sky-500"
           />
@@ -164,7 +163,7 @@ export default function SystemAuditPage() {
           <span className="text-xs text-slate-500 dark:text-slate-400 shrink-0">Severity:</span>
           <select
             value={severityFilter}
-            onChange={(e) => setSeverityFilter(e.target.value)}
+            onChange={(e) => { setSeverityFilter(e.target.value); setOffset(0); }}
             className="bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-900 dark:text-slate-200 focus:outline-hidden focus:border-sky-500"
           >
             <option value="ALL">All Severities</option>
@@ -253,6 +252,35 @@ export default function SystemAuditPage() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Pagination Controls */}
+      {totalCount > PAGE_SIZE && (
+        <div className="flex items-center justify-between px-3 py-3 rounded-xl bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-xs">
+          <span className="text-slate-500 dark:text-slate-400">
+            Showing <span className="font-semibold text-slate-900 dark:text-white">{offset + 1}</span> to{' '}
+            <span className="font-semibold text-slate-900 dark:text-white">{Math.min(offset + events.length, totalCount)}</span> of{' '}
+            <span className="font-semibold text-slate-900 dark:text-white">{totalCount}</span> events
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+              disabled={offset === 0 || loading}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              onClick={() => setOffset(offset + PAGE_SIZE)}
+              disabled={offset + events.length >= totalCount || loading}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              Next
+            </button>
+          </div>
         </div>
       )}
 

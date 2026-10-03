@@ -15,7 +15,7 @@ import crypto from 'crypto';
 import { db, DEFAULT_TENANT_ID } from '@/lib/db';
 import { TransferToHumanInput, TransferToHumanOutput } from '@/lib/schemas/tools';
 import { executeProviderCallTransfer } from '@/lib/integrations/telephony';
-import { normalizePhoneNumber } from '@/lib/utils';
+import { normalizePhoneNumber, formatMaskedPhone } from '@/lib/utils';
 
 async function logTransferAudit(
   tenantId: string,
@@ -25,25 +25,29 @@ async function logTransferAudit(
   targetPhone: string | undefined,
   extra: Record<string, unknown>
 ): Promise<void> {
-  await db.logAuditEvent(
-    {
-      tenant_id: tenantId,
-      call_id: callId,
-      event_type: 'CALL_ESCALATED',
-      actor: 'AI_AGENT',
-      actor_type: 'AI_AGENT',
-      actor_id: 'voice-agent',
-      tool_name: 'transfer_to_human',
-      severity: 'WARNING',
-      details: {
-        reason,
-        target_role: targetRole,
-        target_phone: targetPhone,
-        ...extra,
+  try {
+    await db.logAuditEvent(
+      {
+        tenant_id: tenantId,
+        call_id: callId,
+        event_type: 'CALL_ESCALATED',
+        actor: 'AI_AGENT',
+        actor_type: 'AI_AGENT',
+        actor_id: 'voice-agent',
+        tool_name: 'transfer_to_human',
+        severity: 'WARNING',
+        details: {
+          reason,
+          target_role: targetRole,
+          target_phone: targetPhone ? formatMaskedPhone(targetPhone) : undefined,
+          ...extra,
+        },
       },
-    },
-    tenantId
-  );
+      tenantId
+    );
+  } catch {
+    // Best-effort audit logging
+  }
 }
 
 export async function executeTransferToHuman(
@@ -91,12 +95,18 @@ export async function executeTransferToHuman(
         tenantId,
       });
 
-      if (providerResult.success && providerResult.status === 'TRANSFERRED') {
+      if (
+        providerResult.success &&
+        (providerResult.status === 'TRANSFERRED' ||
+          providerResult.status === 'TRANSFER_REQUEST_ACCEPTED' ||
+          providerResult.status === 'TRANSFER_CONNECTED')
+      ) {
         // Audit log verified provider escalation
         await logTransferAudit(tenantId, input.call_id, input.reason, targetContact.role, targetPhone, {
           context_summary: input.context_summary,
           provider: providerResult.provider,
           provider_transfer_id: providerResult.providerTransferId,
+          transfer_state: providerResult.status,
           provider_confirmed: true,
         });
 
@@ -110,6 +120,37 @@ export async function executeTransferToHuman(
 
       // If provider was invoked but failed or rejected, log audit failure event
       if (providerResult.status !== 'UNCONFIGURED') {
+        try {
+          await db.logAuditEvent(
+            {
+              tenant_id: tenantId,
+              call_id: input.call_id,
+              event_type: 'CALL_ESCALATION_FAILED',
+              actor: 'AI_AGENT',
+              actor_type: 'AI_AGENT',
+              actor_id: 'voice-agent',
+              tool_name: 'transfer_to_human',
+              severity: 'ERROR',
+              details: {
+                reason: input.reason,
+                target_role: targetContact?.role,
+                target_phone: targetPhone ? formatMaskedPhone(targetPhone) : undefined,
+                provider: providerResult.provider,
+                provider_status: providerResult.status,
+                error: providerResult.error,
+              },
+            },
+            tenantId
+          );
+        } catch {
+          // Best-effort audit logging
+        }
+      }
+    }
+
+    // Fallback: If caller phone is missing, live transfer cannot fall back to a callback
+    if (!input.caller_phone) {
+      try {
         await db.logAuditEvent(
           {
             tenant_id: tenantId,
@@ -119,40 +160,17 @@ export async function executeTransferToHuman(
             actor_type: 'AI_AGENT',
             actor_id: 'voice-agent',
             tool_name: 'transfer_to_human',
-            severity: 'ERROR',
+            severity: 'WARNING',
             details: {
               reason: input.reason,
-              target_role: targetContact?.role,
-              target_phone: targetPhone,
-              provider: providerResult.provider,
-              provider_status: providerResult.status,
-              error: providerResult.error,
+              error: 'Live transfer provider unavailable and caller phone not provided.',
             },
           },
           tenantId
         );
+      } catch {
+        // Best-effort audit logging
       }
-    }
-
-    // Fallback: If caller phone is missing, live transfer cannot fall back to a callback
-    if (!input.caller_phone) {
-      await db.logAuditEvent(
-        {
-          tenant_id: tenantId,
-          call_id: input.call_id,
-          event_type: 'CALL_ESCALATION_FAILED',
-          actor: 'AI_AGENT',
-          actor_type: 'AI_AGENT',
-          actor_id: 'voice-agent',
-          tool_name: 'transfer_to_human',
-          severity: 'WARNING',
-          details: {
-            reason: input.reason,
-            error: 'Live transfer provider unavailable and caller phone not provided.',
-          },
-        },
-        tenantId
-      );
 
       return {
         status: 'TRANSFER_UNAVAILABLE',

@@ -29,7 +29,10 @@ const ALLOWED_TOOLS = [
   'send_followup',
 ] as const;
 
-// In-memory sliding rate limiter: max 120 calls per minute per IP / caller
+// Advisory in-memory sliding rate limiter: max 120 calls per minute per IP / caller.
+// NOTE: This is an advisory per-process limiter and does NOT provide distributed cluster-wide throttling.
+// Authoritative security boundary is strictly enforced by Retell cryptographic signature verification
+// (X-Retell-Signature) and dedicated RETELL_TOOL_SECRET validation.
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 
 function checkRateLimit(key: string, limit = 120, windowMs = 60000): boolean {

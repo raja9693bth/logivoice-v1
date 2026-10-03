@@ -14,6 +14,7 @@ export async function GET(req: NextRequest) {
     const rawQuery = {
       intent: searchParams.get('intent') || undefined,
       outcome: searchParams.get('outcome') || undefined,
+      temperature: searchParams.get('temperature') || undefined,
       search: searchParams.get('search') || undefined,
       limit: searchParams.get('limit') || undefined,
       offset: searchParams.get('offset') || undefined,
@@ -27,11 +28,12 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const { intent, outcome, search, limit, offset } = parsedQuery.data;
+    const { intent, outcome, temperature, search, limit, offset } = parsedQuery.data;
 
     const { calls, total } = await db.listCallsWithCount(authContext.tenantId, {
       intent,
       outcome,
+      temperature,
       search,
       limit,
       offset,

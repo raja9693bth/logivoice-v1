@@ -49,7 +49,8 @@ export type FollowupStatus =
   | 'MOCK'
   | 'COMPLETED'
   | 'SKIPPED'
-  | 'SKIPPED_NOT_ELIGIBLE';
+  | 'SKIPPED_NOT_ELIGIBLE'
+  | 'UNKNOWN';
 
 export type AuditSeverity = 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
 
@@ -88,6 +89,7 @@ export interface SideEffectClaim {
   last_error?: string;
   claimed_at: string;
   claimed_by?: string;
+  claim_token?: string;
   lease_expires_at?: string;
   next_retry_at?: string;
   completed_at?: string;
@@ -300,7 +302,8 @@ export interface KnowledgeItem {
 export interface AuditEvent {
   id: string;
   tenant_id: string;
-  call_id?: string;
+  call_id?: string | null;
+  external_call_id?: string | null;
   event_type: string;
   actor: string;
   actor_type?: 'AI_AGENT' | 'DISPATCHER' | 'ADMIN' | 'OPS_MANAGER' | 'SYSTEM' | 'WEBHOOK' | 'USER';
@@ -310,6 +313,20 @@ export interface AuditEvent {
   details: Record<string, unknown>;
   timestamp: string;
   created_at?: string;
+}
+
+export interface ToolExecution {
+  id: string;
+  tenant_id: string;
+  call_id?: string | null;
+  external_call_id?: string | null;
+  tool_name: string;
+  execution_status: string;
+  success: boolean;
+  safe_result?: Record<string, unknown> | null;
+  latency_ms?: number | null;
+  provider_reference?: string | null;
+  created_at: string;
 }
 
 export interface DispatcherKPIs {

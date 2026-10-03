@@ -29,7 +29,7 @@ export async function GET(req: NextRequest) {
 
     const { temperature, status, search, limit, offset } = parsedQuery.data;
 
-    const leads = await db.listLeads(authContext.tenantId, {
+    const { leads, total } = await db.listLeadsWithCount(authContext.tenantId, {
       temperature,
       status,
       search,
@@ -37,7 +37,15 @@ export async function GET(req: NextRequest) {
       offset,
     });
 
-    return NextResponse.json({ leads });
+    const safeLimit = limit ?? 50;
+    const safeOffset = offset ?? 0;
+    return NextResponse.json({
+      leads,
+      total,
+      limit: safeLimit,
+      offset: safeOffset,
+      has_more: safeOffset + leads.length < total,
+    });
   } catch (error) {
     return handleApiError(error, 'api/leads:GET');
   }

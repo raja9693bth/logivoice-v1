@@ -156,6 +156,7 @@ export interface AuditEventsDbRow {
   id: string;
   tenant_id: string;
   call_id: string | null;
+  external_call_id?: string | null;
   event_type: string;
   actor_type: 'AI_AGENT' | 'DISPATCHER' | 'ADMIN' | 'OPS_MANAGER' | 'SYSTEM' | 'WEBHOOK' | 'USER';
   actor_id: string;
@@ -301,6 +302,11 @@ export function dbCallToDomain(
  * Maps Lead domain object to normalized PostgreSQL `leads` row.
  * Strips customer details (customer_name, phone, company) which belong in the `customers` table.
  */
+export function isValidUuid(id: string | null | undefined): boolean {
+  if (!id) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+}
+
 export function domainLeadToDbRow(
   lead: Partial<Lead> & { id: string; tenant_id: string }
 ): LeadsDbRow {
@@ -312,7 +318,7 @@ export function domainLeadToDbRow(
     id: lead.id,
     tenant_id: lead.tenant_id,
     customer_id: lead.customer_id,
-    call_id: lead.call_id && !lead.call_id.startsWith('call-') ? lead.call_id : null,
+    call_id: isValidUuid(lead.call_id) ? lead.call_id! : null,
     source: lead.source || 'INBOUND_CALL',
     status: lead.status || 'NEW',
     temperature: lead.temperature || 'WARM',
@@ -381,8 +387,8 @@ export function domainRequestToDbRow(
     id: req.id,
     reference_no: req.reference_no,
     tenant_id: req.tenant_id,
-    call_id: req.call_id && !req.call_id.startsWith('call-') ? req.call_id : null,
-    customer_id: req.customer_id && !req.customer_id.startsWith('cust-') ? req.customer_id : null,
+    call_id: isValidUuid(req.call_id) ? req.call_id! : null,
+    customer_id: isValidUuid(req.customer_id) ? req.customer_id! : null,
     type: req.type || 'BOOKING_REQUEST',
     status: req.status || 'PENDING',
     priority: req.priority || 'NORMAL',
@@ -523,10 +529,12 @@ export function domainAuditToDbRow(
   event: Partial<AuditEvent> & { id: string; tenant_id: string; event_type: string }
 ): AuditEventsDbRow {
   const now = new Date().toISOString();
+  const isUuid = isValidUuid(event.call_id);
   return {
     id: event.id,
     tenant_id: event.tenant_id,
-    call_id: event.call_id && !event.call_id.startsWith('call-') ? event.call_id : null,
+    call_id: isUuid ? event.call_id! : null,
+    external_call_id: event.external_call_id || (!isUuid && event.call_id ? event.call_id : null),
     event_type: event.event_type,
     actor_type: event.actor_type || 'SYSTEM',
     actor_id: event.actor_id || event.actor || 'system',

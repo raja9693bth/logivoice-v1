@@ -12,7 +12,7 @@
  */
 
 import { AuthContext } from '@/lib/auth/context';
-import { db } from '@/lib/db';
+import { db, isValidUuid } from '@/lib/db';
 import {
   LookupCustomerInputSchema,
   GetRateQuoteInputSchema,
@@ -89,8 +89,24 @@ export async function dispatchTool(
   authContext: AuthContext
 ): Promise<ToolExecutionResponse> {
   const startTime = Date.now();
-  const { tool_name, arguments: args, call_id } = request;
+  const { tool_name, arguments: args, call_id, external_call_id } = request;
   const tenantId = authContext.tenantId;
+
+  const rawCallIdentifier =
+    call_id || external_call_id || (args?.call_id as string) || (args?.external_call_id as string) || undefined;
+  const resolvedInternalCallId = await db.resolveInternalCallId({
+    tenantId,
+    externalCallId: rawCallIdentifier,
+  });
+  const effectiveInternalCallUuid =
+    resolvedInternalCallId && isValidUuid(resolvedInternalCallId)
+      ? resolvedInternalCallId
+      : rawCallIdentifier && isValidUuid(rawCallIdentifier)
+      ? rawCallIdentifier
+      : null;
+  const effectiveExternalCallId =
+    (!isValidUuid(rawCallIdentifier) ? rawCallIdentifier : external_call_id) || null;
+  const callRef = effectiveInternalCallUuid || rawCallIdentifier;
 
   try {
     let result: Record<string, unknown>;
@@ -122,7 +138,7 @@ export async function dispatchTool(
       }
 
       case 'create_booking_request': {
-        const effectiveCallId = call_id || (args.call_id as string) || undefined;
+        const effectiveCallId = callRef || (args.call_id as string) || undefined;
         const validated = CreateBookingRequestInputSchema.parse({ ...args, call_id: effectiveCallId });
         const res = await executeCreateBookingRequest(validated, tenantId);
         result = res as unknown as Record<string, unknown>;
@@ -131,7 +147,7 @@ export async function dispatchTool(
       }
 
       case 'create_support_ticket': {
-        const effectiveCallId = call_id || (args.call_id as string) || undefined;
+        const effectiveCallId = callRef || (args.call_id as string) || undefined;
         const validated = CreateSupportTicketInputSchema.parse({ ...args, call_id: effectiveCallId });
         const res = await executeCreateSupportTicket(validated, tenantId);
         result = res as unknown as Record<string, unknown>;
@@ -140,7 +156,7 @@ export async function dispatchTool(
       }
 
       case 'transfer_to_human': {
-        const effectiveCallId = call_id || (args.call_id as string) || undefined;
+        const effectiveCallId = callRef || (args.call_id as string) || undefined;
         const validated = TransferToHumanInputSchema.parse({ ...args, call_id: effectiveCallId });
         const res = await executeTransferToHuman(validated, tenantId);
         result = res as unknown as Record<string, unknown>;
@@ -149,8 +165,12 @@ export async function dispatchTool(
       }
 
       case 'save_call_outcome': {
-        const effectiveCallId = call_id || (args.call_id as string) || undefined;
-        const validated = SaveCallOutcomeInputSchema.parse({ ...args, call_id: effectiveCallId });
+        const effectiveCallId = callRef || (args.call_id as string) || undefined;
+        const validated = SaveCallOutcomeInputSchema.parse({
+          ...args,
+          call_id: effectiveCallId,
+          external_call_id: args.external_call_id || effectiveExternalCallId || effectiveCallId,
+        });
         const res = await executeSaveCallOutcome(validated, tenantId);
         result = res as unknown as Record<string, unknown>;
         executionStatus = res.status;
@@ -158,7 +178,8 @@ export async function dispatchTool(
       }
 
       case 'send_followup': {
-        const validated = SendFollowupInputSchema.parse(args);
+        const effectiveCallId = callRef || (args.call_id as string) || undefined;
+        const validated = SendFollowupInputSchema.parse({ ...args, call_id: effectiveCallId });
         const res = await executeSendFollowup(validated, tenantId);
         result = res as unknown as Record<string, unknown>;
         executionStatus = res.status;
@@ -182,12 +203,50 @@ export async function dispatchTool(
         ? 'OPS_MANAGER'
         : 'DISPATCHER';
 
+    const isFailureStatus = [
+      'FAILED',
+      'PROVIDER_UNAVAILABLE',
+      'PROVIDER_ERROR',
+      'UNAVAILABLE',
+      'TRANSFER_UNAVAILABLE',
+    ].includes(executionStatus);
+
+    // Record structured tool execution in public.tool_executions
+    try {
+      await db.recordToolExecution(
+        {
+          tenant_id: tenantId,
+          call_id: effectiveInternalCallUuid,
+          external_call_id: effectiveExternalCallId,
+          tool_name,
+          execution_status: executionStatus,
+          success: !isFailureStatus,
+          safe_result: result,
+          latency_ms: latencyMs,
+          provider_reference: (
+            result?.provider_message_id ||
+            result?.providerTransferId ||
+            result?.provider_transfer_id ||
+            result?.booking_id ||
+            result?.request_id ||
+            result?.ticket_id ||
+            result?.transfer_id ||
+            result?.quote_id
+          ) as string || null,
+        },
+        tenantId
+      );
+    } catch {
+      // Best-effort tool execution recording
+    }
+
     // Log Tool Execution Event in Audit Trail with PII minimization
     try {
       await db.logAuditEvent(
         {
           tenant_id: tenantId,
-          call_id,
+          call_id: effectiveInternalCallUuid || undefined,
+          external_call_id: effectiveExternalCallId || undefined,
           event_type: 'TOOL_EXECUTION',
           actor: authContext.userId,
           actor_type: actorType,
@@ -206,14 +265,6 @@ export async function dispatchTool(
       // Best-effort audit logging
     }
 
-    const isFailureStatus = [
-      'FAILED',
-      'PROVIDER_UNAVAILABLE',
-      'PROVIDER_ERROR',
-      'UNAVAILABLE',
-      'TRANSFER_UNAVAILABLE',
-    ].includes(executionStatus);
-
     return {
       tool_name,
       success: !isFailureStatus,
@@ -227,10 +278,29 @@ export async function dispatchTool(
     const sanitizedArgs = sanitizeAuditArguments(tool_name, args);
 
     try {
+      await db.recordToolExecution(
+        {
+          tenant_id: tenantId,
+          call_id: effectiveInternalCallUuid,
+          external_call_id: effectiveExternalCallId,
+          tool_name,
+          execution_status: 'FAILED',
+          success: false,
+          safe_result: { error: errorMessage },
+          latency_ms: latencyMs,
+        },
+        tenantId
+      );
+    } catch {
+      // Best-effort tool execution recording
+    }
+
+    try {
       await db.logAuditEvent(
         {
           tenant_id: tenantId,
-          call_id,
+          call_id: effectiveInternalCallUuid || undefined,
+          external_call_id: effectiveExternalCallId || undefined,
           event_type: 'TOOL_EXECUTION_FAILED',
           actor: authContext.userId,
           actor_type: authContext.role === 'VOICE_GATEWAY' ? 'AI_AGENT' : 'DISPATCHER',

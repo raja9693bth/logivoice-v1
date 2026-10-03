@@ -16,10 +16,12 @@ import { formatCurrencyINR } from '@/lib/utils';
 import { Drawer } from '@/components/ui/Drawer';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { RateCard } from '@/types/logivoice';
-import { parseRateCardsCsv } from '@/lib/rules/rate-engine';
+import { parseRateCardsCsv, ParsedCsvRateRow } from '@/lib/rules/rate-engine';
 
 export default function RateCardsPage() {
   const [rateCards, setRateCards] = useState<RateCard[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -29,10 +31,18 @@ export default function RateCardsPage() {
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [editingCard, setEditingCard] = useState<RateCard | null>(null);
 
+  const PAGE_SIZE = 10;
+
   const fetchRateCards = React.useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch('/api/rates')
+    const params = new URLSearchParams();
+    params.set('limit', String(PAGE_SIZE));
+    params.set('offset', String(offset));
+    if (statusFilter !== 'ALL') params.set('status', statusFilter);
+    if (searchQuery.trim()) params.set('search', searchQuery.trim());
+
+    fetch(`/api/rates?${params.toString()}`)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
@@ -40,8 +50,10 @@ export default function RateCardsPage() {
       .then((data) => {
         if (data?.rate_cards && Array.isArray(data.rate_cards)) {
           setRateCards(data.rate_cards);
+          setTotalCount(typeof data.total === 'number' ? data.total : data.rate_cards.length);
         } else {
           setRateCards([]);
+          setTotalCount(0);
         }
       })
       .catch((err) => {
@@ -49,10 +61,10 @@ export default function RateCardsPage() {
         setError('Failed to fetch rate cards from server.');
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [offset, statusFilter, searchQuery]);
 
   React.useEffect(() => {
-    void fetchRateCards();
+    fetchRateCards();
   }, [fetchRateCards]);
 
   // Form State
@@ -73,37 +85,11 @@ export default function RateCardsPage() {
 
   // CSV Import State
   const [csvFile, setCsvFile] = useState<File | null>(null);
-  const [csvParsedRows, setCsvParsedRows] = useState<
-    Array<{
-      origin: string;
-      destination: string;
-      vehicle_type: string;
-      weight_min_tons: number;
-      weight_max_tons: number;
-      price_inr: number;
-      minimum_charge_inr: number;
-      transit_time_hours: number;
-      error?: string;
-      conflict?: boolean;
-      conflictNote?: string;
-    }>
-  >([]);
+  const [csvParsedRows, setCsvParsedRows] = useState<ParsedCsvRateRow[]>([]);
   const [csvImporting, setCsvImporting] = useState(false);
   const [csvResultMsg, setCsvResultMsg] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
 
-  const filteredRateCards = useMemo(() => {
-    return rateCards.filter((rc) => {
-      const q = searchQuery.toLowerCase();
-      const matchesSearch =
-        !searchQuery ||
-        rc.origin.toLowerCase().includes(q) ||
-        rc.destination.toLowerCase().includes(q) ||
-        rc.vehicle_type.toLowerCase().includes(q);
-
-      const matchesStatus = statusFilter === 'ALL' || rc.status === statusFilter;
-      return matchesSearch && matchesStatus;
-    });
-  }, [rateCards, searchQuery, statusFilter]);
+  const filteredRateCards = rateCards;
 
   const openNewRateCardModal = () => {
     setEditingCard(null);
@@ -253,12 +239,13 @@ export default function RateCardsPage() {
       weight_min_tons: r.weight_min_tons,
       weight_max_tons: r.weight_max_tons,
       price_inr: r.price_inr,
-      minimum_charge_inr: r.minimum_charge_inr,
-      transit_time_hours: r.transit_time_hours,
-      effective_from: new Date().toISOString().split('T')[0],
-      status: 'ACTIVE' as const,
-      quote_type: 'ESTIMATE' as const,
-      supports_confirmed_quote: false,
+      minimum_charge_inr: r.minimum_charge_inr ?? undefined,
+      transit_time_hours: r.transit_time_hours ?? undefined,
+      effective_from: r.effective_from,
+      effective_to: r.effective_to ?? undefined,
+      status: r.status,
+      quote_type: r.quote_type,
+      supports_confirmed_quote: r.supports_confirmed_quote,
     }));
 
     try {
@@ -300,10 +287,10 @@ export default function RateCardsPage() {
 
   const handleDownloadSampleTemplate = () => {
     const csvContent =
-      'origin,destination,vehicle_type,weight_min_tons,weight_max_tons,price_inr,minimum_charge_inr,transit_time_hours\n' +
-      'Delhi,Mumbai,32ft MXL,5.0,15.0,42000,38000,48\n' +
-      'Delhi,Jaipur,14ft Closed,1.0,4.0,14000,12000,12\n' +
-      'Mumbai,Pune,Tata Ace,0.5,1.5,4500,4000,6\n';
+      'origin,destination,vehicle_type,weight_min_tons,weight_max_tons,price_inr,effective_from,status,minimum_charge_inr,transit_time_hours,quote_type\n' +
+      'Delhi,Mumbai,32ft MXL,5.0,15.0,42000,2026-09-01,DRAFT,38000,48,ESTIMATE\n' +
+      'Delhi,Jaipur,14ft Closed,1.0,4.0,14000,2026-09-01,DRAFT,12000,12,ESTIMATE\n' +
+      'Mumbai,Pune,Tata Ace,0.5,1.5,4500,2026-09-01,DRAFT,4000,6,ESTIMATE\n';
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -349,7 +336,7 @@ export default function RateCardsPage() {
           <input
             type="text"
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(e) => { setSearchQuery(e.target.value); setOffset(0); }}
             placeholder="Filter by origin city, destination, vehicle type..."
             className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg pl-9 pr-4 py-1.5 text-xs text-slate-900 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-hidden focus:border-sky-500"
           />
@@ -359,7 +346,7 @@ export default function RateCardsPage() {
           <span className="text-xs text-slate-500 dark:text-slate-400 shrink-0">Status:</span>
           <select
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
+            onChange={(e) => { setStatusFilter(e.target.value); setOffset(0); }}
             className="bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-900 dark:text-slate-200 focus:outline-hidden focus:border-sky-500"
           >
             <option value="ALL">All Statuses</option>
@@ -465,6 +452,35 @@ export default function RateCardsPage() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Pagination Controls */}
+      {totalCount > PAGE_SIZE && (
+        <div className="flex items-center justify-between px-3 py-3 rounded-xl bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-xs">
+          <span className="text-slate-500 dark:text-slate-400">
+            Showing <span className="font-semibold text-slate-900 dark:text-white">{offset + 1}</span> to{' '}
+            <span className="font-semibold text-slate-900 dark:text-white">{Math.min(offset + rateCards.length, totalCount)}</span> of{' '}
+            <span className="font-semibold text-slate-900 dark:text-white">{totalCount}</span> corridors
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+              disabled={offset === 0 || loading}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              onClick={() => setOffset(offset + PAGE_SIZE)}
+              disabled={offset + rateCards.length >= totalCount || loading}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              Next
+            </button>
+          </div>
         </div>
       )}
 

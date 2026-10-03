@@ -308,6 +308,7 @@ export const ListCallsQuerySchema = z.object({
       'ABANDONED',
     ])
     .optional(),
+  temperature: z.enum(['HOT', 'WARM', 'COLD', 'REVIEW']).optional(),
   search: z.string().max(100).optional(),
   limit: z.coerce.number().int().min(1).max(200).optional(),
   offset: z.coerce.number().int().min(0).optional(),
@@ -361,6 +362,10 @@ export const ListKnowledgeQuerySchema = z.object({
       'COMMERCIAL_CLAUSE',
     ])
     .optional(),
+  status: z.enum(['DRAFT', 'UNDER_REVIEW', 'APPROVED', 'ARCHIVED']).optional(),
+  search: z.string().max(100).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
 }).strict();
 
 export const GetRateQuoteQuerySchema = z.object({
@@ -369,9 +374,9 @@ export const GetRateQuoteQuerySchema = z.object({
   vehicle_type: z.string().max(50).optional(),
   weight_tons: z.coerce.number().positive().max(1000).optional(),
   pickup_date: z.string().max(50).optional(),
-  status: z.enum(['ACTIVE', 'INACTIVE', 'EXPIRED']).optional(),
+  status: z.enum(['ACTIVE', 'DRAFT', 'EXPIRED', 'INACTIVE']).optional(),
   search: z.string().max(100).optional(),
-  limit: z.coerce.number().int().min(1).max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(500).optional(),
   offset: z.coerce.number().int().min(0).optional(),
 }).strict();
 
@@ -382,6 +387,7 @@ export const ListAuditQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).optional(),
   event_type: z.string().max(100).optional(),
   severity: z.enum(['INFO', 'WARNING', 'ERROR', 'CRITICAL']).optional(),
+  search: z.string().max(100).optional(),
 }).strict();
 
 export const BulkCreateRateCardsApiSchema = z.object({

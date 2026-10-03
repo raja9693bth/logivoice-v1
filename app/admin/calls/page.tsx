@@ -67,6 +67,7 @@ function CallsPageContent() {
       params.set('offset', String(offset));
       if (intentFilter !== 'ALL') params.set('intent', intentFilter);
       if (outcomeFilter !== 'ALL') params.set('outcome', outcomeFilter);
+      if (tempFilter !== 'ALL') params.set('temperature', tempFilter);
       if (searchQuery.trim()) params.set('search', searchQuery.trim());
 
       const res = await fetch(`/api/calls?${params.toString()}`);
@@ -90,12 +91,9 @@ function CallsPageContent() {
 
   useEffect(() => {
     void fetchCalls();
-  }, [offset, intentFilter, outcomeFilter, searchQuery]);
+  }, [offset, intentFilter, outcomeFilter, tempFilter, searchQuery]);
 
-  const filteredCalls = useMemo(() => {
-    if (tempFilter === 'ALL') return calls;
-    return calls.filter((call) => call.lead_temperature === tempFilter);
-  }, [calls, tempFilter]);
+  const filteredCalls = calls;
 
   const resetFilters = () => {
     setSearchQuery('');
@@ -210,7 +208,10 @@ function CallsPageContent() {
             <span className="text-xs text-slate-500 dark:text-slate-400 shrink-0">Temperature:</span>
             <select
               value={tempFilter}
-              onChange={(e) => setTempFilter(e.target.value)}
+              onChange={(e) => {
+                setTempFilter(e.target.value);
+                setOffset(0);
+              }}
               className="bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 dark:text-slate-200 focus:outline-hidden focus:border-sky-500"
             >
               <option value="ALL">All Temps</option>

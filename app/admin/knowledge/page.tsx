@@ -1,23 +1,27 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState } from 'react';
 import {
-  BookOpen,
   Search,
   Plus,
-  CheckCircle2,
-  AlertCircle,
-  FileText,
-  Clock,
   Layers,
   Edit2,
+  CheckCircle2,
+  Clock,
+  Archive,
+  ArrowRight,
+  Send,
 } from 'lucide-react';
 import { Drawer } from '@/components/ui/Drawer';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { KnowledgeItem } from '@/types/logivoice';
 
+const PAGE_SIZE = 10;
+
 export default function KnowledgeBasePage() {
   const [items, setItems] = useState<KnowledgeItem[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -26,10 +30,21 @@ export default function KnowledgeBasePage() {
   const [editingItem, setEditingItem] = useState<KnowledgeItem | null>(null);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
 
-  const fetchKnowledge = React.useCallback(() => {
+  // Form State
+  const [formCategory, setFormCategory] = useState<KnowledgeItem['category']>('OPERATIONAL_FAQ');
+  const [formTitle, setFormTitle] = useState('');
+  const [formContent, setFormContent] = useState('');
+
+  const fetchKnowledge = React.useCallback((currentOffset: number, cat: string, search: string) => {
     setLoading(true);
     setError(null);
-    fetch('/api/knowledge')
+    const params = new URLSearchParams();
+    if (cat !== 'ALL') params.set('category', cat);
+    if (search.trim()) params.set('search', search.trim());
+    params.set('limit', String(PAGE_SIZE));
+    params.set('offset', String(currentOffset));
+
+    fetch(`/api/knowledge?${params.toString()}`)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
@@ -37,8 +52,10 @@ export default function KnowledgeBasePage() {
       .then((data) => {
         if (data?.knowledge_items && Array.isArray(data.knowledge_items)) {
           setItems(data.knowledge_items);
+          setTotalCount(typeof data.total === 'number' ? data.total : data.knowledge_items.length);
         } else {
           setItems([]);
+          setTotalCount(0);
         }
       })
       .catch((err) => {
@@ -49,35 +66,24 @@ export default function KnowledgeBasePage() {
   }, []);
 
   React.useEffect(() => {
-    void fetchKnowledge();
-  }, [fetchKnowledge]);
+    fetchKnowledge(offset, selectedCategory, searchQuery);
+  }, [fetchKnowledge, offset, selectedCategory, searchQuery]);
 
-  // Form State
-  const [formCategory, setFormCategory] = useState<KnowledgeItem['category']>('OPERATIONAL_FAQ');
-  const [formTitle, setFormTitle] = useState('');
-  const [formContent, setFormContent] = useState('');
-  const [formStatus, setFormStatus] = useState<KnowledgeItem['status']>('DRAFT');
+  const handleSearchChange = (val: string) => {
+    setSearchQuery(val);
+    setOffset(0);
+  };
 
-  const filteredItems = useMemo(() => {
-    return items.filter((item) => {
-      const matchesCategory = selectedCategory === 'ALL' || item.category === selectedCategory;
-      const q = searchQuery.toLowerCase();
-      const matchesSearch =
-        !searchQuery ||
-        item.title.toLowerCase().includes(q) ||
-        item.content.toLowerCase().includes(q) ||
-        item.category.toLowerCase().includes(q);
-
-      return matchesCategory && matchesSearch;
-    });
-  }, [items, selectedCategory, searchQuery]);
+  const handleCategoryChange = (val: string) => {
+    setSelectedCategory(val);
+    setOffset(0);
+  };
 
   const openNewModal = () => {
     setEditingItem(null);
     setFormCategory('OPERATIONAL_FAQ');
     setFormTitle('');
     setFormContent('');
-    setFormStatus('DRAFT');
     setIsDrawerOpen(true);
   };
 
@@ -86,27 +92,33 @@ export default function KnowledgeBasePage() {
     setFormCategory(item.category);
     setFormTitle(item.title);
     setFormContent(item.content);
-    setFormStatus(item.status);
     setIsDrawerOpen(true);
   };
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSave = async (e: React.FormEvent, targetStatus?: KnowledgeItem['status']) => {
+    if (e) e.preventDefault();
     setSaving(true);
+    setError(null);
     try {
       if (editingItem) {
+        const payload: Record<string, unknown> = {
+          id: editingItem.id,
+          category: formCategory,
+          title: formTitle,
+          content: formContent,
+        };
+        if (targetStatus) {
+          payload.status = targetStatus;
+        }
         const res = await fetch('/api/knowledge', {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            id: editingItem.id,
-            category: formCategory,
-            title: formTitle,
-            content: formContent,
-            status: formStatus,
-          }),
+          body: JSON.stringify(payload),
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          const errData = await res.json().catch(() => null);
+          throw new Error(errData?.error || `HTTP ${res.status}`);
+        }
       } else {
         const res = await fetch('/api/knowledge', {
           method: 'POST',
@@ -115,17 +127,20 @@ export default function KnowledgeBasePage() {
             category: formCategory,
             title: formTitle,
             content: formContent,
-            status: formStatus,
+            status: 'DRAFT', // Always DRAFT on initial creation
             version: '1.0',
           }),
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          const errData = await res.json().catch(() => null);
+          throw new Error(errData?.error || `HTTP ${res.status}`);
+        }
       }
       setIsDrawerOpen(false);
-      fetchKnowledge();
-    } catch (err) {
+      fetchKnowledge(offset, selectedCategory, searchQuery);
+    } catch (err: any) {
       console.error('[KnowledgePage] Save error:', err);
-      setError('Failed to persist knowledge item to database.');
+      setError(err?.message || 'Failed to persist knowledge item.');
     } finally {
       setSaving(false);
     }
@@ -148,7 +163,7 @@ export default function KnowledgeBasePage() {
         </div>
         <button
           onClick={openNewModal}
-          className="px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold transition-colors inline-flex items-center gap-1.5 shadow-xs"
+          className="px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold transition-colors inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
         >
           <Plus className="w-3.5 h-3.5" />
           <span>New Policy / FAQ</span>
@@ -173,7 +188,7 @@ export default function KnowledgeBasePage() {
           <input
             type="text"
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(e) => handleSearchChange(e.target.value)}
             placeholder="Search operational policies, FAQs, and service rules..."
             className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg pl-9 pr-4 py-1.5 text-xs text-slate-900 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-hidden focus:border-sky-500"
           />
@@ -183,7 +198,7 @@ export default function KnowledgeBasePage() {
           <span className="text-xs text-slate-500 dark:text-slate-400 shrink-0">Category:</span>
           <select
             value={selectedCategory}
-            onChange={(e) => setSelectedCategory(e.target.value)}
+            onChange={(e) => handleCategoryChange(e.target.value)}
             className="bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-900 dark:text-slate-200 focus:outline-hidden focus:border-sky-500"
           >
             <option value="ALL">All Categories</option>
@@ -200,7 +215,7 @@ export default function KnowledgeBasePage() {
       {error && (
         <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-lg text-amber-800 dark:text-amber-200 text-xs flex items-center justify-between">
           <span>{error}</span>
-          <button onClick={() => fetchKnowledge()} className="underline font-semibold hover:text-amber-900">
+          <button onClick={() => fetchKnowledge(offset, selectedCategory, searchQuery)} className="underline font-semibold hover:text-amber-900 cursor-pointer">
             Retry
           </button>
         </div>
@@ -212,7 +227,7 @@ export default function KnowledgeBasePage() {
           <div className="inline-block w-6 h-6 border-2 border-sky-500 border-t-transparent rounded-full animate-spin mb-2"></div>
           <p>Loading operational knowledge items from database...</p>
         </div>
-      ) : filteredItems.length === 0 ? (
+      ) : items.length === 0 ? (
         <EmptyState
           title="No knowledge items found"
           description="Try selecting another category or create a new operational policy."
@@ -220,11 +235,12 @@ export default function KnowledgeBasePage() {
           onAction={() => {
             setSelectedCategory('ALL');
             setSearchQuery('');
+            setOffset(0);
           }}
         />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 min-w-0 max-w-full">
-          {filteredItems.map((item) => (
+          {items.map((item) => (
             <div
               key={item.id}
               className="p-5 rounded-xl bg-white dark:bg-slate-900/70 border border-slate-200 dark:border-slate-800 flex flex-col justify-between hover:border-slate-300 dark:hover:border-slate-700 transition-all group shadow-xs min-w-0 max-w-full"
@@ -239,6 +255,10 @@ export default function KnowledgeBasePage() {
                       className={`text-[10px] font-bold px-1.5 py-0.5 rounded border uppercase ${
                         item.status === 'APPROVED'
                           ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                          : item.status === 'UNDER_REVIEW'
+                          ? 'bg-sky-50 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-800'
+                          : item.status === 'ARCHIVED'
+                          ? 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-300 dark:border-slate-700'
                           : 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800'
                       }`}
                     >
@@ -246,7 +266,7 @@ export default function KnowledgeBasePage() {
                     </span>
                     <button
                       onClick={() => openEditModal(item)}
-                      className="p-1 rounded text-slate-400 hover:text-slate-700 dark:hover:text-white transition-colors"
+                      className="p-1 rounded text-slate-400 hover:text-slate-700 dark:hover:text-white transition-colors cursor-pointer"
                       title="Edit Item"
                     >
                       <Edit2 className="w-3.5 h-3.5" />
@@ -271,6 +291,35 @@ export default function KnowledgeBasePage() {
         </div>
       )}
 
+      {/* Pagination Controls */}
+      {totalCount > PAGE_SIZE && (
+        <div className="flex items-center justify-between px-3 py-3 rounded-xl bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-xs">
+          <span className="text-slate-500 dark:text-slate-400">
+            Showing <span className="font-semibold text-slate-900 dark:text-white">{offset + 1}</span> to{' '}
+            <span className="font-semibold text-slate-900 dark:text-white">{Math.min(offset + items.length, totalCount)}</span> of{' '}
+            <span className="font-semibold text-slate-900 dark:text-white">{totalCount}</span> policies
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+              disabled={offset === 0 || loading}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              onClick={() => setOffset(offset + PAGE_SIZE)}
+              disabled={offset + items.length >= totalCount || loading}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Add / Edit Drawer */}
       <Drawer
         isOpen={isDrawerOpen}
@@ -278,7 +327,7 @@ export default function KnowledgeBasePage() {
         title={editingItem ? `Edit Policy — ${editingItem.title}` : 'Create Operational Policy Item'}
         subtitle="This knowledge will be used to ground voice AI answers for relevant queries"
       >
-        <form onSubmit={handleSave} className="space-y-4 text-xs">
+        <form onSubmit={(e) => handleSave(e)} className="space-y-4 text-xs">
           <div>
             <label htmlFor="knowledge-category" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Knowledge Category</label>
             <select
@@ -322,32 +371,134 @@ export default function KnowledgeBasePage() {
           </div>
 
           <div>
-            <label htmlFor="knowledge-status" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Approval Status</label>
-            <select
-              id="knowledge-status"
-              value={formStatus}
-              onChange={(e) => setFormStatus(e.target.value as any)}
-              className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
-            >
-              <option value="DRAFT">DRAFT (Under Internal Review)</option>
-              <option value="UNDER_REVIEW">UNDER_REVIEW</option>
-              <option value="APPROVED">APPROVED (Active in Voice RAG)</option>
-            </select>
+            <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Approval &amp; Governance Status</label>
+            {!editingItem ? (
+              <div className="p-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300 flex items-center gap-2">
+                <Clock className="w-4 h-4 shrink-0" />
+                <span>New policies are strictly created as <strong>DRAFT</strong> and require review before approval.</span>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between p-2.5 rounded-lg bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+                  <span className="text-slate-600 dark:text-slate-400">Current Status:</span>
+                  <span className="font-bold px-2 py-0.5 rounded text-[11px] bg-slate-200 dark:bg-slate-800 text-slate-900 dark:text-white">
+                    {editingItem.status}
+                  </span>
+                </div>
+
+                <div className="space-y-1.5 pt-1">
+                  <span className="text-slate-500 text-[11px] font-medium block">Permitted Governance Transitions:</span>
+                  <div className="flex flex-wrap gap-2">
+                    {editingItem.status === 'DRAFT' && (
+                      <>
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={(e) => handleSave(e, 'UNDER_REVIEW')}
+                          className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-medium flex items-center gap-1.5 disabled:opacity-50 cursor-pointer shadow-xs"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          <span>Submit for Review</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={(e) => handleSave(e, 'ARCHIVED')}
+                          className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700 font-medium flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                        >
+                          <Archive className="w-3.5 h-3.5" />
+                          <span>Archive</span>
+                        </button>
+                      </>
+                    )}
+
+                    {editingItem.status === 'UNDER_REVIEW' && (
+                      <>
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={(e) => handleSave(e, 'APPROVED')}
+                          className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium flex items-center gap-1.5 disabled:opacity-50 cursor-pointer shadow-xs"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <span>Approve Policy</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={(e) => handleSave(e, 'DRAFT')}
+                          className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium flex items-center gap-1.5 disabled:opacity-50 cursor-pointer shadow-xs"
+                        >
+                          <ArrowRight className="w-3.5 h-3.5" />
+                          <span>Return to Draft</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={(e) => handleSave(e, 'ARCHIVED')}
+                          className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700 font-medium flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                        >
+                          <Archive className="w-3.5 h-3.5" />
+                          <span>Archive</span>
+                        </button>
+                      </>
+                    )}
+
+                    {editingItem.status === 'APPROVED' && (
+                      <>
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={(e) => handleSave(e, 'UNDER_REVIEW')}
+                          className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-medium flex items-center gap-1.5 disabled:opacity-50 cursor-pointer shadow-xs"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          <span>Submit Revision</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={(e) => handleSave(e, 'ARCHIVED')}
+                          className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700 font-medium flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                        >
+                          <Archive className="w-3.5 h-3.5" />
+                          <span>Archive Policy</span>
+                        </button>
+                      </>
+                    )}
+
+                    {editingItem.status === 'ARCHIVED' && (
+                      <button
+                        type="button"
+                        disabled={saving}
+                        onClick={(e) => handleSave(e, 'DRAFT')}
+                        className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium flex items-center gap-1.5 disabled:opacity-50 cursor-pointer shadow-xs"
+                      >
+                        <ArrowRight className="w-3.5 h-3.5" />
+                        <span>Re-open as Draft</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="pt-4 border-t border-slate-200 dark:border-slate-800 flex justify-end gap-3">
             <button
               type="button"
+              disabled={saving}
               onClick={() => setIsDrawerOpen(false)}
-              className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white border border-slate-300 dark:border-slate-800 transition-colors"
+              className="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white border border-slate-300 dark:border-slate-800 transition-colors cursor-pointer"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold transition-colors shadow-xs"
+              disabled={saving}
+              className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold transition-colors shadow-xs disabled:opacity-50 cursor-pointer"
             >
-              Save Knowledge Item
+              {saving ? 'Saving...' : editingItem ? 'Save Content' : 'Create Draft Policy'}
             </button>
           </div>
         </form>

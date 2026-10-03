@@ -14,6 +14,9 @@ export async function GET(req: NextRequest) {
     const rawQuery = {
       intent: searchParams.get('intent') || undefined,
       category: searchParams.get('category') || undefined,
+      search: searchParams.get('search') || undefined,
+      limit: searchParams.get('limit') || undefined,
+      offset: searchParams.get('offset') || undefined,
     };
 
     const parsedQuery = ListKnowledgeQuerySchema.safeParse(rawQuery);
@@ -24,7 +27,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const { intent, category } = parsedQuery.data;
+    const { intent, category, search, limit, offset } = parsedQuery.data;
 
     // Dynamic intent-specific retrieval
     if (intent) {
@@ -32,9 +35,21 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ intent, knowledge: relevant });
     }
 
-    // Full category listing
-    const items = await db.listKnowledgeItems(authContext.tenantId, category || undefined);
-    return NextResponse.json({ knowledge_items: items });
+    // Paginated category and search listing
+    const { items, total } = await db.listKnowledgeItemsWithCount(authContext.tenantId, {
+      category,
+      search,
+      limit,
+      offset,
+    });
+    const safeOffset = offset ?? 0;
+    return NextResponse.json({
+      knowledge_items: items,
+      total,
+      limit: limit ?? 20,
+      offset: safeOffset,
+      has_more: safeOffset + items.length < total,
+    });
   } catch (error) {
     return handleApiError(error, 'api/knowledge:GET');
   }
@@ -61,13 +76,14 @@ export async function POST(req: NextRequest) {
     }
 
     const val = parseResult.data;
+    // Policy rule: New knowledge items MUST always start in DRAFT status
     const newItem = await db.createKnowledgeItem(
       {
         tenant_id: authContext.tenantId,
         category: val.category,
         title: val.title,
         content: val.content,
-        status: val.status,
+        status: 'DRAFT',
         version: val.version,
         created_by: authContext.userId,
       },

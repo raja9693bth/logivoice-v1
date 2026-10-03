@@ -291,19 +291,13 @@ export async function POST(req: NextRequest) {
 
       // Check verified transfer / callback from DB
       const existingCallRecord = await db.getCallByExternalId(externalCallId, tenantId);
-      const callAuditEvents = await db.listAuditEvents(tenantId, 50);
-      const relevantAudit = callAuditEvents.filter(
-        (a) => a.call_id === externalCallId || (existingCallRecord && a.call_id === existingCallRecord.id)
-      );
+      const callRef = existingCallRecord?.id || externalCallId;
 
-      const hasConfirmedTransfer = relevantAudit.some(
-        (a) => a.event_type === 'CALL_ESCALATED' && (a.details as Record<string, unknown>)?.provider_confirmed === true
-      );
+      const confirmedTransfer = await db.getConfirmedTransferForCall(callRef, tenantId);
+      const hasConfirmedTransfer = Boolean(confirmedTransfer?.transferred);
 
-      const requestsForCall = await db.listRequests(tenantId);
-      const hasDurableCallback = requestsForCall.some(
-        (r) => (r.call_id === externalCallId || (existingCallRecord && r.call_id === existingCallRecord.id)) && r.type === 'CALLBACK_REQUEST'
-      );
+      const callbackRequest = await db.getCallbackRequestForCall(callRef, tenantId);
+      const hasDurableCallback = Boolean(callbackRequest);
 
       if (hasConfirmedTransfer) {
         outcome = 'TRANSFERRED';
@@ -331,28 +325,25 @@ export async function POST(req: NextRequest) {
         special_requirements: typeof rawFacts.special_requirements === 'string' ? rawFacts.special_requirements : undefined,
       };
 
-      // Verified operational facts MUST come from tool execution / DB records
-      const quoteAuditEvent = relevantAudit.find(
-        (a) => a.event_type === 'TOOL_EXECUTION' && a.tool_name === 'get_rate_quote' && (a.details as Record<string, unknown>)?.success === true
-      );
-      if (quoteAuditEvent) {
-        const d = (quoteAuditEvent.details as Record<string, unknown>) || {};
+      // Verified operational facts MUST come from structured tool_executions
+      const quoteExecution = await db.getLatestSuccessfulToolExecution(callRef, 'get_rate_quote', tenantId);
+      if (quoteExecution && quoteExecution.safe_result) {
+        const d = quoteExecution.safe_result as Record<string, unknown>;
         if (typeof d.price_inr === 'number') {
           capturedFacts.quoted_amount = d.price_inr;
-          capturedFacts.quote_type = d.supports_confirmed_quote ? 'CONFIRMED' : 'ESTIMATE';
+          capturedFacts.quote_type = (d.quote_type as 'CONFIRMED' | 'ESTIMATE') || (d.supports_confirmed_quote ? 'CONFIRMED' : 'ESTIMATE');
         }
       }
 
-      const trackingAuditEvent = relevantAudit.find(
-        (a) => a.event_type === 'TOOL_EXECUTION' && a.tool_name === 'get_tracking_status' && (a.details as Record<string, unknown>)?.success === true
-      );
-      if (trackingAuditEvent) {
-        const d = (trackingAuditEvent.details as Record<string, unknown>) || {};
-        if (typeof d.tracking_id === 'string') {
-          capturedFacts.tracking_id = d.tracking_id;
-          capturedFacts.tracking_status = typeof d.status === 'string' ? d.status : undefined;
+      const trackingExecution = await db.getLatestSuccessfulToolExecution(callRef, 'get_tracking_status', tenantId);
+      if (trackingExecution && trackingExecution.safe_result) {
+        const d = trackingExecution.safe_result as Record<string, unknown>;
+        const trackingRef = (d.tracking_reference || d.tracking_id) as string | undefined;
+        if (trackingRef) {
+          capturedFacts.tracking_id = trackingRef;
+          capturedFacts.tracking_status = typeof d.current_status === 'string' ? d.current_status : (typeof d.status === 'string' ? d.status : undefined);
           capturedFacts.tracking_location = typeof d.current_location === 'string' ? d.current_location : undefined;
-          capturedFacts.verified_eta = typeof d.eta === 'string' ? d.eta : undefined;
+          capturedFacts.verified_eta = typeof d.eta_if_verified === 'string' ? d.eta_if_verified : (typeof d.eta === 'string' ? d.eta : undefined);
         }
       }
 

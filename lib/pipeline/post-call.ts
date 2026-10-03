@@ -70,23 +70,70 @@ export async function processPostCallPipeline(
       status: claimResult.status,
     });
 
-    let existingCall = await db.getCallByExternalId(payload.external_call_id, tenantId);
-    if (!existingCall) {
-      for (let attempt = 0; attempt < 20; attempt++) {
-        await new Promise((res) => setTimeout(res, 25));
-        existingCall = await db.getCallByExternalId(payload.external_call_id, tenantId);
-        if (existingCall) break;
+    let currentStatus = claimResult.status;
+    let existingClaim = claimResult.claim;
+
+    // If currently PROCESSING, wait briefly for in-flight execution to complete
+    if (currentStatus === 'PROCESSING') {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        await new Promise((res) => setTimeout(res, 40));
+        const updated = await db.getSideEffectClaim(tenantId, pipelineClaimKey);
+        if (updated) {
+          existingClaim = updated;
+          currentStatus = updated.status;
+          if (updated.status !== 'PROCESSING') break;
+        }
       }
     }
 
+    let existingCall = await db.getCallByExternalId(payload.external_call_id, tenantId);
+
+    if (currentStatus === 'SUCCEEDED' || currentStatus === 'PROCESSING') {
+      const resultObj = (existingClaim?.result as Record<string, unknown>) || {};
+      return {
+        success: true,
+        call_id: existingCall?.id || (resultObj.call_id as string) || 'finalized',
+        external_call_id: payload.external_call_id,
+        lead_id: (resultObj.lead_id as string) || undefined,
+        lead_temperature: existingCall?.lead_temperature || (resultObj.lead_temperature as string) || 'COLD',
+        sheets_status: 'SKIPPED_DUPLICATE',
+        followup_status: (existingCall?.followup_state?.status || (resultObj.followup_status as string) || 'SKIPPED') as FollowupStatus,
+        message: `Call ${payload.external_call_id} duplicate delivery recognized and skipped idempotently.`,
+      };
+    }
+
+    if (currentStatus === 'RETRYABLE') {
+      return {
+        success: false,
+        call_id: existingCall?.id || 'retry-pending',
+        external_call_id: payload.external_call_id,
+        lead_temperature: existingCall?.lead_temperature || 'UNKNOWN',
+        sheets_status: 'RETRY_PENDING',
+        followup_status: 'RETRY_PENDING',
+        message: `Call ${payload.external_call_id} is RETRY_PENDING.`,
+      };
+    }
+
+    if (currentStatus === 'FAILED') {
+      return {
+        success: false,
+        call_id: existingCall?.id || 'failed',
+        external_call_id: payload.external_call_id,
+        lead_temperature: existingCall?.lead_temperature || 'UNKNOWN',
+        sheets_status: 'FAILED',
+        followup_status: 'FAILED',
+        message: `Call ${payload.external_call_id} processing FAILED.`,
+      };
+    }
+
     return {
-      success: true,
-      call_id: existingCall?.id || 'idempotent-replay',
+      success: false,
+      call_id: existingCall?.id || 'unknown',
       external_call_id: payload.external_call_id,
-      lead_temperature: existingCall?.lead_temperature || 'COLD',
-      sheets_status: 'SKIPPED_DUPLICATE',
-      followup_status: existingCall?.followup_state?.status || 'SKIPPED',
-      message: `Idempotent replay: Call ${payload.external_call_id} already finalized.`,
+      lead_temperature: existingCall?.lead_temperature || 'UNKNOWN',
+      sheets_status: 'RECONCILIATION_REQUIRED',
+      followup_status: 'RECONCILIATION_REQUIRED',
+      message: `Call ${payload.external_call_id} outcome is UNKNOWN: reconciliation required.`,
     };
   }
 
@@ -353,34 +400,44 @@ export async function processPostCallPipeline(
     }
 
     // 10. Complete durable pipeline claim
-    await db.completeSideEffect(tenantId, pipelineClaimKey, {
-      call_id: call.id,
-      lead_id: lead?.id,
-      lead_temperature: leadTemperature,
-      sheets_status: sheetsResult.status,
-      followup_status: followupStatus,
-    });
-
-    // 11. Audit Event Logging
-    await db.logAuditEvent(
+    await db.completeSideEffect(
+      tenantId,
+      pipelineClaimKey,
       {
-        tenant_id: tenantId,
         call_id: call.id,
-        event_type: 'POST_CALL_PIPELINE_COMPLETED',
-        actor: 'SYSTEM',
-        actor_type: 'SYSTEM',
-        actor_id: 'post-call-pipeline',
-        tool_name: 'post_call_pipeline',
-        severity: 'INFO',
-        details: {
-          external_call_id: payload.external_call_id,
-          lead_temperature: leadTemperature,
-          sheets_status: sheetsResult.status,
-          followup_status: followupStatus,
-        },
+        lead_id: lead?.id,
+        lead_temperature: leadTemperature,
+        sheets_status: sheetsResult.status,
+        followup_status: followupStatus,
       },
-      tenantId
+      claimResult.claim_token
     );
+
+    // 11. Audit Event Logging (Best-effort observability: failure does NOT revert confirmed state)
+    try {
+      await db.logAuditEvent(
+        {
+          tenant_id: tenantId,
+          call_id: call.id,
+          external_call_id: payload.external_call_id,
+          event_type: 'POST_CALL_PIPELINE_COMPLETED',
+          actor: 'SYSTEM',
+          actor_type: 'SYSTEM',
+          actor_id: 'post-call-pipeline',
+          tool_name: 'post_call_pipeline',
+          severity: 'INFO',
+          details: {
+            external_call_id: payload.external_call_id,
+            lead_temperature: leadTemperature,
+            sheets_status: sheetsResult.status,
+            followup_status: followupStatus,
+          },
+        },
+        tenantId
+      );
+    } catch (auditErr) {
+      console.warn('[PostCallPipeline] Best-effort audit logging degraded:', auditErr);
+    }
 
     return {
       success: true,
@@ -394,7 +451,14 @@ export async function processPostCallPipeline(
     };
   } catch (error) {
     logError(correlation, 'POST_CALL_PIPELINE_ERROR', error);
-    await db.failSideEffect(tenantId, pipelineClaimKey, error instanceof Error ? error.message : 'Unknown pipeline error', true);
+    await db.failSideEffect(
+      tenantId,
+      pipelineClaimKey,
+      error instanceof Error ? error.message : 'Unknown pipeline error',
+      true,
+      60000,
+      claimResult.claim_token
+    );
     throw error;
   }
 }

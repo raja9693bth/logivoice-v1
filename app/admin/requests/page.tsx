@@ -22,6 +22,8 @@ import { OperationsRequest, RequestStatus } from '@/types/logivoice';
 
 export default function RequestsPage() {
   const [requests, setRequests] = useState<OperationsRequest[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [offset, setOffset] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isDemoMode, setIsDemoMode] = useState(false);
@@ -30,7 +32,9 @@ export default function RequestsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [inspectReq, setInspectReq] = useState<OperationsRequest | null>(null);
 
-  const fetchRequests = async () => {
+  const PAGE_SIZE = 10;
+
+  const fetchRequests = React.useCallback(async () => {
     setIsLoading(true);
     setError(null);
 
@@ -39,12 +43,20 @@ export default function RequestsPage() {
 
     if (demoActive) {
       setRequests(MOCK_REQUESTS);
+      setTotalCount(MOCK_REQUESTS.length);
       setIsLoading(false);
       return;
     }
 
     try {
-      const res = await fetch('/api/requests');
+      const params = new URLSearchParams();
+      params.set('limit', String(PAGE_SIZE));
+      params.set('offset', String(offset));
+      if (activeTab !== 'ALL') params.set('type', activeTab);
+      if (statusFilter !== 'ALL') params.set('status', statusFilter);
+      if (searchQuery.trim()) params.set('search', searchQuery.trim());
+
+      const res = await fetch(`/api/requests?${params.toString()}`);
       if (res.status === 401) {
         window.location.href = '/login';
         return;
@@ -54,33 +66,20 @@ export default function RequestsPage() {
       }
       const data = await res.json();
       setRequests(data?.requests || []);
+      setTotalCount(typeof data?.total === 'number' ? data.total : (data?.requests?.length || 0));
     } catch (err) {
       console.warn('[RequestsPage] API fetch error:', err);
       setError(err instanceof Error ? err.message : 'Error loading operations requests.');
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [offset, activeTab, statusFilter, searchQuery]);
 
   useEffect(() => {
     void fetchRequests();
-  }, []);
+  }, [fetchRequests]);
 
-  const filteredRequests = useMemo(() => {
-    return requests.filter((req) => {
-      const matchesTab = activeTab === 'ALL' || req.type === activeTab;
-      const matchesStatus = statusFilter === 'ALL' || req.status === statusFilter;
-      const q = searchQuery.toLowerCase();
-      const matchesSearch =
-        !searchQuery ||
-        req.reference_no.toLowerCase().includes(q) ||
-        req.customer_name.toLowerCase().includes(q) ||
-        req.customer_phone.toLowerCase().includes(q) ||
-        req.summary.toLowerCase().includes(q);
-
-      return matchesTab && matchesStatus && matchesSearch;
-    });
-  }, [requests, activeTab, statusFilter, searchQuery]);
+  const filteredRequests = requests;
 
   const handleUpdateStatus = async (reqId: string, newStatus: RequestStatus) => {
     // Optimistic UI update
@@ -107,6 +106,7 @@ export default function RequestsPage() {
     setSearchQuery('');
     setStatusFilter('ALL');
     setActiveTab('ALL');
+    setOffset(0);
   };
 
   return (
@@ -137,8 +137,9 @@ export default function RequestsPage() {
             <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
           </button>
           <div className="text-xs text-slate-500 dark:text-slate-400">
-            Showing <span className="text-slate-900 dark:text-white font-semibold">{filteredRequests.length}</span> of{' '}
-            <span className="text-slate-900 dark:text-white font-semibold">{requests.length}</span> total
+            Showing <span className="text-slate-900 dark:text-white font-semibold">{totalCount > 0 ? offset + 1 : 0}</span> to{' '}
+            <span className="text-slate-900 dark:text-white font-semibold">{Math.min(offset + requests.length, totalCount)}</span> of{' '}
+            <span className="text-slate-900 dark:text-white font-semibold">{totalCount}</span> total
           </div>
         </div>
       </div>
@@ -163,44 +164,44 @@ export default function RequestsPage() {
       {/* Type Tabs */}
       <div className="flex gap-2 border-b border-slate-200 dark:border-slate-800 pb-2 overflow-x-auto">
         <button
-          onClick={() => setActiveTab('ALL')}
+          onClick={() => { setActiveTab('ALL'); setOffset(0); }}
           className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
             activeTab === 'ALL'
               ? 'bg-sky-600 text-white'
               : 'bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
           }`}
         >
-          All Requests ({requests.length})
+          All Requests
         </button>
         <button
-          onClick={() => setActiveTab('BOOKING_REQUEST')}
+          onClick={() => { setActiveTab('BOOKING_REQUEST'); setOffset(0); }}
           className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
             activeTab === 'BOOKING_REQUEST'
               ? 'bg-sky-600 text-white'
               : 'bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
           }`}
         >
-          Bookings ({requests.filter((r) => r.type === 'BOOKING_REQUEST').length})
+          Bookings
         </button>
         <button
-          onClick={() => setActiveTab('SUPPORT_TICKET')}
+          onClick={() => { setActiveTab('SUPPORT_TICKET'); setOffset(0); }}
           className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
             activeTab === 'SUPPORT_TICKET'
               ? 'bg-sky-600 text-white'
               : 'bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
           }`}
         >
-          Support Tickets ({requests.filter((r) => r.type === 'SUPPORT_TICKET').length})
+          Support Tickets
         </button>
         <button
-          onClick={() => setActiveTab('CALLBACK_REQUEST')}
+          onClick={() => { setActiveTab('CALLBACK_REQUEST'); setOffset(0); }}
           className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
             activeTab === 'CALLBACK_REQUEST'
               ? 'bg-sky-600 text-white'
               : 'bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
           }`}
         >
-          Escalations ({requests.filter((r) => r.type === 'CALLBACK_REQUEST').length})
+          Escalations
         </button>
       </div>
 
@@ -213,7 +214,7 @@ export default function RequestsPage() {
             <input
               type="text"
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => { setSearchQuery(e.target.value); setOffset(0); }}
               placeholder="Search reference #, customer name, phone, summary..."
               className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg pl-9 pr-4 py-1.5 text-xs text-slate-900 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-hidden focus:border-sky-500 focus:ring-1 focus:ring-sky-500/20"
             />
@@ -224,7 +225,7 @@ export default function RequestsPage() {
             <span className="text-xs text-slate-500 dark:text-slate-400 shrink-0">Status:</span>
             <select
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              onChange={(e) => { setStatusFilter(e.target.value); setOffset(0); }}
               className="bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 dark:text-slate-200 focus:outline-hidden focus:border-sky-500"
             >
               <option value="ALL">All Statuses</option>
@@ -332,6 +333,35 @@ export default function RequestsPage() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Pagination Controls */}
+      {totalCount > PAGE_SIZE && (
+        <div className="flex items-center justify-between px-3 py-3 rounded-xl bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-xs">
+          <span className="text-slate-500 dark:text-slate-400">
+            Showing <span className="font-semibold text-slate-900 dark:text-white">{offset + 1}</span> to{' '}
+            <span className="font-semibold text-slate-900 dark:text-white">{Math.min(offset + requests.length, totalCount)}</span> of{' '}
+            <span className="font-semibold text-slate-900 dark:text-white">{totalCount}</span> requests
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+              disabled={offset === 0 || isLoading}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              onClick={() => setOffset(offset + PAGE_SIZE)}
+              disabled={offset + requests.length >= totalCount || isLoading}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              Next
+            </button>
+          </div>
         </div>
       )}
 

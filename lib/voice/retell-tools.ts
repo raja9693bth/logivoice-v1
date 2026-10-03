@@ -147,7 +147,7 @@ export const RETELL_TOOL_DEFINITIONS = [
   },
   {
     name: 'send_followup',
-    description: 'Dispatch an approved post-call summary or booking link to the caller via WhatsApp or SMS.',
+    description: 'Dispatch an approved post-call template message (quote, tracking, or inquiry confirmation) to the caller via WhatsApp.',
     parameters: {
       type: 'object',
       properties: {
@@ -156,11 +156,15 @@ export const RETELL_TOOL_DEFINITIONS = [
         channel: {
           type: 'string',
           enum: ['WHATSAPP', 'SMS', 'EMAIL'],
-          description: 'Channel to send on',
+          description: 'Channel to send on (WHATSAPP supported)',
         },
-        message_content: { type: 'string', description: 'Approved message body' },
+        template_id: {
+          type: 'string',
+          enum: ['QUOTE_ESTIMATE', 'QUOTE_CONFIRMED', 'TRACKING_STATUS', 'INQUIRY_RECEIVED'],
+          description: 'Approved template identifier',
+        },
       },
-      required: ['call_id', 'recipient_phone', 'message_content'],
+      required: ['call_id', 'recipient_phone'],
     },
   },
 ];

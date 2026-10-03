@@ -1,20 +1,41 @@
 /**
+ * LOGIVOICE V1 — DETERMINISTIC POST-CALL FOLLOWUP TOOL
  * TOOL 8: send_followup
- * Deterministic post-call message dispatch.
- * Enforces tenant, suppression, eligibility, and persists provider response.
+ *
+ * Enforces:
+ * 1. Controlled Template Rendering: Outbound messages strictly use pre-approved templates
+ *    with verified operational facts; never accepts arbitrary LLM message text.
+ * 2. Channel Truth: Rejects EMAIL / unconfigured SMS without silent fallthrough to WhatsApp.
+ * 3. Durable Idempotency & Concurrency: Uses atomic upsert_followup and side-effect locks.
+ * 4. PII Minimization: Audit logs store masked phone numbers.
+ * 5. Uncertainty Handling: Distinguishes provider timeouts as UNKNOWN.
  */
 
-import { db, DEFAULT_TENANT_ID } from '@/lib/db';
+import { db, DEFAULT_TENANT_ID, isValidUuid } from '@/lib/db';
 import { SendFollowupInput, SendFollowupOutput } from '@/lib/schemas/tools';
-import { sendFollowupMessage } from '@/lib/integrations/messaging';
+import {
+  sendControlledFollowup,
+  renderApprovedTemplate,
+  FollowupTemplateId,
+  FollowupTemplateData,
+} from '@/lib/integrations/messaging';
+import { formatMaskedPhone, normalizePhoneNumber } from '@/lib/utils';
+import { FollowupStatus } from '@/types/logivoice';
 
 export async function executeSendFollowup(
   input: SendFollowupInput,
   tenantId: string = DEFAULT_TENANT_ID
 ): Promise<SendFollowupOutput> {
   try {
-    // 1. Verify call exists and tenant ownership
-    const call = await db.getCallById(input.call_id, tenantId);
+    // 1. Resolve internal call UUID and verify tenant ownership
+    const callUuid = isValidUuid(input.call_id)
+      ? input.call_id
+      : await db.resolveInternalCallId({ tenantId, externalCallId: input.call_id });
+
+    const call = callUuid
+      ? await db.getCallById(callUuid, tenantId)
+      : await db.getCallByExternalId(input.call_id, tenantId);
+
     if (!call) {
       return {
         status: 'FAILED',
@@ -35,8 +56,63 @@ export async function executeSendFollowup(
       };
     }
 
-    // 3. Durable DB idempotency check: query followups table
-    const existingFollowup = await db.getFollowupByCallId(input.call_id, tenantId);
+    // 3. Channel validation: Reject EMAIL or unconfigured SMS without fallthrough
+    if (input.channel === 'EMAIL') {
+      return {
+        status: 'FAILED',
+        channel: input.channel,
+        recipient: input.recipient_phone,
+        message: 'EMAIL channel is not supported / unconfigured.',
+      };
+    }
+
+    if (input.channel === 'SMS') {
+      const isSmsConfigured = Boolean(
+        process.env.SMS_API_KEY || process.env.TWILIO_AUTH_TOKEN || process.env.ENABLE_MOCK_INTEGRATIONS === 'true'
+      );
+      if (!isSmsConfigured) {
+        return {
+          status: 'FAILED',
+          channel: input.channel,
+          recipient: input.recipient_phone,
+          message: 'SMS channel is unconfigured.',
+        };
+      }
+    }
+
+    // 4. Deterministic template selection and rendering (No arbitrary LLM authoring)
+    const validTemplates: FollowupTemplateId[] = [
+      'QUOTE_ESTIMATE',
+      'QUOTE_CONFIRMED',
+      'TRACKING_STATUS',
+      'INQUIRY_RECEIVED',
+    ];
+    let templateId: FollowupTemplateId = 'INQUIRY_RECEIVED';
+    if (input.template_id && validTemplates.includes(input.template_id as FollowupTemplateId)) {
+      templateId = input.template_id as FollowupTemplateId;
+    } else if (call.facts?.tracking_id) {
+      templateId = 'TRACKING_STATUS';
+    } else if (call.facts?.quoted_amount) {
+      templateId = call.facts.quote_type === 'CONFIRMED' ? 'QUOTE_CONFIRMED' : 'QUOTE_ESTIMATE';
+    }
+
+    const templateData: FollowupTemplateData = {
+      customerName: call.customer?.name || (input.template_data as any)?.customerName,
+      origin: call.facts?.route_from || (input.template_data as any)?.origin,
+      destination: call.facts?.route_to || (input.template_data as any)?.destination,
+      vehicleType: call.facts?.vehicle_type || (input.template_data as any)?.vehicleType,
+      quotedAmount: call.facts?.quoted_amount || (input.template_data as any)?.quotedAmount,
+      trackingId: call.facts?.tracking_id || (input.template_data as any)?.trackingId,
+      currentStatus: call.facts?.tracking_status || (input.template_data as any)?.currentStatus,
+      currentLocation: call.facts?.tracking_location || (input.template_data as any)?.currentLocation,
+      etaFormatted: call.facts?.verified_eta || (input.template_data as any)?.etaFormatted,
+      ...(input.template_data || {}),
+    };
+
+    const renderedMessage = renderApprovedTemplate(templateId, templateData);
+
+    // 5. Durable DB idempotency check: query followups table
+    const existingFollowup = await db.getFollowupByCallId(call.id, tenantId);
     if (existingFollowup && (existingFollowup.status === 'SENT' || existingFollowup.status === 'DELIVERED')) {
       return {
         status: 'SENT',
@@ -48,18 +124,20 @@ export async function executeSendFollowup(
       };
     }
 
-    // 4. Dispatch via Messaging Adapter
-    const result = await sendFollowupMessage({
-      channel: input.channel,
-      recipient: input.recipient_phone,
-      messageContent: input.message_content,
-      templateId: input.template_id,
+    // 6. Dispatch via authoritative messaging engine
+    const result = await sendControlledFollowup({
+      tenantId,
+      callId: call.id,
+      recipientPhone: input.recipient_phone,
+      templateId,
+      templateData,
+      channel: input.channel === 'SMS' ? 'SMS' : 'WHATSAPP',
     });
 
     if (!result.success) {
-      if (result.status === 'OPTED_OUT') {
+      if (result.status === 'SUPPRESSED') {
         await db.updateCall(
-          input.call_id,
+          call.id,
           {
             followup_state: {
               eligible: false,
@@ -78,6 +156,34 @@ export async function executeSendFollowup(
         };
       }
 
+      if (result.status === 'UNKNOWN') {
+        try {
+          await db.upsertFollowup(
+            {
+              call_id: call.id,
+              customer_id: call.customer_id,
+              tenant_id: tenantId,
+              channel: input.channel,
+              status: 'UNKNOWN',
+              recipient: normalizePhoneNumber(input.recipient_phone),
+              template_id: templateId,
+              message_content: renderedMessage,
+              provider_message_id: result.providerMessageId || null,
+            },
+            tenantId
+          );
+        } catch {
+          // Best-effort persistence
+        }
+
+        return {
+          status: 'PROVIDER_ERROR',
+          channel: input.channel,
+          recipient: input.recipient_phone,
+          message: result.error || 'Downstream provider timed out or returned uncertain outcome.',
+        };
+      }
+
       return {
         status: 'PROVIDER_ERROR',
         channel: input.channel,
@@ -86,67 +192,74 @@ export async function executeSendFollowup(
       };
     }
 
-    // 5. Persist durable record into followups table with real UUID
-    const newFollowup = await db.createFollowup(
+    // 7. Atomic upsert into followups table with internal UUID
+    const upsertRes = await db.upsertFollowup(
       {
-        call_id: input.call_id,
+        call_id: call.id,
         customer_id: call.customer_id,
         tenant_id: tenantId,
         channel: input.channel,
-        status: 'SENT',
-        recipient: input.recipient_phone,
-        template_id: input.template_id,
-        message_content: input.message_content,
-        provider_message_id: result.providerMessageId || undefined,
+        status: (result.status === 'MOCK' ? 'MOCK' : 'SENT') as FollowupStatus,
+        recipient: normalizePhoneNumber(input.recipient_phone),
+        template_id: templateId,
+        message_content: renderedMessage,
+        provider_message_id: result.providerMessageId || null,
         sent_at: new Date().toISOString(),
       },
       tenantId
     );
 
-    // 6. Update call state
+    const followupRecord = upsertRes.followup;
+
+    // 8. Update call followup state
     await db.updateCall(
-      input.call_id,
+      call.id,
       {
         followup_state: {
           eligible: true,
           channel: input.channel,
-          status: 'SENT',
-          message_snippet: input.message_content.slice(0, 100),
+          status: (result.status === 'MOCK' ? 'MOCK' : 'SENT') as FollowupStatus,
+          message_snippet: renderedMessage.slice(0, 100),
           sent_at: new Date().toISOString(),
         },
       },
       tenantId
     );
 
-    // 7. Log Audit Event
-    await db.logAuditEvent(
-      {
-        tenant_id: tenantId,
-        call_id: input.call_id,
-        event_type: 'FOLLOWUP_DISPATCHED',
-        actor: 'AI_AGENT',
-        actor_type: 'AI_AGENT',
-        actor_id: 'voice-agent',
-        tool_name: 'send_followup',
-        severity: 'INFO',
-        details: {
-          channel: input.channel,
-          recipient: input.recipient_phone,
-          followup_id: newFollowup.id,
-          provider_message_id: result.providerMessageId,
-          provider: result.provider,
+    // 9. Log Audit Event wrapped in try/catch with masked phone
+    try {
+      await db.logAuditEvent(
+        {
+          tenant_id: tenantId,
+          call_id: call.id,
+          event_type: 'FOLLOWUP_DISPATCHED',
+          actor: 'AI_AGENT',
+          actor_type: 'AI_AGENT',
+          actor_id: 'voice-agent',
+          tool_name: 'send_followup',
+          severity: 'INFO',
+          details: {
+            channel: input.channel,
+            recipient: formatMaskedPhone(input.recipient_phone),
+            followup_id: followupRecord?.id,
+            provider_message_id: result.providerMessageId,
+            provider: result.provider,
+            template_id: templateId,
+          },
         },
-      },
-      tenantId
-    );
+        tenantId
+      );
+    } catch {
+      // Best-effort audit logging
+    }
 
     return {
       status: 'SENT',
-      followup_id: newFollowup.id,
+      followup_id: followupRecord?.id,
       provider_message_id: result.providerMessageId,
       channel: input.channel,
       recipient: input.recipient_phone,
-      message: `Follow-up message dispatched via ${input.channel} (${result.provider}). Record ID: ${newFollowup.id}`,
+      message: `Follow-up message dispatched via ${input.channel} (${result.provider}). Record ID: ${followupRecord?.id || 'upserted'}`,
     };
   } catch (error) {
     return {

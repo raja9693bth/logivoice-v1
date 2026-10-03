@@ -29,6 +29,7 @@ import {
   SideEffectClaim,
   SideEffectStatus,
   CustomerSuppression,
+  ToolExecution,
 } from '@/types/logivoice';
 import { normalizePhoneNumber } from '@/lib/utils';
 import { evaluateApprovedRate, isValidIsoDate } from '@/lib/rules/rate-engine';
@@ -46,6 +47,7 @@ import {
   domainFollowupToDbRow,
   dbFollowupToDomain,
   domainAuditToDbRow,
+  isValidUuid,
   CallsDbRow,
   CallFactsDbRow,
   LeadsDbRow,
@@ -55,6 +57,17 @@ import {
   CustomersDbRow,
   AuditEventsDbRow,
 } from './mappers';
+
+export class SideEffectPersistenceError extends Error {
+  constructor(message: string, public readonly context?: Record<string, unknown>) {
+    super(message);
+    this.name = 'SideEffectPersistenceError';
+  }
+}
+
+export function sanitizePostgrestSearch(input: string): string {
+  return input.replace(/[,()%"'.:]/g, ' ').replace(/\s+/g, ' ').trim();
+}
 
 export {
   domainCallToDbRow,
@@ -70,6 +83,7 @@ export {
   domainFollowupToDbRow,
   dbFollowupToDomain,
   domainAuditToDbRow,
+  isValidUuid,
 };
 export type {
   CallsDbRow,
@@ -698,6 +712,7 @@ class Store {
   followups: FollowupRecord[] = [];
   side_effect_claims: SideEffectClaim[] = [];
   customer_suppressions: CustomerSuppression[] = [];
+  tool_executions: ToolExecution[] = [];
 }
 
 // Global persistent instance in Node runtime
@@ -1010,9 +1025,30 @@ export const db = {
     }
   },
 
+  async resolveInternalCallId(params: { tenantId: string; externalCallId?: string | null }): Promise<string | null> {
+    const { tenantId, externalCallId } = params;
+    if (!externalCallId) return null;
+    if (isValidUuid(externalCallId)) return externalCallId;
+
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data } = await client
+        .from('calls')
+        .select('id')
+        .eq('tenant_id', tenantId)
+        .eq('external_call_id', externalCallId)
+        .maybeSingle();
+      return data?.id || null;
+    }
+
+    assertProductionDbReady();
+    const found = globalStore.calls.find((c) => c.tenant_id === tenantId && c.external_call_id === externalCallId);
+    return found?.id || null;
+  },
+
   async listCallsWithCount(
     tenantId: string = DEFAULT_TENANT_ID,
-    filters?: { intent?: CallIntent; outcome?: CallOutcome; search?: string; limit?: number; offset?: number }
+    filters?: { intent?: CallIntent; outcome?: CallOutcome; temperature?: LeadTemperature; search?: string; limit?: number; offset?: number }
   ): Promise<{ calls: Call[]; total: number }> {
     const limit = Math.min(Math.max(filters?.limit || 50, 1), 100);
     const offset = Math.max(filters?.offset || 0, 0);
@@ -1028,10 +1064,36 @@ export const db = {
 
       if (filters?.intent) query = query.eq('primary_intent', filters.intent);
       if (filters?.outcome) query = query.eq('outcome', filters.outcome);
+      if (filters?.temperature) query = query.eq('lead_temperature', filters.temperature);
       if (filters?.search) {
-        const s = filters.search.replace(/[^a-zA-Z0-9\s+-_]/g, '').trim();
+        const s = sanitizePostgrestSearch(filters.search);
         if (s) {
-          query = query.or(`summary.ilike.%${s}%,external_call_id.ilike.%${s}%`);
+          // Resolve related customer and fact IDs to fulfill advertised search: customer, phone, LR, origin, destination
+          const [{ data: custRows }, { data: factRows }] = await Promise.all([
+            client
+              .from('customers')
+              .select('id')
+              .eq('tenant_id', tenantId)
+              .or(`name.ilike.%${s}%,phone.ilike.%${s}%,company.ilike.%${s}%`)
+              .limit(50),
+            client
+              .from('call_facts')
+              .select('call_id')
+              .eq('tenant_id', tenantId)
+              .or(`tracking_id.ilike.%${s}%,route_from.ilike.%${s}%,route_to.ilike.%${s}%`)
+              .limit(50),
+          ]);
+
+          const orClauses = [`summary.ilike.%${s}%`, `external_call_id.ilike.%${s}%`];
+          const matchedCustIds = (custRows || []).map((c: any) => c.id).filter(isValidUuid);
+          if (matchedCustIds.length > 0) {
+            orClauses.push(`customer_id.in.(${matchedCustIds.join(',')})`);
+          }
+          const matchedFactCallIds = (factRows || []).map((f: any) => f.call_id).filter(isValidUuid);
+          if (matchedFactCallIds.length > 0) {
+            orClauses.push(`id.in.(${matchedFactCallIds.join(',')})`);
+          }
+          query = query.or(orClauses.join(','));
         }
       }
       const { data, count, error } = await query;
@@ -1048,6 +1110,7 @@ export const db = {
     let calls = globalStore.calls.filter((c) => c.tenant_id === tenantId);
     if (filters?.intent) calls = calls.filter((c) => c.primary_intent === filters.intent);
     if (filters?.outcome) calls = calls.filter((c) => c.outcome === filters.outcome);
+    if (filters?.temperature) calls = calls.filter((c) => c.lead_temperature === filters.temperature);
     if (filters?.search) {
       const s = filters.search.toLowerCase();
       calls = calls.filter((c) => {
@@ -1074,14 +1137,14 @@ export const db = {
 
   async listCalls(
     tenantId: string = DEFAULT_TENANT_ID,
-    filters?: { intent?: CallIntent; outcome?: CallOutcome; search?: string; limit?: number; offset?: number }
+    filters?: { intent?: CallIntent; outcome?: CallOutcome; temperature?: LeadTemperature; search?: string; limit?: number; offset?: number }
   ): Promise<Call[]> {
     const res = await this.listCallsWithCount(tenantId, filters);
     return res.calls;
   },
 
   async createCall(callData: Omit<Call, 'id'>, tenantId: string = DEFAULT_TENANT_ID): Promise<Call> {
-    if (callData.customer_id) {
+    if (callData.customer_id && isValidUuid(callData.customer_id)) {
       await validateTenantEntityOwnership('customer', callData.customer_id, tenantId);
     }
 
@@ -1090,7 +1153,7 @@ export const db = {
       ...callData,
       id,
       tenant_id: tenantId,
-      customer_id: callData.customer_id && !callData.customer_id.startsWith('cust-unknown') ? callData.customer_id : undefined,
+      customer_id: isValidUuid(callData.customer_id) ? callData.customer_id : undefined,
     };
 
     if (await isSupabaseLive()) {
@@ -1187,10 +1250,10 @@ export const db = {
   // -----------------------------------------------------------------------
   // LEADS
   // -----------------------------------------------------------------------
-  async listLeads(
+  async listLeadsWithCount(
     tenantId: string = DEFAULT_TENANT_ID,
     filters?: { temperature?: LeadTemperature; status?: string; search?: string; limit?: number; offset?: number }
-  ): Promise<Lead[]> {
+  ): Promise<{ leads: Lead[]; total: number }> {
     const limit = Math.min(Math.max(filters?.limit || 50, 1), 100);
     const offset = Math.max(filters?.offset || 0, 0);
 
@@ -1198,7 +1261,7 @@ export const db = {
       const client = createAdminClient();
       let query = client
         .from('leads')
-        .select('*, customer:customers(*)')
+        .select('*, customer:customers(*)', { count: 'exact' })
         .eq('tenant_id', tenantId)
         .order('created_at', { ascending: false })
         .range(offset, offset + limit - 1);
@@ -1206,17 +1269,29 @@ export const db = {
       if (filters?.temperature) query = query.eq('temperature', filters.temperature);
       if (filters?.status) query = query.eq('status', filters.status);
       if (filters?.search) {
-        const s = filters.search.trim();
+        const s = sanitizePostgrestSearch(filters.search);
         if (s) {
-          query = query.or(`requirement.ilike.%${s}%,route.ilike.%${s}%`);
+          const { data: custRows } = await client
+            .from('customers')
+            .select('id')
+            .eq('tenant_id', tenantId)
+            .or(`name.ilike.%${s}%,phone.ilike.%${s}%,company.ilike.%${s}%`)
+            .limit(50);
+          const orClauses = [`requirement.ilike.%${s}%`, `route.ilike.%${s}%`];
+          const matchedCustIds = (custRows || []).map((c: any) => c.id).filter(isValidUuid);
+          if (matchedCustIds.length > 0) {
+            orClauses.push(`customer_id.in.(${matchedCustIds.join(',')})`);
+          }
+          query = query.or(orClauses.join(','));
         }
       }
-      const { data, error } = await query;
+      const { data, count, error } = await query;
       if (!error && data) {
-        return data.map((d: any) => {
+        const leads = data.map((d: any) => {
           const customer = Array.isArray(d.customer) ? d.customer[0] : d.customer;
           return dbLeadToDomain(d, customer);
         });
+        return { leads, total: count ?? leads.length };
       }
     }
     assertProductionDbReady();
@@ -1233,7 +1308,16 @@ export const db = {
           l.route?.toLowerCase().includes(s)
       );
     }
-    return leads.slice(offset, offset + limit);
+    const total = leads.length;
+    return { leads: leads.slice(offset, offset + limit), total };
+  },
+
+  async listLeads(
+    tenantId: string = DEFAULT_TENANT_ID,
+    filters?: { temperature?: LeadTemperature; status?: string; search?: string; limit?: number; offset?: number }
+  ): Promise<Lead[]> {
+    const res = await this.listLeadsWithCount(tenantId, filters);
+    return res.leads;
   },
 
   async createLead(
@@ -1245,7 +1329,7 @@ export const db = {
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<Lead> {
     let customerId = leadData.customer_id;
-    if (customerId) {
+    if (customerId && isValidUuid(customerId)) {
       await validateTenantEntityOwnership('customer', customerId, tenantId);
     } else if (leadData.phone && leadData.phone.trim()) {
       const existingCustomer = await this.getCustomerByPhone(leadData.phone, tenantId);
@@ -1267,7 +1351,7 @@ export const db = {
       throw new Error('Foreign key integrity violation: Cannot create lead without valid customer_id or phone to resolve customer.');
     }
 
-    if (leadData.call_id) {
+    if (leadData.call_id && isValidUuid(leadData.call_id)) {
       await validateTenantEntityOwnership('call', leadData.call_id, tenantId);
     }
 
@@ -1283,6 +1367,7 @@ export const db = {
       ...leadData,
       id,
       customer_id: customerId,
+      call_id: isValidUuid(leadData.call_id) ? leadData.call_id : undefined,
       tenant_id: leadData.tenant_id || tenantId,
       created_at: now,
       updated_at: now,
@@ -1392,10 +1477,10 @@ export const db = {
   // -----------------------------------------------------------------------
   // OPERATIONS REQUESTS
   // -----------------------------------------------------------------------
-  async listRequests(
+  async listRequestsWithCount(
     tenantId: string = DEFAULT_TENANT_ID,
     filters?: { status?: RequestStatus; priority?: RequestPriority; type?: RequestType; search?: string; limit?: number; offset?: number }
-  ): Promise<OperationsRequest[]> {
+  ): Promise<{ requests: OperationsRequest[]; total: number }> {
     const limit = Math.min(Math.max(filters?.limit || 50, 1), 100);
     const offset = Math.max(filters?.offset || 0, 0);
 
@@ -1403,7 +1488,7 @@ export const db = {
       const client = createAdminClient();
       let query = client
         .from('operations_requests')
-        .select('*, customer:customers(*)')
+        .select('*, customer:customers(*)', { count: 'exact' })
         .eq('tenant_id', tenantId)
         .order('created_at', { ascending: false })
         .range(offset, offset + limit - 1);
@@ -1412,17 +1497,18 @@ export const db = {
       if (filters?.priority) query = query.eq('priority', filters.priority);
       if (filters?.type) query = query.eq('type', filters.type);
       if (filters?.search) {
-        const s = filters.search.trim();
+        const s = sanitizePostgrestSearch(filters.search);
         if (s) {
           query = query.or(`summary.ilike.%${s}%,reference_no.ilike.%${s}%`);
         }
       }
-      const { data, error } = await query;
+      const { data, count, error } = await query;
       if (!error && data) {
-        return data.map((d: any) => {
+        const requests = data.map((d: any) => {
           const customer = Array.isArray(d.customer) ? d.customer[0] : d.customer;
           return dbRequestToDomain(d, customer);
         });
+        return { requests, total: count ?? requests.length };
       }
     }
     assertProductionDbReady();
@@ -1440,7 +1526,16 @@ export const db = {
           (r.customer_phone && r.customer_phone.includes(s))
       );
     }
-    return reqs.slice(offset, offset + limit);
+    const total = reqs.length;
+    return { requests: reqs.slice(offset, offset + limit), total };
+  },
+
+  async listRequests(
+    tenantId: string = DEFAULT_TENANT_ID,
+    filters?: { status?: RequestStatus; priority?: RequestPriority; type?: RequestType; search?: string; limit?: number; offset?: number }
+  ): Promise<OperationsRequest[]> {
+    const res = await this.listRequestsWithCount(tenantId, filters);
+    return res.requests;
   },
 
   async getRequestByIdempotencyKey(
@@ -1475,10 +1570,10 @@ export const db = {
     requestData: Omit<OperationsRequest, 'id' | 'created_at' | 'updated_at'>,
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<OperationsRequest> {
-    if (requestData.customer_id) {
+    if (requestData.customer_id && isValidUuid(requestData.customer_id)) {
       await validateTenantEntityOwnership('customer', requestData.customer_id, tenantId);
     }
-    if (requestData.call_id) {
+    if (requestData.call_id && isValidUuid(requestData.call_id)) {
       await validateTenantEntityOwnership('call', requestData.call_id, tenantId);
     }
 
@@ -1491,12 +1586,19 @@ export const db = {
 
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
+    const isCallUuid = isValidUuid(requestData.call_id);
+    const details = {
+      ...(requestData.details || {}),
+      ...(!isCallUuid && requestData.call_id ? { external_call_id: requestData.call_id } : {}),
+    };
+
     const newReq: OperationsRequest = {
       ...requestData,
       id,
       tenant_id: tenantId,
-      customer_id: requestData.customer_id && !requestData.customer_id.startsWith('cust-unknown') ? requestData.customer_id : undefined,
-      call_id: requestData.call_id && !requestData.call_id.startsWith('call-') ? requestData.call_id : undefined,
+      customer_id: isValidUuid(requestData.customer_id) ? requestData.customer_id : undefined,
+      call_id: isCallUuid ? requestData.call_id : undefined,
+      details,
       idempotency_key: requestData.idempotency_key,
       created_at: now,
       updated_at: now,
@@ -1514,13 +1616,11 @@ export const db = {
         const existing = await this.getRequestByIdempotencyKey(requestData.idempotency_key, tenantId);
         if (existing) return existing;
       }
-      throw new Error(`Failed to create request: ${error?.message || 'Database insert failed'}`);
+      if (error) {
+        throw new Error(`Failed to insert operations_request: ${error.message}`);
+      }
     }
     assertProductionDbReady();
-    if (requestData.idempotency_key) {
-      const existing = await this.getRequestByIdempotencyKey(requestData.idempotency_key, tenantId);
-      if (existing) return existing;
-    }
     globalStore.operations_requests.unshift(newReq);
     return newReq;
   },
@@ -1569,26 +1669,26 @@ export const db = {
   // -----------------------------------------------------------------------
   // RATE CARDS
   // -----------------------------------------------------------------------
-  async listRateCards(
+  async listRateCardsWithCount(
     tenantId: string = DEFAULT_TENANT_ID,
-    filters?: { status?: string; search?: string; limit?: number; offset?: number }
-  ): Promise<RateCard[]> {
+    filters?: { status?: 'ACTIVE' | 'DRAFT' | 'EXPIRED'; search?: string; limit?: number; offset?: number }
+  ): Promise<{ rateCards: RateCard[]; total: number }> {
     const limit = Math.min(Math.max(filters?.limit || 100, 1), 500);
     const offset = Math.max(filters?.offset || 0, 0);
 
     if (await isSupabaseLive()) {
       const client = createAdminClient();
-      let query = client.from('rate_cards').select('*').eq('tenant_id', tenantId);
+      let query = client.from('rate_cards').select('*', { count: 'exact' }).eq('tenant_id', tenantId);
       if (filters?.status) query = query.eq('status', filters.status);
       if (filters?.search) {
-        const s = filters.search.trim();
+        const s = sanitizePostgrestSearch(filters.search);
         if (s) {
           query = query.or(`origin.ilike.%${s}%,destination.ilike.%${s}%,vehicle_type.ilike.%${s}%`);
         }
       }
-      query = query.range(offset, offset + limit - 1);
-      const { data, error } = await query;
-      if (!error && data) return data as RateCard[];
+      query = query.order('created_at', { ascending: false }).range(offset, offset + limit - 1);
+      const { data, count, error } = await query;
+      if (!error && data) return { rateCards: data as RateCard[], total: count ?? data.length };
     }
     assertProductionDbReady();
     let cards = globalStore.rate_cards.filter((rc) => rc.tenant_id === tenantId);
@@ -1602,20 +1702,98 @@ export const db = {
           rc.vehicle_type.toLowerCase().includes(s)
       );
     }
-    return cards.slice(offset, offset + limit);
+    const total = cards.length;
+    return { rateCards: cards.slice(offset, offset + limit), total };
+  },
+
+  async listRateCards(
+    tenantId: string = DEFAULT_TENANT_ID,
+    filters?: { status?: 'ACTIVE' | 'DRAFT' | 'EXPIRED'; search?: string; limit?: number; offset?: number }
+  ): Promise<RateCard[]> {
+    const res = await this.listRateCardsWithCount(tenantId, filters);
+    return res.rateCards;
   },
 
   async bulkCreateRateCards(
     cardsData: Array<Omit<RateCard, 'id' | 'tenant_id' | 'source_version' | 'effective_from'> & { tenant_id?: string; source_version?: string; effective_from?: string }>,
-    tenantId: string = DEFAULT_TENANT_ID
+    tenantId: string = DEFAULT_TENANT_ID,
+    actorId: string = 'rate-engine',
+    actorType: string = 'SYSTEM'
   ): Promise<{ inserted: RateCard[]; count: number }> {
     for (let i = 0; i < cardsData.length; i++) {
       const c = cardsData[i];
-      if (c.weight_max_tons < c.weight_min_tons) {
-        throw new Error(`Row ${i + 1}: weight_max_tons (${c.weight_max_tons}) cannot be less than weight_min_tons (${c.weight_min_tons}).`);
+      if (c.weight_max_tons <= c.weight_min_tons) {
+        throw new Error(`Row ${i + 1}: weight_max_tons (${c.weight_max_tons}) must be strictly greater than weight_min_tons (${c.weight_min_tons}).`);
       }
       if (c.effective_to && c.effective_from && c.effective_to < c.effective_from) {
         throw new Error(`Row ${i + 1}: effective_to cannot be earlier than effective_from.`);
+      }
+      if (!c.origin || !c.destination || !c.vehicle_type) {
+        throw new Error(`Row ${i + 1}: origin, destination, and vehicle_type are required.`);
+      }
+    }
+
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client.rpc('bulk_import_rate_cards', {
+        p_tenant_id: tenantId,
+        p_cards: JSON.stringify(cardsData),
+        p_actor_id: actorId,
+        p_actor_type: actorType,
+      });
+
+      if (error) {
+        throw new Error(`Database bulk rate import failed: ${error.message}`);
+      }
+
+      const row = Array.isArray(data) ? data[0] : data;
+      const count = row?.inserted_count || 0;
+      const insertedIds: string[] = row?.rate_card_ids || [];
+
+      const { data: insertedRows } = await client
+        .from('rate_cards')
+        .select('*')
+        .in('id', insertedIds);
+
+      return {
+        inserted: (insertedRows || []) as RateCard[],
+        count,
+      };
+    }
+
+    assertProductionDbReady();
+    // 1. Batch-internal overlap check for active cards [min, max)
+    for (let i = 0; i < cardsData.length; i++) {
+      const a = cardsData[i];
+      if ((a.status || 'DRAFT') !== 'ACTIVE') continue;
+      for (let j = i + 1; j < cardsData.length; j++) {
+        const b = cardsData[j];
+        if ((b.status || 'DRAFT') !== 'ACTIVE') continue;
+        if (
+          a.origin.toLowerCase() === b.origin.toLowerCase() &&
+          a.destination.toLowerCase() === b.destination.toLowerCase() &&
+          a.vehicle_type.toLowerCase() === b.vehicle_type.toLowerCase() &&
+          Math.max(a.weight_min_tons, b.weight_min_tons) < Math.min(a.weight_max_tons, b.weight_max_tons)
+        ) {
+          throw new Error(`Batch-internal overlap detected for lane ${a.origin} -> ${a.destination} (${a.vehicle_type})`);
+        }
+      }
+    }
+
+    // 2. Existing active cards conflict check
+    for (const a of cardsData) {
+      if ((a.status || 'DRAFT') !== 'ACTIVE') continue;
+      const conflict = globalStore.rate_cards.find(
+        (c) =>
+          c.tenant_id === tenantId &&
+          c.status === 'ACTIVE' &&
+          c.origin.toLowerCase() === a.origin.toLowerCase() &&
+          c.destination.toLowerCase() === a.destination.toLowerCase() &&
+          c.vehicle_type.toLowerCase() === a.vehicle_type.toLowerCase() &&
+          Math.max(c.weight_min_tons, a.weight_min_tons) < Math.min(c.weight_max_tons, a.weight_max_tons)
+      );
+      if (conflict) {
+        throw new Error(`Active rate card conflict on lane ${a.origin} -> ${a.destination} (${a.vehicle_type}) in weight interval [${a.weight_min_tons}, ${a.weight_max_tons})`);
       }
     }
 
@@ -1623,54 +1801,28 @@ export const db = {
       ...d,
       id: crypto.randomUUID(),
       tenant_id: d.tenant_id || tenantId,
-      source_version: d.source_version || 'v1.2-csv-bulk-import',
+      source_version: d.source_version || 'v1.0-bulk-import',
       effective_from: d.effective_from || new Date().toISOString().split('T')[0],
-      status: d.status || 'ACTIVE',
+      status: d.status || 'DRAFT',
       quote_type: d.quote_type || 'ESTIMATE',
       supports_confirmed_quote: Boolean(d.supports_confirmed_quote),
     }));
 
-    if (await isSupabaseLive()) {
-      const client = createAdminClient();
-      const { data, error } = await client.from('rate_cards').insert(cardsToInsert).select();
-      if (error) {
-        throw new Error(`Database bulk insert failed: ${error.message}`);
-      }
-      if (data) {
-        await this.logAuditEvent(
-          {
-            tenant_id: tenantId,
-            event_type: 'BULK_RATE_IMPORT',
-            actor: 'SYSTEM:rate-engine',
-            actor_type: 'SYSTEM',
-            actor_id: 'rate-engine',
-            severity: 'INFO',
-            details: {
-              imported_count: data.length,
-              sample_lanes: cardsToInsert.slice(0, 3).map((c) => `${c.origin} -> ${c.destination}`),
-            },
-          },
-          tenantId
-        );
-        return { inserted: data as RateCard[], count: data.length };
-      }
-    }
-
-    assertProductionDbReady();
     for (const c of cardsToInsert) {
       globalStore.rate_cards.unshift(c);
     }
+
     await this.logAuditEvent(
       {
         tenant_id: tenantId,
-        event_type: 'BULK_RATE_IMPORT',
-        actor: 'SYSTEM:rate-engine',
-        actor_type: 'SYSTEM',
-        actor_id: 'rate-engine',
+        event_type: 'RATE_BULK_IMPORTED',
+        actor: actorId,
+        actor_type: actorType as any,
+        actor_id: actorId,
         severity: 'INFO',
         details: {
           imported_count: cardsToInsert.length,
-          sample_lanes: cardsToInsert.slice(0, 3).map((c) => `${c.origin} -> ${c.destination}`),
+          source: 'BULK_IMPORT_TRANSACTION',
         },
       },
       tenantId
@@ -1839,21 +1991,57 @@ export const db = {
   // -----------------------------------------------------------------------
   // KNOWLEDGE ITEMS
   // -----------------------------------------------------------------------
+  async listKnowledgeItemsWithCount(
+    tenantId: string = DEFAULT_TENANT_ID,
+    filters?: {
+      category?: KnowledgeItem['category'];
+      status?: KnowledgeItem['status'];
+      search?: string;
+      limit?: number;
+      offset?: number;
+    }
+  ): Promise<{ items: KnowledgeItem[]; total: number }> {
+    const limit = Math.min(Math.max(filters?.limit || 50, 1), 500);
+    const offset = Math.max(filters?.offset || 0, 0);
+
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      let query = client.from('knowledge_items').select('*', { count: 'exact' }).eq('tenant_id', tenantId);
+      if (filters?.category) query = query.eq('category', filters.category);
+      if (filters?.status) query = query.eq('status', filters.status);
+      if (filters?.search) {
+        const s = sanitizePostgrestSearch(filters.search);
+        if (s) {
+          query = query.or(`title.ilike.%${s}%,content.ilike.%${s}%`);
+        }
+      }
+      query = query.order('updated_at', { ascending: false }).range(offset, offset + limit - 1);
+      const { data, count, error } = await query;
+      if (!error && data) {
+        return {
+          items: data.map((d) => dbKnowledgeToDomain(d as any)),
+          total: count ?? data.length,
+        };
+      }
+    }
+    assertProductionDbReady();
+    let items = globalStore.knowledge_items.filter((k) => k.tenant_id === tenantId);
+    if (filters?.category) items = items.filter((k) => k.category === filters.category);
+    if (filters?.status) items = items.filter((k) => k.status === filters.status);
+    if (filters?.search) {
+      const s = filters.search.toLowerCase();
+      items = items.filter((k) => k.title.toLowerCase().includes(s) || k.content.toLowerCase().includes(s));
+    }
+    const total = items.length;
+    return { items: items.slice(offset, offset + limit), total };
+  },
+
   async listKnowledgeItems(
     tenantId: string = DEFAULT_TENANT_ID,
     category?: KnowledgeItem['category']
   ): Promise<KnowledgeItem[]> {
-    if (await isSupabaseLive()) {
-      const client = createAdminClient();
-      let query = client.from('knowledge_items').select('*').eq('tenant_id', tenantId);
-      if (category) query = query.eq('category', category);
-      const { data, error } = await query;
-      if (!error && data) return data.map((d) => dbKnowledgeToDomain(d as any));
-    }
-    assertProductionDbReady();
-    let items = globalStore.knowledge_items.filter((k) => k.tenant_id === tenantId);
-    if (category) items = items.filter((k) => k.category === category);
-    return items;
+    const res = await this.listKnowledgeItemsWithCount(tenantId, { category });
+    return res.items;
   },
 
   async createKnowledgeItem(
@@ -1862,10 +2050,12 @@ export const db = {
   ): Promise<KnowledgeItem> {
     const now = new Date().toISOString().split('T')[0];
     const id = crypto.randomUUID();
+    // Rule: POST new item is always DRAFT
     const newItem: KnowledgeItem = {
       ...itemData,
       id,
       tenant_id: tenantId,
+      status: 'DRAFT',
       last_updated: now,
     };
     if (await isSupabaseLive()) {
@@ -1885,6 +2075,30 @@ export const db = {
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<KnowledgeItem | null> {
     const now = new Date().toISOString().split('T')[0];
+
+    // Check transition validity
+    let currentStatus: string | undefined;
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data } = await client.from('knowledge_items').select('status').eq('id', id).eq('tenant_id', tenantId).maybeSingle();
+      currentStatus = data?.status;
+    } else {
+      const existing = globalStore.knowledge_items.find((k) => k.id === id && k.tenant_id === tenantId);
+      currentStatus = existing?.status;
+    }
+
+    if (updates.status && currentStatus && updates.status !== currentStatus) {
+      const valid =
+        (currentStatus === 'DRAFT' && updates.status === 'UNDER_REVIEW') ||
+        (currentStatus === 'UNDER_REVIEW' && (updates.status === 'APPROVED' || updates.status === 'DRAFT')) ||
+        (currentStatus === 'APPROVED' && updates.status === 'ARCHIVED') ||
+        (currentStatus === 'ARCHIVED' && updates.status === 'DRAFT');
+
+      if (!valid) {
+        throw new Error(`Invalid knowledge state transition from '${currentStatus}' to '${updates.status}'. Allowed transitions: DRAFT -> UNDER_REVIEW -> APPROVED -> ARCHIVED, or ARCHIVED -> DRAFT.`);
+      }
+    }
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
       const updatePayload: Record<string, unknown> = { updated_at: new Date().toISOString() };
@@ -1935,11 +2149,15 @@ export const db = {
   ): Promise<AuditEvent> {
     const timestamp = new Date().toISOString();
     const id = crypto.randomUUID();
+    const callUuid = isValidUuid(event.call_id) ? event.call_id : null;
+    const extCallId = event.external_call_id || (!callUuid && event.call_id ? event.call_id : null);
+
     const newEvent: AuditEvent = {
       ...event,
       id,
       tenant_id: tenantId,
-      call_id: event.call_id && !event.call_id.startsWith('call-') ? event.call_id : undefined,
+      call_id: callUuid,
+      external_call_id: extCallId,
       timestamp,
     };
 
@@ -1961,48 +2179,212 @@ export const db = {
     return newEvent;
   },
 
-  async listAuditEvents(
+  async listAuditEventsWithCount(
     tenantId: string = DEFAULT_TENANT_ID,
-    options: number | { limit?: number; offset?: number; event_type?: string; severity?: string } = 50
-  ): Promise<AuditEvent[]> {
-    const opts = typeof options === 'number' ? { limit: options } : options;
-    const limit = Math.min(Math.max(opts.limit || 50, 1), 500);
-    const offset = Math.max(opts.offset || 0, 0);
+    options?: { limit?: number; offset?: number; event_type?: string; severity?: string; search?: string }
+  ): Promise<{ events: AuditEvent[]; total: number }> {
+    const limit = Math.min(Math.max(options?.limit || 50, 1), 500);
+    const offset = Math.max(options?.offset || 0, 0);
 
     if (await isSupabaseLive()) {
       const client = createAdminClient();
       let query = client
         .from('audit_events')
-        .select('*')
-        .eq('tenant_id', tenantId)
-        .order('created_at', { ascending: false });
+        .select('*', { count: 'exact' })
+        .eq('tenant_id', tenantId);
 
-      if (opts.event_type) query = query.eq('event_type', opts.event_type);
-      if (opts.severity) query = query.eq('severity', opts.severity);
-      query = query.range(offset, offset + limit - 1);
+      if (options?.event_type) query = query.eq('event_type', options.event_type);
+      if (options?.severity) query = query.eq('severity', options.severity);
+      if (options?.search) {
+        const s = sanitizePostgrestSearch(options.search);
+        if (s) {
+          query = query.or(`event_type.ilike.%${s}%,actor_id.ilike.%${s}%,tool_name.ilike.%${s}%,external_call_id.ilike.%${s}%`);
+        }
+      }
+      query = query.order('created_at', { ascending: false }).range(offset, offset + limit - 1);
 
-      const { data, error } = await query;
+      const { data, count, error } = await query;
       if (!error && data) {
-        return data.map((d) => ({
-          id: d.id,
-          tenant_id: d.tenant_id,
-          call_id: d.call_id,
-          event_type: d.event_type,
-          actor: `${d.actor_type}:${d.actor_id}`,
-          actor_type: d.actor_type,
-          actor_id: d.actor_id,
-          tool_name: d.tool_name,
-          severity: d.severity,
-          details: d.details,
-          timestamp: d.created_at,
-        })) as AuditEvent[];
+        return {
+          events: data.map((d) => ({
+            id: d.id,
+            tenant_id: d.tenant_id,
+            call_id: d.call_id,
+            external_call_id: d.external_call_id,
+            event_type: d.event_type,
+            actor: `${d.actor_type}:${d.actor_id}`,
+            actor_type: d.actor_type,
+            actor_id: d.actor_id,
+            tool_name: d.tool_name,
+            severity: d.severity,
+            details: d.details,
+            timestamp: d.created_at,
+          })) as AuditEvent[],
+          total: count ?? data.length,
+        };
       }
     }
+
     assertProductionDbReady();
     let events = globalStore.audit_events.filter((e) => e.tenant_id === tenantId);
-    if (opts.event_type) events = events.filter((e) => e.event_type === opts.event_type);
-    if (opts.severity) events = events.filter((e) => e.severity === opts.severity);
-    return events.slice(offset, offset + limit);
+    if (options?.event_type) events = events.filter((e) => e.event_type === options.event_type);
+    if (options?.severity) events = events.filter((e) => e.severity === options.severity);
+    if (options?.search) {
+      const s = options.search.toLowerCase();
+      events = events.filter(
+        (e) =>
+          e.event_type.toLowerCase().includes(s) ||
+          e.actor.toLowerCase().includes(s) ||
+          (e.tool_name && e.tool_name.toLowerCase().includes(s)) ||
+          (e.external_call_id && e.external_call_id.toLowerCase().includes(s))
+      );
+    }
+    const total = events.length;
+    return { events: events.slice(offset, offset + limit), total };
+  },
+
+  async listAuditEvents(
+    tenantId: string = DEFAULT_TENANT_ID,
+    options: number | { limit?: number; offset?: number; event_type?: string; severity?: string; search?: string } = 50
+  ): Promise<AuditEvent[]> {
+    const opts = typeof options === 'number' ? { limit: options } : options;
+    const res = await this.listAuditEventsWithCount(tenantId, opts);
+    return res.events;
+  },
+
+  // -----------------------------------------------------------------------
+  // STRUCTURED TOOL EXECUTIONS & INDEXED FACT LOOKUPS
+  // -----------------------------------------------------------------------
+  async recordToolExecution(
+    exec: {
+      tenant_id?: string;
+      call_id?: string | null;
+      external_call_id?: string | null;
+      tool_name: string;
+      execution_status: string;
+      success: boolean;
+      safe_result?: Record<string, unknown> | null;
+      latency_ms?: number | null;
+      provider_reference?: string | null;
+    },
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<ToolExecution> {
+    const tid = exec.tenant_id || tenantId;
+    const callUuid = isValidUuid(exec.call_id) ? exec.call_id : null;
+    const nowIso = new Date().toISOString();
+    const id = crypto.randomUUID();
+
+    const record: ToolExecution = {
+      id,
+      tenant_id: tid,
+      call_id: callUuid,
+      external_call_id: exec.external_call_id || null,
+      tool_name: exec.tool_name,
+      execution_status: exec.execution_status,
+      success: exec.success,
+      safe_result: exec.safe_result || null,
+      latency_ms: exec.latency_ms || null,
+      provider_reference: exec.provider_reference || null,
+      created_at: nowIso,
+    };
+
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client.from('tool_executions').insert([record]).select().single();
+      if (!error && data) return data as ToolExecution;
+    }
+
+    assertProductionDbReady();
+    globalStore.tool_executions.unshift(record);
+    return record;
+  },
+
+  async getLatestSuccessfulToolExecution(
+    callIdOrExternalId: string,
+    toolName: string,
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<ToolExecution | null> {
+    const isUuid = isValidUuid(callIdOrExternalId);
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      let query = client
+        .from('tool_executions')
+        .select('*')
+        .eq('tenant_id', tenantId)
+        .eq('tool_name', toolName)
+        .eq('success', true);
+
+      if (isUuid) {
+        query = query.or(`call_id.eq.${callIdOrExternalId},external_call_id.eq.${callIdOrExternalId}`);
+      } else {
+        query = query.eq('external_call_id', callIdOrExternalId);
+      }
+
+      query = query.order('created_at', { ascending: false }).limit(1);
+      const { data, error } = await query;
+      if (!error && data && data.length > 0) return data[0] as ToolExecution;
+      return null;
+    }
+
+    assertProductionDbReady();
+    return (
+      globalStore.tool_executions.find(
+        (te) =>
+          te.tenant_id === tenantId &&
+          te.tool_name === toolName &&
+          te.success &&
+          (te.call_id === callIdOrExternalId || te.external_call_id === callIdOrExternalId)
+      ) || null
+    );
+  },
+
+  async getConfirmedTransferForCall(
+    callIdOrExternalId: string,
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<{ transferred: boolean; targetNumber?: string; provider?: string; transferId?: string } | null> {
+    const exec = await this.getLatestSuccessfulToolExecution(callIdOrExternalId, 'transfer_to_human', tenantId);
+    if (exec && exec.safe_result) {
+      return {
+        transferred: true,
+        targetNumber: (exec.safe_result.target_phone || exec.safe_result.targetNumber) as string,
+        provider: (exec.safe_result.provider || exec.provider_reference) as string,
+        transferId: (exec.provider_reference || exec.safe_result.transfer_id || exec.safe_result.providerTransferId) as string,
+      };
+    }
+    return null;
+  },
+
+  async getCallbackRequestForCall(
+    callIdOrExternalId: string,
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<OperationsRequest | null> {
+    const callUuid = isValidUuid(callIdOrExternalId)
+      ? callIdOrExternalId
+      : await this.resolveInternalCallId({ tenantId, externalCallId: callIdOrExternalId });
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      if (callUuid) {
+        const { data, error } = await client
+          .from('operations_requests')
+          .select('*')
+          .eq('tenant_id', tenantId)
+          .eq('call_id', callUuid)
+          .eq('type', 'CALLBACK_REQUEST')
+          .order('created_at', { ascending: false })
+          .limit(1);
+        if (!error && data && data.length > 0) return dbRequestToDomain(data[0] as any);
+      }
+      return null;
+    }
+    assertProductionDbReady();
+    return (
+      globalStore.operations_requests.find(
+        (r) =>
+          r.tenant_id === tenantId &&
+          (r.call_id === callIdOrExternalId || (callUuid && r.call_id === callUuid)) &&
+          r.type === 'CALLBACK_REQUEST'
+      ) || null
+    );
   },
 
   // -----------------------------------------------------------------------
@@ -2038,6 +2420,92 @@ export const db = {
     assertProductionDbReady();
     globalStore.followups.unshift(newFollowup);
     return newFollowup;
+  },
+
+  async upsertFollowup(
+    followupData: {
+      tenant_id?: string;
+      call_id: string;
+      channel: FollowupChannel;
+      recipient: string;
+      status: FollowupStatus;
+      customer_id?: string | null;
+      template_id?: string | null;
+      message_content?: string | null;
+      provider_message_id?: string | null;
+      sent_at?: string | null;
+    },
+    tenantId: string = DEFAULT_TENANT_ID
+  ): Promise<{ followup: FollowupRecord; wasCreated: boolean }> {
+    const tid = followupData.tenant_id || tenantId;
+    const callUuid = isValidUuid(followupData.call_id) ? followupData.call_id : null;
+    if (!callUuid) {
+      throw new Error(`upsertFollowup requires a valid call UUID, received '${followupData.call_id}'`);
+    }
+    const custUuid = isValidUuid(followupData.customer_id) ? followupData.customer_id : null;
+
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client.rpc('upsert_followup', {
+        p_tenant_id: tid,
+        p_call_id: callUuid,
+        p_channel: followupData.channel,
+        p_recipient: followupData.recipient,
+        p_status: followupData.status,
+        p_customer_id: custUuid,
+        p_template_id: followupData.template_id || null,
+        p_message_content: followupData.message_content || null,
+        p_provider_message_id: followupData.provider_message_id || null,
+        p_sent_at: followupData.sent_at || null,
+      });
+
+      if (error) {
+        throw new Error(`upsert_followup RPC failed: ${error.message}`);
+      }
+      const row = Array.isArray(data) ? data[0] : data;
+      const followup = await this.getFollowupByCallId(callUuid, tid);
+      return {
+        followup: followup!,
+        wasCreated: Boolean(row?.was_created),
+      };
+    }
+
+    assertProductionDbReady();
+    const existing = globalStore.followups.find((f) => f.tenant_id === tid && f.call_id === callUuid);
+    const nowIso = new Date().toISOString();
+    if (existing) {
+      if ((existing.status === 'SENT' || existing.status === 'DELIVERED') && followupData.status === 'PENDING') {
+        return { followup: existing, wasCreated: false };
+      }
+      existing.channel = followupData.channel;
+      existing.recipient = followupData.recipient;
+      existing.status = followupData.status;
+      if (custUuid) existing.customer_id = custUuid;
+      if (followupData.template_id) existing.template_id = followupData.template_id;
+      if (followupData.message_content) existing.message_content = followupData.message_content;
+      if (followupData.provider_message_id) existing.provider_message_id = followupData.provider_message_id;
+      if (followupData.sent_at) existing.sent_at = followupData.sent_at;
+      existing.updated_at = nowIso;
+      return { followup: existing, wasCreated: false };
+    }
+
+    const newRecord: FollowupRecord = {
+      id: crypto.randomUUID(),
+      tenant_id: tid,
+      call_id: callUuid,
+      customer_id: custUuid || undefined,
+      channel: followupData.channel,
+      status: followupData.status,
+      recipient: followupData.recipient,
+      template_id: followupData.template_id || undefined,
+      message_content: followupData.message_content || undefined,
+      provider_message_id: followupData.provider_message_id || undefined,
+      sent_at: followupData.sent_at || undefined,
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+    globalStore.followups.unshift(newRecord);
+    return { followup: newRecord, wasCreated: true };
   },
 
   async updateFollowup(
@@ -2087,8 +2555,9 @@ export const db = {
         .select('*')
         .eq('call_id', callId)
         .eq('tenant_id', tenantId)
-        .single();
+        .maybeSingle();
       if (!error && data) return dbFollowupToDomain(data as any);
+      return null;
     }
     assertProductionDbReady();
     return globalStore.followups.find((f: FollowupRecord) => f.call_id === callId && f.tenant_id === tenantId) || null;
@@ -2112,6 +2581,8 @@ export const db = {
   // DISPATCHER KPIS
   // -----------------------------------------------------------------------
   async getKPIs(tenantId: string = DEFAULT_TENANT_ID): Promise<DispatcherKPIs> {
+    const SUCCESSFUL_STATUSES = new Set(['SUCCESS', 'MATCH', 'FOUND', 'SAVED', 'REQUEST_CREATED', 'SENT', 'TRANSFER_CONNECTED', 'QUOTED']);
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
       const todayKolkata = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -2123,7 +2594,7 @@ export const db = {
         openReqsRes,
         hotLeadsRes,
         warmLeadsRes,
-        toolAuditRes,
+        toolExecRes,
       ] = await Promise.all([
         client.from('calls').select('*', { count: 'exact', head: true }).eq('tenant_id', tenantId).gte('started_at', `${todayKolkata}T00:00:00+05:30`),
         client.from('calls').select('*', { count: 'exact', head: true }).eq('tenant_id', tenantId).in('outcome', ['MISSED', 'FAILED']),
@@ -2131,7 +2602,7 @@ export const db = {
         client.from('operations_requests').select('*', { count: 'exact', head: true }).eq('tenant_id', tenantId).in('status', ['PENDING', 'IN_REVIEW']),
         client.from('leads').select('*', { count: 'exact', head: true }).eq('tenant_id', tenantId).eq('temperature', 'HOT'),
         client.from('leads').select('*', { count: 'exact', head: true }).eq('tenant_id', tenantId).eq('temperature', 'WARM'),
-        client.from('audit_events').select('event_type, details').eq('tenant_id', tenantId).ilike('event_type', 'TOOL_%').limit(500),
+        client.from('tool_executions').select('execution_status, success, latency_ms').eq('tenant_id', tenantId).limit(500),
       ]);
 
       const callsTodayCount = callsTodayRes.count ?? 0;
@@ -2145,15 +2616,15 @@ export const db = {
       let totalToolAttempts = 0;
       let successfulToolExecutions = 0;
 
-      if (toolAuditRes.data) {
-        for (const ae of toolAuditRes.data) {
+      if (toolExecRes.data && toolExecRes.data.length > 0) {
+        for (const te of toolExecRes.data) {
           totalToolAttempts++;
-          const details = (ae.details as Record<string, unknown>) || {};
-          if (details.success !== false) {
+          const isSuccess = te.success === true || (typeof te.execution_status === 'string' && SUCCESSFUL_STATUSES.has(te.execution_status.toUpperCase()));
+          if (isSuccess) {
             successfulToolExecutions++;
           }
-          if (typeof details.latency_ms === 'number' && details.latency_ms > 0) {
-            measuredLatencies.push(details.latency_ms);
+          if (typeof te.latency_ms === 'number' && te.latency_ms > 0) {
+            measuredLatencies.push(te.latency_ms);
           }
         }
       }
@@ -2168,7 +2639,7 @@ export const db = {
 
       return {
         calls_today: callsTodayCount,
-        calls_trend: callsTodayCount > 0 ? `${callsTodayCount} active calls today` : 'No calls today',
+        calls_trend: callsTodayCount > 0 ? `${callsTodayCount} calls today` : 'No calls today',
         missed_calls: missedCount,
         escalated_calls: escalatedCount,
         open_requests: openReqsCount,
@@ -2183,7 +2654,7 @@ export const db = {
     const calls = globalStore.calls.filter((c) => c.tenant_id === tenantId);
     const leads = globalStore.leads.filter((l) => l.tenant_id === tenantId);
     const reqs = globalStore.operations_requests.filter((r) => r.tenant_id === tenantId);
-    const auditEvents = globalStore.audit_events.filter((a) => a.tenant_id === tenantId);
+    const toolExecs = globalStore.tool_executions.filter((t) => t.tenant_id === tenantId);
 
     const missed = calls.filter((c) => c.outcome === 'MISSED' || c.outcome === 'FAILED').length;
     const escalated = calls.filter((c) => c.outcome === 'TRANSFERRED' || c.escalation_status?.is_escalated).length;
@@ -2191,7 +2662,6 @@ export const db = {
     const hotLeads = leads.filter((l) => l.temperature === 'HOT').length;
     const warmLeads = leads.filter((l) => l.temperature === 'WARM').length;
 
-    // Truthful calculation of calls occurring today in business timezone (Asia/Kolkata)
     const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     const callsToday = calls.filter((c) => {
       const d = c.started_at;
@@ -2200,40 +2670,19 @@ export const db = {
       return callDateStr === todayStr;
     });
 
-    // Truthful calculation of tool success rate and response latency from measured tool executions
     const measuredLatencies: number[] = [];
     let totalToolAttempts = 0;
     let successfulToolExecutions = 0;
 
-    for (const c of calls) {
-      if (c.tool_events && c.tool_events.length > 0) {
-        for (const te of c.tool_events) {
-          totalToolAttempts++;
-          if (te.execution_status === 'SUCCESS' || te.status === 'SUCCESS' || te.status === 'PENDING') {
-            successfulToolExecutions++;
-          }
-          if (typeof te.latency_ms === 'number' && te.latency_ms > 0) {
-            measuredLatencies.push(te.latency_ms);
-          }
-        }
+    for (const te of toolExecs) {
+      totalToolAttempts++;
+      const isSuccess = te.success === true || SUCCESSFUL_STATUSES.has(te.execution_status?.toUpperCase() || '');
+      if (isSuccess) {
+        successfulToolExecutions++;
       }
-    }
-
-    for (const ae of auditEvents) {
-      if (ae.event_type.startsWith('TOOL_')) {
-        const details = (ae.details as Record<string, unknown>) || {};
-        if (typeof details.latency_ms === 'number' && details.latency_ms > 0) {
-          measuredLatencies.push(details.latency_ms);
-        }
+      if (typeof te.latency_ms === 'number' && te.latency_ms > 0) {
+        measuredLatencies.push(te.latency_ms);
       }
-    }
-
-    if (totalToolAttempts === 0) {
-      const toolAudit = auditEvents.filter((e) => e.event_type.startsWith('TOOL_'));
-      totalToolAttempts = toolAudit.length;
-      successfulToolExecutions = toolAudit.filter(
-        (e) => e.event_type === 'TOOL_EXECUTION' && (e.details as Record<string, unknown>)?.success !== false
-      ).length;
     }
 
     const toolSuccessRate = totalToolAttempts > 0
@@ -2246,7 +2695,7 @@ export const db = {
 
     return {
       calls_today: callsToday.length,
-      calls_trend: callsToday.length > 0 ? `${callsToday.length} active calls today` : 'No calls today',
+      calls_trend: callsToday.length > 0 ? `${callsToday.length} calls today` : 'No calls today',
       missed_calls: missed,
       escalated_calls: escalated,
       open_requests: openReqs,
@@ -2266,138 +2715,100 @@ export const db = {
     effectType: string = 'GENERIC_SIDE_EFFECT',
     callId?: string,
     expiresMs: number = 300000,
-    maxAttempts: number = 3
-  ): Promise<{ claimed: boolean; status: SideEffectStatus; claim?: SideEffectClaim }> {
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + expiresMs).toISOString();
-    const nowIso = now.toISOString();
-    const isUuid = Boolean(callId && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(callId));
-    const sanitizedCallId = isUuid ? callId : undefined;
+    maxAttempts: number = 3,
+    claimedBy: string = 'worker',
+    claimToken?: string
+  ): Promise<{ claimed: boolean; status: SideEffectStatus; claim?: SideEffectClaim; claim_token: string }> {
+    const token = isValidUuid(claimToken) ? claimToken! : crypto.randomUUID();
+    const leaseDurationSec = Math.max(1, Math.round(expiresMs / 1000));
+    const callUuid = isValidUuid(callId) ? callId! : null;
 
     if (await isSupabaseLive()) {
       const client = createAdminClient();
-      const { data: existing } = await client
-        .from('side_effect_claims')
-        .select('*')
-        .eq('tenant_id', tenantId)
-        .eq('claim_key', claimKey)
-        .maybeSingle();
+      const { data, error } = await client.rpc('claim_side_effect', {
+        p_tenant_id: tenantId,
+        p_claim_key: claimKey,
+        p_job_type: effectType || 'GENERIC_SIDE_EFFECT',
+        p_call_id: callUuid,
+        p_claimed_by: claimedBy,
+        p_claim_token: token,
+        p_lease_duration_seconds: leaseDurationSec,
+        p_max_attempts: maxAttempts,
+      });
 
-      if (existing) {
-        if (existing.status === 'COMPLETED' || existing.status === 'SUCCEEDED') {
-          return { claimed: false, status: 'SUCCEEDED', claim: existing as SideEffectClaim };
-        }
-        if (existing.status === 'FAILED' || existing.status === 'REJECTED') {
-          return { claimed: false, status: 'FAILED', claim: existing as SideEffectClaim };
-        }
-        const leaseExpiresAt = existing.lease_expires_at || existing.expires_at;
-        if (existing.status === 'PROCESSING' && leaseExpiresAt && leaseExpiresAt > nowIso) {
-          return { claimed: false, status: 'PROCESSING', claim: existing as SideEffectClaim };
-        }
-        if (existing.status === 'RETRYABLE') {
-          if (existing.next_retry_at && existing.next_retry_at > nowIso) {
-            return { claimed: false, status: 'RETRYABLE', claim: existing as SideEffectClaim };
-          }
-          if ((existing.attempt_count || 1) >= (existing.max_attempts || maxAttempts)) {
-            await client
-              .from('side_effect_claims')
-              .update({ status: 'FAILED', updated_at: nowIso })
-              .eq('id', existing.id);
-            return { claimed: false, status: 'FAILED', claim: { ...existing, status: 'FAILED' } as SideEffectClaim };
-          }
-        }
-
-        const { data: updated, error: updateErr } = await client
-          .from('side_effect_claims')
-          .update({
-            status: 'PROCESSING',
-            claimed_at: nowIso,
-            lease_expires_at: expiresAt,
-            attempt_count: (existing.attempt_count || 1) + 1,
-            updated_at: nowIso,
-          })
-          .eq('id', existing.id)
-          .eq('status', existing.status)
-          .select()
-          .single();
-
-        if (!updateErr && updated) {
-          return { claimed: true, status: 'PROCESSING', claim: updated as SideEffectClaim };
-        }
-        return { claimed: false, status: (existing.status as SideEffectStatus) || 'PROCESSING', claim: existing as SideEffectClaim };
+      if (error) {
+        throw new Error(`claim_side_effect RPC failed: ${error.message}`);
       }
 
-      const newClaim = {
-        id: crypto.randomUUID(),
-        tenant_id: tenantId,
-        claim_key: claimKey,
-        job_type: effectType || 'GENERIC_SIDE_EFFECT',
-        call_id: sanitizedCallId,
-        status: 'PROCESSING' as SideEffectStatus,
-        attempt_count: 1,
-        max_attempts: maxAttempts,
-        claimed_at: nowIso,
-        lease_expires_at: expiresAt,
-        created_at: nowIso,
-        updated_at: nowIso,
+      const row = Array.isArray(data) ? data[0] : data;
+      if (!row) {
+        return { claimed: false, status: 'PROCESSING', claim_token: token };
+      }
+
+      const claim: SideEffectClaim = {
+        id: row.claim_id,
+        tenant_id: row.tenant_id,
+        claim_key: row.claim_key,
+        job_type: row.job_type,
+        call_id: row.call_id,
+        status: row.status as SideEffectStatus,
+        attempt_count: row.attempt_count,
+        max_attempts: row.max_attempts,
+        claimed_by: row.claimed_by,
+        claim_token: row.claim_token,
+        claimed_at: row.lease_expires_at,
+        lease_expires_at: row.lease_expires_at,
+        result: row.result,
+        last_error: row.last_error,
+        created_at: row.created_at || new Date().toISOString(),
+        updated_at: row.updated_at || new Date().toISOString(),
       };
 
-      const { data: inserted, error: insertErr } = await client
-        .from('side_effect_claims')
-        .insert([newClaim])
-        .select()
-        .single();
-
-      if (!insertErr && inserted) {
-        return { claimed: true, status: 'PROCESSING', claim: inserted as SideEffectClaim };
-      }
-
-      const { data: recheck } = await client
-        .from('side_effect_claims')
-        .select('*')
-        .eq('tenant_id', tenantId)
-        .eq('claim_key', claimKey)
-        .maybeSingle();
-
       return {
-        claimed: false,
-        status: (recheck?.status as SideEffectStatus) || 'PROCESSING',
-        claim: recheck as SideEffectClaim,
+        claimed: Boolean(row.acquired),
+        status: row.status as SideEffectStatus,
+        claim,
+        claim_token: row.claim_token || token,
       };
     }
 
     assertProductionDbReady();
+    const nowIso = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + expiresMs).toISOString();
     const existing = globalStore.side_effect_claims.find(
       (c) => c.tenant_id === tenantId && c.claim_key === claimKey
     );
 
     if (existing) {
       if (existing.status === 'SUCCEEDED') {
-        return { claimed: false, status: 'SUCCEEDED', claim: existing };
+        return { claimed: false, status: 'SUCCEEDED', claim: existing, claim_token: existing.claim_token || token };
       }
       if (existing.status === 'FAILED') {
-        return { claimed: false, status: 'FAILED', claim: existing };
+        return { claimed: false, status: 'FAILED', claim: existing, claim_token: existing.claim_token || token };
       }
       const leaseExpiresAt = existing.lease_expires_at;
       if (existing.status === 'PROCESSING' && leaseExpiresAt && leaseExpiresAt > nowIso) {
-        return { claimed: false, status: 'PROCESSING', claim: existing };
+        return { claimed: false, status: 'PROCESSING', claim: existing, claim_token: existing.claim_token || token };
       }
       if (existing.status === 'RETRYABLE') {
         if (existing.next_retry_at && existing.next_retry_at > nowIso) {
-          return { claimed: false, status: 'RETRYABLE', claim: existing };
+          return { claimed: false, status: 'RETRYABLE', claim: existing, claim_token: existing.claim_token || token };
         }
         if ((existing.attempt_count || 1) >= (existing.max_attempts || maxAttempts)) {
           existing.status = 'FAILED';
           existing.updated_at = nowIso;
-          return { claimed: false, status: 'FAILED', claim: existing };
+          return { claimed: false, status: 'FAILED', claim: existing, claim_token: existing.claim_token || token };
         }
       }
+
       existing.status = 'PROCESSING';
       existing.claimed_at = nowIso;
+      existing.claimed_by = claimedBy;
+      existing.claim_token = token;
       existing.lease_expires_at = expiresAt;
-      existing.attempt_count += 1;
+      existing.attempt_count = (existing.attempt_count || 1) + 1;
       existing.updated_at = nowIso;
-      return { claimed: true, status: 'PROCESSING', claim: existing };
+      return { claimed: true, status: 'PROCESSING', claim: existing, claim_token: token };
     }
 
     const newClaim: SideEffectClaim = {
@@ -2405,49 +2816,75 @@ export const db = {
       tenant_id: tenantId,
       claim_key: claimKey,
       job_type: effectType || 'GENERIC_SIDE_EFFECT',
-      call_id: callId,
+      call_id: callUuid || undefined,
       status: 'PROCESSING',
       attempt_count: 1,
       max_attempts: maxAttempts,
+      claimed_by: claimedBy,
+      claim_token: token,
       claimed_at: nowIso,
       lease_expires_at: expiresAt,
       created_at: nowIso,
       updated_at: nowIso,
     };
     globalStore.side_effect_claims.unshift(newClaim);
-    return { claimed: true, status: 'PROCESSING', claim: newClaim };
+    return { claimed: true, status: 'PROCESSING', claim: newClaim, claim_token: token };
   },
 
   async completeSideEffect(
     tenantId: string = DEFAULT_TENANT_ID,
     claimKey: string,
-    responsePayload?: Record<string, unknown>
+    responsePayload?: Record<string, unknown>,
+    claimToken?: string
   ): Promise<void> {
-    const nowIso = new Date().toISOString();
     if (await isSupabaseLive()) {
       const client = createAdminClient();
-      await client
-        .from('side_effect_claims')
-        .update({
-          status: 'SUCCEEDED',
-          completed_at: nowIso,
-          result: responsePayload || {},
-          updated_at: nowIso,
-        })
-        .eq('tenant_id', tenantId)
-        .eq('claim_key', claimKey);
+      const { data, error } = await client.rpc('complete_side_effect', {
+        p_tenant_id: tenantId,
+        p_claim_key: claimKey,
+        p_claim_token: isValidUuid(claimToken) ? claimToken : null,
+        p_result: responsePayload || {},
+      });
+
+      if (error) {
+        throw new SideEffectPersistenceError(
+          `Database error completing side effect claim '${claimKey}': ${error.message}`,
+          { tenantId, claimKey, claimToken, error: error.message }
+        );
+      }
+      if (!data) {
+        throw new SideEffectPersistenceError(
+          `Failed to complete side effect claim '${claimKey}': claim not in PROCESSING status or claim_token mismatch`,
+          { tenantId, claimKey, claimToken }
+        );
+      }
       return;
     }
+
     assertProductionDbReady();
     const claim = globalStore.side_effect_claims.find(
       (c) => c.tenant_id === tenantId && c.claim_key === claimKey
     );
-    if (claim) {
-      claim.status = 'SUCCEEDED';
-      claim.completed_at = nowIso;
-      claim.result = responsePayload;
-      claim.updated_at = nowIso;
+    if (!claim) {
+      throw new SideEffectPersistenceError(`Claim '${claimKey}' not found`, { tenantId, claimKey });
     }
+    if (claim.status !== 'PROCESSING') {
+      throw new SideEffectPersistenceError(
+        `Cannot complete claim '${claimKey}' in non-PROCESSING status '${claim.status}'`,
+        { tenantId, claimKey, status: claim.status }
+      );
+    }
+    if (claimToken && claim.claim_token && claim.claim_token !== claimToken) {
+      throw new SideEffectPersistenceError(
+        `Cannot complete claim '${claimKey}': claim_token mismatch`,
+        { tenantId, claimKey, expected: claim.claim_token, actual: claimToken }
+      );
+    }
+    const nowIso = new Date().toISOString();
+    claim.status = 'SUCCEEDED';
+    claim.completed_at = nowIso;
+    claim.result = responsePayload;
+    claim.updated_at = nowIso;
   },
 
   async failSideEffect(
@@ -2455,36 +2892,62 @@ export const db = {
     claimKey: string,
     errorMessage: string,
     isRetryable: boolean = false,
-    retryDelayMs: number = 60000
+    retryDelayMs: number = 60000,
+    claimToken?: string
   ): Promise<void> {
-    const nowIso = new Date().toISOString();
-    const status: SideEffectStatus = isRetryable ? 'RETRYABLE' : 'FAILED';
-    const nextRetry = isRetryable ? new Date(Date.now() + retryDelayMs).toISOString() : null;
-
     if (await isSupabaseLive()) {
       const client = createAdminClient();
-      await client
-        .from('side_effect_claims')
-        .update({
-          status,
-          last_error: errorMessage,
-          next_retry_at: nextRetry,
-          updated_at: nowIso,
-        })
-        .eq('tenant_id', tenantId)
-        .eq('claim_key', claimKey);
+      const retryDelaySec = Math.max(1, Math.round(retryDelayMs / 1000));
+      const { data, error } = await client.rpc('fail_side_effect', {
+        p_tenant_id: tenantId,
+        p_claim_key: claimKey,
+        p_claim_token: isValidUuid(claimToken) ? claimToken : null,
+        p_error: errorMessage,
+        p_is_retryable: isRetryable,
+        p_retry_delay_seconds: retryDelaySec,
+      });
+
+      if (error) {
+        throw new SideEffectPersistenceError(
+          `Database error failing side effect claim '${claimKey}': ${error.message}`,
+          { tenantId, claimKey, claimToken, error: error.message }
+        );
+      }
+      if (!data) {
+        throw new SideEffectPersistenceError(
+          `Failed to record failure for side effect claim '${claimKey}': claim not in PROCESSING status or claim_token mismatch`,
+          { tenantId, claimKey, claimToken }
+        );
+      }
       return;
     }
+
     assertProductionDbReady();
     const claim = globalStore.side_effect_claims.find(
       (c) => c.tenant_id === tenantId && c.claim_key === claimKey
     );
-    if (claim) {
-      claim.status = status;
-      claim.last_error = errorMessage;
-      claim.next_retry_at = nextRetry || undefined;
-      claim.updated_at = nowIso;
+    if (!claim) {
+      throw new SideEffectPersistenceError(`Claim '${claimKey}' not found`, { tenantId, claimKey });
     }
+    if (claim.status !== 'PROCESSING') {
+      throw new SideEffectPersistenceError(
+        `Cannot fail claim '${claimKey}' in non-PROCESSING status '${claim.status}'`,
+        { tenantId, claimKey, status: claim.status }
+      );
+    }
+    if (claimToken && claim.claim_token && claim.claim_token !== claimToken) {
+      throw new SideEffectPersistenceError(
+        `Cannot fail claim '${claimKey}': claim_token mismatch`,
+        { tenantId, claimKey, expected: claim.claim_token, actual: claimToken }
+      );
+    }
+    const nowIso = new Date().toISOString();
+    const status: SideEffectStatus = isRetryable ? 'RETRYABLE' : 'FAILED';
+    const nextRetry = isRetryable ? new Date(Date.now() + retryDelayMs).toISOString() : null;
+    claim.status = status;
+    claim.last_error = errorMessage;
+    claim.next_retry_at = nextRetry || undefined;
+    claim.updated_at = nowIso;
   },
 
   async getSideEffectClaim(
@@ -2501,12 +2964,41 @@ export const db = {
         .maybeSingle();
       return (data as SideEffectClaim) || null;
     }
-    assertProductionDbReady();
     return (
       globalStore.side_effect_claims.find(
         (c) => c.tenant_id === tenantId && c.claim_key === claimKey
       ) || null
     );
+  },
+
+  async listEligibleRetryClaims(limit = 20): Promise<SideEffectClaim[]> {
+    const nowIso = new Date().toISOString();
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client
+        .from('side_effect_claims')
+        .select('*')
+        .eq('status', 'RETRYABLE')
+        .lte('next_retry_at', nowIso)
+        .or(`lease_expires_at.is.null,lease_expires_at.lt.${nowIso}`)
+        .order('next_retry_at', { ascending: true })
+        .limit(limit);
+
+      if (error || !data) return [];
+      return (data as SideEffectClaim[]).filter((c) => (c.attempt_count || 0) < (c.max_attempts || 3));
+    }
+
+    assertProductionDbReady();
+    return globalStore.side_effect_claims
+      .filter(
+        (c) =>
+          c.status === 'RETRYABLE' &&
+          c.next_retry_at &&
+          c.next_retry_at <= nowIso &&
+          (c.attempt_count || 0) < (c.max_attempts || 3) &&
+          (!c.lease_expires_at || c.lease_expires_at < nowIso)
+      )
+      .slice(0, limit);
   },
 
   // -----------------------------------------------------------------------

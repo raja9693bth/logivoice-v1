@@ -211,7 +211,6 @@ export function evaluateApprovedRate(
 // =========================================================================
 // RFC4180 COMPLIANT CSV PARSER
 // =========================================================================
-
 export interface ParsedCsvRateRow {
   origin: string;
   destination: string;
@@ -219,10 +218,10 @@ export interface ParsedCsvRateRow {
   weight_min_tons: number;
   weight_max_tons: number;
   price_inr: number;
-  minimum_charge_inr: number;
-  transit_time_hours: number;
+  minimum_charge_inr?: number | null;
+  transit_time_hours?: number | null;
   effective_from: string;
-  effective_to?: string;
+  effective_to?: string | null;
   quote_type: 'ESTIMATE' | 'CONFIRMED';
   supports_confirmed_quote: boolean;
   status: 'ACTIVE' | 'DRAFT' | 'EXPIRED';
@@ -243,7 +242,6 @@ export function parseCsvTokens(text: string): string[][] {
 
   while (i < text.length) {
     const char = text[i];
-
     if (inQuotes) {
       if (char === '"') {
         if (i + 1 < text.length && text[i + 1] === '"') {
@@ -311,6 +309,8 @@ export function parseCsvTokens(text: string): string[][] {
 
 /**
  * Validates and parses CSV rows against the LogiVoice V1 Rate Card contract.
+ * Enforces commercial truthfulness: requires explicit effective_from, stores null
+ * for omitted minimum_charge and transit_time, and defaults status to DRAFT.
  */
 export function parseRateCardsCsv(
   csvContent: string,
@@ -344,10 +344,13 @@ export function parseRateCardsCsv(
   const minWIdx = getIdx('weight_min_tons', 'weight_min', 'min_weight');
   const maxWIdx = getIdx('weight_max_tons', 'weight_max', 'max_weight');
   const priceIdx = getIdx('price_inr', 'price', 'freight', 'rate');
-  const minChargeIdx = getIdx('minimum_charge_inr', 'minimum_charge', 'min_charge');
-  const transitIdx = getIdx('transit_time_hours', 'transit_hours', 'transit_time');
   const effectiveFromIdx = getIdx('effective_from', 'valid_from', 'start_date');
   const effectiveToIdx = getIdx('effective_to', 'valid_to', 'expiry_date');
+  const statusIdx = getIdx('status', 'state');
+  const minChargeIdx = getIdx('minimum_charge_inr', 'minimum_charge', 'min_charge');
+  const transitIdx = getIdx('transit_time_hours', 'transit_hours', 'transit_time');
+  const quoteTypeIdx = getIdx('quote_type', 'type');
+  const supportsConfirmedIdx = getIdx('supports_confirmed_quote', 'confirmed_quote');
 
   if (
     originIdx === -1 ||
@@ -355,13 +358,14 @@ export function parseRateCardsCsv(
     vehicleIdx === -1 ||
     priceIdx === -1 ||
     minWIdx === -1 ||
-    maxWIdx === -1
+    maxWIdx === -1 ||
+    effectiveFromIdx === -1
   ) {
     return {
       validRows: [],
       allRows: [],
       errors: [
-        'Missing required CSV headers: origin, destination, vehicle_type, price_inr, weight_min_tons, and weight_max_tons are mandatory.',
+        'Missing required CSV headers: origin, destination, vehicle_type, price_inr, weight_min_tons, weight_max_tons, and effective_from are mandatory.',
       ],
     };
   }
@@ -380,20 +384,23 @@ export function parseRateCardsCsv(
     const destination = (parts[destIdx] || '').trim();
     const vehicleType = (parts[vehicleIdx] || '').trim();
     const priceRaw = (parts[priceIdx] || '').trim();
-    const minWRaw = minWIdx !== -1 ? (parts[minWIdx] || '').trim() : '';
-    const maxWRaw = maxWIdx !== -1 ? (parts[maxWIdx] || '').trim() : '';
+    const minWRaw = (parts[minWIdx] || '').trim();
+    const maxWRaw = (parts[maxWIdx] || '').trim();
+    const effectiveFromRaw = (parts[effectiveFromIdx] || '').trim();
+    const effectiveToRaw = effectiveToIdx !== -1 ? (parts[effectiveToIdx] || '').trim() || null : null;
+    const statusRaw = statusIdx !== -1 ? (parts[statusIdx] || '').trim().toUpperCase() : 'DRAFT';
     const minChargeRaw = minChargeIdx !== -1 ? (parts[minChargeIdx] || '').trim() : '';
     const transitRaw = transitIdx !== -1 ? (parts[transitIdx] || '').trim() : '';
-    const effectiveFromRaw = effectiveFromIdx !== -1 ? (parts[effectiveFromIdx] || '').trim() : new Date().toISOString().split('T')[0];
-    const effectiveToRaw = effectiveToIdx !== -1 ? (parts[effectiveToIdx] || '').trim() || undefined : undefined;
+    const quoteTypeRaw = quoteTypeIdx !== -1 ? (parts[quoteTypeIdx] || '').trim().toUpperCase() : 'ESTIMATE';
+    const supportsConfirmedRaw = supportsConfirmedIdx !== -1 ? (parts[supportsConfirmedIdx] || '').trim().toLowerCase() : 'false';
 
     let rowErr: string | undefined;
 
     const price = Number.parseFloat(priceRaw);
     const minW = Number.parseFloat(minWRaw);
     const maxW = Number.parseFloat(maxWRaw);
-    const minCharge = minChargeRaw ? Number.parseFloat(minChargeRaw) : 0;
-    const transit = transitRaw ? Number.parseInt(transitRaw, 10) : 24;
+    const minCharge = minChargeRaw ? Number.parseFloat(minChargeRaw) : null;
+    const transit = transitRaw ? Number.parseInt(transitRaw, 10) : null;
 
     if (!origin || !destination) {
       rowErr = 'Missing origin or destination';
@@ -411,22 +418,34 @@ export function parseRateCardsCsv(
       rowErr = `Invalid effective_to date '${effectiveToRaw}'. Expected valid ISO calendar date (YYYY-MM-DD).`;
     } else if (effectiveToRaw && effectiveToRaw < effectiveFromRaw) {
       rowErr = 'effective_to cannot be earlier than effective_from date.';
+    } else if (minCharge !== null && (Number.isNaN(minCharge) || minCharge < 0)) {
+      rowErr = 'minimum_charge_inr must be a non-negative number if specified';
+    } else if (transit !== null && (Number.isNaN(transit) || transit <= 0)) {
+      rowErr = 'transit_time_hours must be a positive integer if specified';
     }
+
+    const parsedStatus: 'ACTIVE' | 'DRAFT' | 'EXPIRED' =
+      statusRaw === 'ACTIVE' || statusRaw === 'EXPIRED' ? statusRaw : 'DRAFT';
+
+    const parsedQuoteType: 'ESTIMATE' | 'CONFIRMED' =
+      quoteTypeRaw === 'CONFIRMED' ? 'CONFIRMED' : 'ESTIMATE';
+
+    const parsedSupportsConfirmed = supportsConfirmedRaw === 'true' || supportsConfirmedRaw === '1' || supportsConfirmedRaw === 'yes';
 
     const corridorKey = `${origin.toLowerCase()}|${destination.toLowerCase()}|${vehicleType.toLowerCase()}`;
 
-    // In-CSV Overlap Detection (considering both weight interval and date range)
-    if (!rowErr) {
+    // In-CSV Overlap Detection (considering both weight interval [min, max) and date range)
+    if (!rowErr && parsedStatus === 'ACTIVE') {
       const existingBands = seenKeys.get(corridorKey) || [];
       const hasCsvOverlap = existingBands.some(
         (b) =>
           intervalsOverlap(b.minW, b.maxW, minW, maxW) &&
-          dateRangesOverlap(b.from, b.to, effectiveFromRaw, effectiveToRaw)
+          dateRangesOverlap(b.from, b.to, effectiveFromRaw, effectiveToRaw || undefined)
       );
       if (hasCsvOverlap) {
         rowErr = 'Overlapping tariff band for same lane, vehicle, and date interval in this CSV';
       } else {
-        existingBands.push({ minW, maxW, from: effectiveFromRaw, to: effectiveToRaw });
+        existingBands.push({ minW, maxW, from: effectiveFromRaw, to: effectiveToRaw || undefined });
         seenKeys.set(corridorKey, existingBands);
       }
     }
@@ -434,7 +453,7 @@ export function parseRateCardsCsv(
     // Existing Database Active Cards Conflict Check (weights + dates)
     let isConflict = false;
     let conflictNote: string | undefined;
-    if (!rowErr) {
+    if (!rowErr && parsedStatus === 'ACTIVE') {
       const dbConflicts = existingActiveCards.filter(
         (c) =>
           c.origin.toLowerCase() === origin.toLowerCase() &&
@@ -442,12 +461,12 @@ export function parseRateCardsCsv(
           c.vehicle_type.toLowerCase() === vehicleType.toLowerCase() &&
           c.status === 'ACTIVE' &&
           intervalsOverlap(c.weight_min_tons, c.weight_max_tons, minW, maxW) &&
-          dateRangesOverlap(c.effective_from, c.effective_to, effectiveFromRaw, effectiveToRaw)
+          dateRangesOverlap(c.effective_from, c.effective_to, effectiveFromRaw, effectiveToRaw || undefined)
       );
 
       if (dbConflicts.length > 0) {
         isConflict = true;
-        conflictNote = `Conflicts with active card (₹${dbConflicts[0].price_inr.toLocaleString('en-IN')}, ${dbConflicts[0].weight_min_tons}-${dbConflicts[0].weight_max_tons}T)`;
+        conflictNote = `Conflicts with active card (₹${dbConflicts[0].price_inr.toLocaleString('en-IN')}, [${dbConflicts[0].weight_min_tons}, ${dbConflicts[0].weight_max_tons})T)`;
       }
     }
 
@@ -458,13 +477,13 @@ export function parseRateCardsCsv(
       weight_min_tons: Number.isNaN(minW) ? 0 : minW,
       weight_max_tons: Number.isNaN(maxW) ? 0 : maxW,
       price_inr: Number.isNaN(price) ? 0 : price,
-      minimum_charge_inr: Number.isNaN(minCharge) ? 0 : minCharge,
-      transit_time_hours: Number.isNaN(transit) ? 24 : transit,
+      minimum_charge_inr: minCharge,
+      transit_time_hours: transit,
       effective_from: effectiveFromRaw,
-      effective_to: effectiveToRaw || undefined,
-      quote_type: 'ESTIMATE',
-      supports_confirmed_quote: false,
-      status: 'DRAFT',
+      effective_to: effectiveToRaw,
+      quote_type: parsedQuoteType,
+      supports_confirmed_quote: parsedSupportsConfirmed,
+      status: parsedStatus,
       error: rowErr,
       conflict: isConflict,
       conflictNote,

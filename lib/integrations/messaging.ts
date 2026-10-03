@@ -39,12 +39,12 @@ export interface ControlledFollowupRequest {
   recipientPhone: string;
   templateId: FollowupTemplateId;
   templateData: FollowupTemplateData;
-  channel?: 'WHATSAPP' | 'SMS';
+  channel?: 'WHATSAPP' | 'SMS' | 'EMAIL';
 }
 
 export interface FollowupSendResult {
   success: boolean;
-  status: 'SENT' | 'DELIVERED' | 'FAILED' | 'SUPPRESSED' | 'UNCONFIGURED' | 'MOCK' | 'SKIPPED';
+  status: 'SENT' | 'DELIVERED' | 'FAILED' | 'SUPPRESSED' | 'UNCONFIGURED' | 'MOCK' | 'SKIPPED' | 'UNKNOWN';
   providerMessageId?: string;
   provider: string;
   renderedText: string;
@@ -205,8 +205,29 @@ export async function sendControlledFollowup(
           error: errMsg,
         };
       }
-    } catch (err) {
+    } catch (err: any) {
+      const isTimeout =
+        err?.name === 'TimeoutError' ||
+        err?.name === 'AbortError' ||
+        (err instanceof Error && /timeout|abort/i.test(err.message));
       const errMsg = err instanceof Error ? err.message : 'Network error reaching WhatsApp API';
+
+      if (isTimeout) {
+        await db.completeSideEffect(tenantId, claimKey, {
+          business_status: 'UNKNOWN',
+          status: 'UNKNOWN',
+          provider: 'META_WHATSAPP_CLOUD_API',
+          error: `Provider call timed out: ${errMsg}`,
+        });
+        return {
+          success: false,
+          status: 'UNKNOWN',
+          provider: 'META_WHATSAPP_CLOUD_API',
+          renderedText,
+          error: `Provider call timed out: ${errMsg}`,
+        };
+      }
+
       await db.failSideEffect(tenantId, claimKey, errMsg, true);
       return {
         success: false,
@@ -214,6 +235,31 @@ export async function sendControlledFollowup(
         provider: 'META_WHATSAPP_CLOUD_API',
         renderedText,
         error: errMsg,
+      };
+    }
+  }
+
+  if (channel === 'EMAIL') {
+    return {
+      success: false,
+      status: 'UNCONFIGURED',
+      provider: 'EMAIL_GATEWAY',
+      renderedText,
+      error: 'EMAIL channel is not supported / unconfigured.',
+    };
+  }
+
+  if (channel === 'SMS') {
+    const isSmsConfigured = Boolean(
+      process.env.SMS_API_KEY || process.env.TWILIO_AUTH_TOKEN || process.env.ENABLE_MOCK_INTEGRATIONS === 'true'
+    );
+    if (!isSmsConfigured) {
+      return {
+        success: false,
+        status: 'UNCONFIGURED',
+        provider: 'SMS_GATEWAY',
+        renderedText,
+        error: 'SMS channel is unconfigured.',
       };
     }
   }
@@ -263,13 +309,22 @@ export interface LegacyFollowupParams {
 
 export async function sendFollowupMessage(params: LegacyFollowupParams): Promise<{
   success: boolean;
-  status: 'SENT' | 'DELIVERED' | 'FAILED' | 'SUPPRESSED' | 'OPTED_OUT' | 'UNCONFIGURED' | 'MOCK';
+  status: 'SENT' | 'DELIVERED' | 'FAILED' | 'SUPPRESSED' | 'OPTED_OUT' | 'UNCONFIGURED' | 'MOCK' | 'UNKNOWN';
   providerMessageId?: string;
   provider?: string;
   error?: string;
 }> {
   const normPhone = normalizePhoneNumber(params.recipient);
   const tenantId = params.tenantId || DEFAULT_TENANT_ID;
+
+  if (params.channel === 'EMAIL') {
+    return {
+      success: false,
+      status: 'UNCONFIGURED',
+      provider: 'EMAIL_GATEWAY',
+      error: 'EMAIL channel is not supported / unconfigured.',
+    };
+  }
 
   const isSuppressed = await db.isPhoneSuppressed(tenantId, normPhone, params.channel || 'WHATSAPP');
 
@@ -282,11 +337,25 @@ export async function sendFollowupMessage(params: LegacyFollowupParams): Promise
     };
   }
 
+  if (params.channel === 'SMS') {
+    const isSmsConfigured = Boolean(
+      process.env.SMS_API_KEY || process.env.TWILIO_AUTH_TOKEN || process.env.ENABLE_MOCK_INTEGRATIONS === 'true'
+    );
+    if (!isSmsConfigured) {
+      return {
+        success: false,
+        status: 'UNCONFIGURED',
+        provider: 'SMS_GATEWAY',
+        error: 'SMS channel is unconfigured.',
+      };
+    }
+  }
+
   const hasCreds = Boolean(
     process.env.WHATSAPP_API_KEY && process.env.WHATSAPP_PHONE_NUMBER_ID
   );
 
-  if (!hasCreds) {
+  if (params.channel !== 'SMS' && !hasCreds) {
     if (process.env.ENABLE_MOCK_INTEGRATIONS === 'true') {
       return {
         success: true,
@@ -313,10 +382,10 @@ export async function sendFollowupMessage(params: LegacyFollowupParams): Promise
   });
 
   const rawStatus = result.status as string;
-  const finalStatus: 'SENT' | 'DELIVERED' | 'FAILED' | 'SUPPRESSED' | 'OPTED_OUT' | 'UNCONFIGURED' | 'MOCK' =
+  const finalStatus: 'SENT' | 'DELIVERED' | 'FAILED' | 'SUPPRESSED' | 'OPTED_OUT' | 'UNCONFIGURED' | 'MOCK' | 'UNKNOWN' =
     rawStatus === 'SUPPRESSED' || rawStatus === 'SKIPPED'
       ? 'OPTED_OUT'
-      : (result.status as 'SENT' | 'DELIVERED' | 'FAILED' | 'SUPPRESSED' | 'OPTED_OUT' | 'UNCONFIGURED' | 'MOCK');
+      : (result.status as any);
 
   return {
     ...result,

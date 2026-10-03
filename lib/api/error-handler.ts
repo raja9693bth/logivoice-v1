@@ -16,11 +16,25 @@ export interface SafeApiErrorResponse {
  * - Sanitizes 500 internal errors: emits stable client-safe message and correlation ID,
  *   while logging detailed error internals to server logs for diagnostics.
  */
+export class BusinessValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BusinessValidationError';
+  }
+}
+
 export function handleApiError(error: unknown, routeName: string = 'api'): NextResponse<SafeApiErrorResponse> {
   if (error instanceof AuthorizationError) {
     return NextResponse.json(
       { error: error.message },
       { status: error.statusCode }
+    );
+  }
+
+  if (error instanceof BusinessValidationError) {
+    return NextResponse.json(
+      { error: error.message },
+      { status: 400 }
     );
   }
 

@@ -454,11 +454,11 @@ export default function SettingsPage() {
                   id="bargein"
                   type="checkbox"
                   checked={bargeInEnabled}
-                  onChange={(e) => setBargeInEnabled(e.target.checked)}
-                  className="rounded bg-slate-50 dark:bg-slate-950 border-slate-300 dark:border-slate-800 text-sky-600 focus:ring-sky-500"
+                  disabled
+                  className="rounded bg-slate-100 dark:bg-slate-900 border-slate-300 dark:border-slate-800 text-slate-400 cursor-not-allowed"
                 />
                 <label htmlFor="bargein" className="text-xs text-slate-700 dark:text-slate-200">
-                  <strong className="text-slate-900 dark:text-white">Enable Real-Time Interruption (Barge-in):</strong> Voice agent pauses speech immediately when caller speaks.
+                  <strong className="text-slate-900 dark:text-white">Real-Time Interruption (Barge-in):</strong> Configured in Retell Agent dashboard.
                 </label>
               </div>
 
@@ -586,11 +586,11 @@ export default function SettingsPage() {
 
               <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2 shadow-xs">
                 <div className="flex justify-between items-center">
-                  <span className="font-semibold text-slate-900 dark:text-white">India Telephony (TRAI 1601 series)</span>
+                  <span className="font-semibold text-slate-900 dark:text-white">Telephony &amp; Escalation Routing</span>
                   {renderStatusBadge(integrationStatus.telephony)}
                 </div>
-                <p className="text-slate-600 dark:text-slate-400 text-[11px]">TRAI logistics numbering direction compliance &amp; Indian SIP bridge.</p>
-                <div className="text-slate-500 font-mono text-[10px]">Live telephony transfer gating active</div>
+                <p className="text-slate-600 dark:text-slate-400 text-[11px]">Live voice call handling and SIP/PSTN agent transfer bridge.</p>
+                <div className="text-slate-500 font-mono text-[10px]">Configured escalation routing active</div>
               </div>
 
               <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2 shadow-xs">
@@ -604,20 +604,20 @@ export default function SettingsPage() {
 
               <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2 shadow-xs">
                 <div className="flex justify-between items-center">
-                  <span className="font-semibold text-slate-900 dark:text-white">WhatsApp &amp; SMS Messaging</span>
+                  <span className="font-semibold text-slate-900 dark:text-white">WhatsApp Messaging</span>
                   {renderStatusBadge(integrationStatus.messaging)}
                 </div>
-                <p className="text-slate-600 dark:text-slate-400 text-[11px]">Post-call confirmation and quotes via WhatsApp Cloud API / Twilio.</p>
-                <div className="text-slate-500 font-mono text-[10px]">Strict E.164 normalization &amp; suppression handling</div>
+                <p className="text-slate-600 dark:text-slate-400 text-[11px]">Post-call confirmation and quotes via WhatsApp Cloud API.</p>
+                <div className="text-slate-500 font-mono text-[10px]">Strict E.164 normalization and verified template dispatch</div>
               </div>
 
               <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2 shadow-xs">
                 <div className="flex justify-between items-center">
-                  <span className="font-semibold text-slate-900 dark:text-white">Live Consignment Tracking</span>
+                  <span className="font-semibold text-slate-900 dark:text-white">Consignment Tracking Cache</span>
                   {renderStatusBadge(integrationStatus.tracking)}
                 </div>
-                <p className="text-slate-600 dark:text-slate-400 text-[11px]">Enterprise TMS &amp; GPS tracking provider integration.</p>
-                <div className="text-slate-500 font-mono text-[10px]">Mock sources blocked in production</div>
+                <p className="text-slate-600 dark:text-slate-400 text-[11px]">Authoritative tracking records cache fed by operational TMS updates.</p>
+                <div className="text-slate-500 font-mono text-[10px]">Verified tracking database lookup</div>
               </div>
             </div>
           </Card>

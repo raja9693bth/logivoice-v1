@@ -30,7 +30,7 @@ export async function GET(req: NextRequest) {
 
     const { status, priority, type, search, limit, offset } = parsedQuery.data;
 
-    const requests = await db.listRequests(authContext.tenantId, {
+    const { requests, total } = await db.listRequestsWithCount(authContext.tenantId, {
       status,
       priority,
       type,
@@ -39,7 +39,15 @@ export async function GET(req: NextRequest) {
       offset,
     });
 
-    return NextResponse.json({ requests });
+    const safeLimit = limit ?? 50;
+    const safeOffset = offset ?? 0;
+    return NextResponse.json({
+      requests,
+      total,
+      limit: safeLimit,
+      offset: safeOffset,
+      has_more: safeOffset + requests.length < total,
+    });
   } catch (error) {
     return handleApiError(error, 'api/requests:GET');
   }

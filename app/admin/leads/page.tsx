@@ -52,7 +52,7 @@ export default function LeadsPage() {
   }, []);
 
   React.useEffect(() => {
-    fetchLeads();
+    void fetchLeads();
   }, [fetchLeads]);
 
   const filteredLeads = useMemo(() => {

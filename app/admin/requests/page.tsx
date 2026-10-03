@@ -63,7 +63,7 @@ export default function RequestsPage() {
   };
 
   useEffect(() => {
-    fetchRequests();
+    void fetchRequests();
   }, []);
 
   const filteredRequests = useMemo(() => {

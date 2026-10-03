@@ -76,7 +76,7 @@ function CallsPageContent() {
   };
 
   useEffect(() => {
-    fetchCalls();
+    void fetchCalls();
   }, []);
 
   const filteredCalls = useMemo(() => {

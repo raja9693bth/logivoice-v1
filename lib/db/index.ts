@@ -1116,8 +1116,8 @@ export const db = {
       calls = calls.filter((c) => {
         const cust = globalStore.customers.find((cu) => cu.id === c.customer_id);
         return (
-          c.summary.toLowerCase().includes(s) ||
-          c.external_call_id.toLowerCase().includes(s) ||
+          (c.summary && c.summary.toLowerCase().includes(s)) ||
+          (c.external_call_id && c.external_call_id.toLowerCase().includes(s)) ||
           (cust?.name && cust.name.toLowerCase().includes(s)) ||
           (cust?.phone && cust.phone.includes(s)) ||
           (cust?.company && cust.company.toLowerCase().includes(s)) ||
@@ -1353,6 +1353,10 @@ export const db = {
 
     if (leadData.call_id && isValidUuid(leadData.call_id)) {
       await validateTenantEntityOwnership('call', leadData.call_id, tenantId);
+      const existingForCall = await this.getLeadByCallId(leadData.call_id, tenantId);
+      if (existingForCall) {
+        return existingForCall;
+      }
     }
 
     const now = new Date().toISOString();
@@ -1381,8 +1385,21 @@ export const db = {
         const customer = Array.isArray(data.customer) ? data.customer[0] : data.customer;
         return dbLeadToDomain(data, customer);
       }
+      if (error && (error.code === '23505' || /unique/i.test(error.message)) && leadData.call_id) {
+        const existingAfterConflict = await this.getLeadByCallId(leadData.call_id, tenantId);
+        if (existingAfterConflict) return existingAfterConflict;
+      }
+      if (error) {
+        throw new Error(`Failed to create lead: ${error.message}`);
+      }
     }
     assertProductionDbReady();
+    if (leadData.call_id) {
+      const memoryExisting = globalStore.leads.find(
+        (l) => l.tenant_id === tenantId && l.call_id === leadData.call_id
+      );
+      if (memoryExisting) return memoryExisting;
+    }
     globalStore.leads.unshift(newLead);
     return newLead;
   },
@@ -1641,6 +1658,41 @@ export const db = {
     if (updates.summary !== undefined) sanitizedUpdates.summary = updates.summary;
     if (updates.details !== undefined) sanitizedUpdates.details = updates.details;
 
+    // Validate status transition if changing status
+    if (updates.status !== undefined) {
+      let currentStatus: RequestStatus | undefined;
+      if (await isSupabaseLive()) {
+        const client = createAdminClient();
+        const { data: cur } = await client
+          .from('operations_requests')
+          .select('status')
+          .eq('id', id)
+          .eq('tenant_id', tenantId)
+          .maybeSingle();
+        currentStatus = cur?.status as RequestStatus;
+      } else {
+        const cur = globalStore.operations_requests.find((r) => r.id === id && r.tenant_id === tenantId);
+        currentStatus = cur?.status;
+      }
+
+      if (currentStatus && currentStatus !== updates.status) {
+        const validNextStatuses: Record<RequestStatus, RequestStatus[]> = {
+          PENDING: ['IN_REVIEW', 'CONFIRMED', 'REJECTED', 'FAILED'],
+          IN_REVIEW: ['CONFIRMED', 'REJECTED', 'FAILED'],
+          CONFIRMED: ['COMPLETED', 'FAILED'],
+          COMPLETED: [],
+          REJECTED: ['PENDING'],
+          FAILED: ['PENDING'],
+        };
+        const allowed = validNextStatuses[currentStatus] || [];
+        if (!allowed.includes(updates.status)) {
+          throw new Error(
+            `Invalid request status transition from '${currentStatus}' to '${updates.status}'. Allowed: ${allowed.join(', ') || 'None (Terminal state)'}`
+          );
+        }
+      }
+    }
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
       const { data, error } = await client
@@ -1868,8 +1920,8 @@ export const db = {
     rateCardData: Omit<RateCard, 'id' | 'tenant_id' | 'source_version'> & { tenant_id?: string; source_version?: string },
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<RateCard> {
-    if (rateCardData.weight_max_tons < rateCardData.weight_min_tons) {
-      throw new Error('Invalid rate interval: weight_max_tons cannot be less than weight_min_tons.');
+    if (rateCardData.weight_max_tons <= rateCardData.weight_min_tons) {
+      throw new Error('Invalid rate interval: weight_max_tons must be strictly greater than weight_min_tons.');
     }
     if (rateCardData.effective_from && !isValidIsoDate(rateCardData.effective_from)) {
       throw new Error(`Invalid effective_from date: '${rateCardData.effective_from}' is not a valid ISO calendar date (YYYY-MM-DD).`);
@@ -1879,6 +1931,29 @@ export const db = {
     }
     if (rateCardData.effective_to && rateCardData.effective_from && rateCardData.effective_to < rateCardData.effective_from) {
       throw new Error('Invalid rate interval: effective_to cannot be earlier than effective_from.');
+    }
+
+    const laneOrigin = (rateCardData.origin || '').trim().toLowerCase();
+    const laneDest = (rateCardData.destination || '').trim().toLowerCase();
+    const laneVehicle = (rateCardData.vehicle_type || '').trim().toLowerCase();
+
+    if (rateCardData.status === 'ACTIVE') {
+      const allCards = await this.listRateCards(tenantId, { status: 'ACTIVE' });
+      const conflict = allCards.find(
+        (c) =>
+          c.origin.trim().toLowerCase() === laneOrigin &&
+          c.destination.trim().toLowerCase() === laneDest &&
+          c.vehicle_type.trim().toLowerCase() === laneVehicle &&
+          rateCardData.weight_min_tons < c.weight_max_tons &&
+          rateCardData.weight_max_tons > c.weight_min_tons &&
+          (!rateCardData.effective_to || !c.effective_from || rateCardData.effective_to >= c.effective_from) &&
+          (!c.effective_to || !rateCardData.effective_from || c.effective_to >= rateCardData.effective_from)
+      );
+      if (conflict) {
+        throw new Error(
+          `Conflict: An overlapping ACTIVE rate card already exists for lane ${rateCardData.origin}->${rateCardData.destination} (${rateCardData.vehicle_type}) covering weight band ${conflict.weight_min_tons}-${conflict.weight_max_tons} tons.`
+        );
+      }
     }
 
     const id = crypto.randomUUID();
@@ -1908,8 +1983,8 @@ export const db = {
 
     const mergedMin = updates.weight_min_tons !== undefined ? updates.weight_min_tons : existing.weight_min_tons;
     const mergedMax = updates.weight_max_tons !== undefined ? updates.weight_max_tons : existing.weight_max_tons;
-    if (mergedMax < mergedMin) {
-      throw new Error('Invalid rate interval: weight_max_tons cannot be less than weight_min_tons.');
+    if (mergedMax <= mergedMin) {
+      throw new Error('Invalid rate interval: weight_max_tons must be strictly greater than weight_min_tons.');
     }
 
     const mergedFrom = updates.effective_from !== undefined ? updates.effective_from : existing.effective_from;
@@ -1940,6 +2015,30 @@ export const db = {
     if (updates.surcharge_notes !== undefined) sanitizedUpdates.surcharge_notes = updates.surcharge_notes;
     if (updates.quote_type !== undefined) sanitizedUpdates.quote_type = updates.quote_type;
     if (updates.supports_confirmed_quote !== undefined) sanitizedUpdates.supports_confirmed_quote = updates.supports_confirmed_quote;
+
+    const targetStatus = sanitizedUpdates.status !== undefined ? sanitizedUpdates.status : existing.status;
+    if (targetStatus === 'ACTIVE') {
+      const mergedOrigin = (sanitizedUpdates.origin || existing.origin).trim().toLowerCase();
+      const mergedDest = (sanitizedUpdates.destination || existing.destination).trim().toLowerCase();
+      const mergedVehicle = (sanitizedUpdates.vehicle_type || existing.vehicle_type).trim().toLowerCase();
+      const allCards = await this.listRateCards(tenantId, { status: 'ACTIVE' });
+      const conflict = allCards.find(
+        (c) =>
+          c.id !== id &&
+          c.origin.trim().toLowerCase() === mergedOrigin &&
+          c.destination.trim().toLowerCase() === mergedDest &&
+          c.vehicle_type.trim().toLowerCase() === mergedVehicle &&
+          mergedMin < c.weight_max_tons &&
+          mergedMax > c.weight_min_tons &&
+          (!mergedTo || !c.effective_from || mergedTo >= c.effective_from) &&
+          (!c.effective_to || !mergedFrom || c.effective_to >= mergedFrom)
+      );
+      if (conflict) {
+        throw new Error(
+          `Conflict: An overlapping ACTIVE rate card already exists for lane ${existing.origin}->${existing.destination} (${existing.vehicle_type}) covering weight band ${conflict.weight_min_tons}-${conflict.weight_max_tons} tons.`
+        );
+      }
+    }
 
     if (await isSupabaseLive()) {
       const client = createAdminClient();
@@ -2087,16 +2186,35 @@ export const db = {
       currentStatus = existing?.status;
     }
 
-    if (updates.status && currentStatus && updates.status !== currentStatus) {
+    // If currently APPROVED and title/content/category is modified without status change, demote to DRAFT
+    const hasContentChanges = Boolean(
+      (updates.title !== undefined) ||
+      (updates.content !== undefined) ||
+      (updates.category !== undefined)
+    );
+
+    let effectiveStatus = updates.status;
+    let clearApproval = false;
+
+    if (currentStatus === 'APPROVED' && hasContentChanges && updates.status !== 'ARCHIVED') {
+      effectiveStatus = 'DRAFT';
+      clearApproval = true;
+    }
+
+    if (effectiveStatus && currentStatus && effectiveStatus !== currentStatus && !clearApproval) {
       const valid =
-        (currentStatus === 'DRAFT' && updates.status === 'UNDER_REVIEW') ||
-        (currentStatus === 'UNDER_REVIEW' && (updates.status === 'APPROVED' || updates.status === 'DRAFT')) ||
-        (currentStatus === 'APPROVED' && updates.status === 'ARCHIVED') ||
-        (currentStatus === 'ARCHIVED' && updates.status === 'DRAFT');
+        (currentStatus === 'DRAFT' && effectiveStatus === 'UNDER_REVIEW') ||
+        (currentStatus === 'UNDER_REVIEW' && (effectiveStatus === 'APPROVED' || effectiveStatus === 'DRAFT')) ||
+        (currentStatus === 'APPROVED' && effectiveStatus === 'ARCHIVED') ||
+        (currentStatus === 'ARCHIVED' && effectiveStatus === 'DRAFT');
 
       if (!valid) {
-        throw new Error(`Invalid knowledge state transition from '${currentStatus}' to '${updates.status}'. Allowed transitions: DRAFT -> UNDER_REVIEW -> APPROVED -> ARCHIVED, or ARCHIVED -> DRAFT.`);
+        throw new Error(`Invalid knowledge state transition from '${currentStatus}' to '${effectiveStatus}'. Allowed transitions: DRAFT -> UNDER_REVIEW -> APPROVED -> ARCHIVED, or ARCHIVED -> DRAFT.`);
       }
+    }
+
+    if (effectiveStatus === 'APPROVED' && !updates.approved_by) {
+      throw new Error('Knowledge approval requires an authenticated approver ID; approved_by cannot be null or empty.');
     }
 
     if (await isSupabaseLive()) {
@@ -2105,13 +2223,16 @@ export const db = {
       if (updates.category) updatePayload.category = updates.category;
       if (updates.title) updatePayload.title = updates.title;
       if (updates.content) updatePayload.content = updates.content;
-      if (updates.status) updatePayload.status = updates.status;
+      if (effectiveStatus) updatePayload.status = effectiveStatus;
       if (updates.version) updatePayload.version = updates.version;
       if (updates.approved_by) updatePayload.approved_by = updates.approved_by;
       if (updates.approved_at) updatePayload.approved_at = updates.approved_at;
-      if (updates.status === 'APPROVED') {
+      if (effectiveStatus === 'APPROVED') {
         if (!updates.approved_at) updatePayload.approved_at = new Date().toISOString();
-        if (!updates.approved_by) updatePayload.approved_by = 'admin';
+      }
+      if (clearApproval) {
+        updatePayload.approved_by = null;
+        updatePayload.approved_at = null;
       }
 
       const { data, error } = await client
@@ -2127,13 +2248,18 @@ export const db = {
     const idx = globalStore.knowledge_items.findIndex((k) => k.id === id && k.tenant_id === tenantId);
     if (idx === -1) return null;
     const approvedUpdates: Partial<KnowledgeItem> = {};
-    if (updates.status === 'APPROVED') {
+    if (effectiveStatus === 'APPROVED') {
       approvedUpdates.approved_at = updates.approved_at || new Date().toISOString();
-      approvedUpdates.approved_by = updates.approved_by || 'admin';
+      approvedUpdates.approved_by = updates.approved_by!;
+    }
+    if (clearApproval) {
+      approvedUpdates.approved_at = undefined;
+      approvedUpdates.approved_by = undefined;
     }
     globalStore.knowledge_items[idx] = {
       ...globalStore.knowledge_items[idx],
       ...updates,
+      status: (effectiveStatus || globalStore.knowledge_items[idx].status) as any,
       ...approvedUpdates,
       last_updated: now,
     };
@@ -2262,6 +2388,8 @@ export const db = {
       external_call_id?: string | null;
       tool_name: string;
       execution_status: string;
+      business_status?: string | null;
+      verified?: boolean;
       success: boolean;
       safe_result?: Record<string, unknown> | null;
       latency_ms?: number | null;
@@ -2281,6 +2409,8 @@ export const db = {
       external_call_id: exec.external_call_id || null,
       tool_name: exec.tool_name,
       execution_status: exec.execution_status,
+      business_status: exec.business_status || null,
+      verified: exec.verified ?? exec.success ?? false,
       success: exec.success,
       safe_result: exec.safe_result || null,
       latency_ms: exec.latency_ms || null,
@@ -2837,12 +2967,19 @@ export const db = {
     responsePayload?: Record<string, unknown>,
     claimToken?: string
   ): Promise<void> {
+    if (!claimToken || !isValidUuid(claimToken)) {
+      throw new SideEffectPersistenceError(
+        `claim_token is mandatory for completeSideEffect on claim '${claimKey}'`,
+        { tenantId, claimKey }
+      );
+    }
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
       const { data, error } = await client.rpc('complete_side_effect', {
         p_tenant_id: tenantId,
         p_claim_key: claimKey,
-        p_claim_token: isValidUuid(claimToken) ? claimToken : null,
+        p_claim_token: claimToken,
         p_result: responsePayload || {},
       });
 
@@ -2874,7 +3011,7 @@ export const db = {
         { tenantId, claimKey, status: claim.status }
       );
     }
-    if (claimToken && claim.claim_token && claim.claim_token !== claimToken) {
+    if (claim.claim_token && claim.claim_token !== claimToken) {
       throw new SideEffectPersistenceError(
         `Cannot complete claim '${claimKey}': claim_token mismatch`,
         { tenantId, claimKey, expected: claim.claim_token, actual: claimToken }
@@ -2895,13 +3032,20 @@ export const db = {
     retryDelayMs: number = 60000,
     claimToken?: string
   ): Promise<void> {
+    if (!claimToken || !isValidUuid(claimToken)) {
+      throw new SideEffectPersistenceError(
+        `claim_token is mandatory for failSideEffect on claim '${claimKey}'`,
+        { tenantId, claimKey }
+      );
+    }
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
       const retryDelaySec = Math.max(1, Math.round(retryDelayMs / 1000));
       const { data, error } = await client.rpc('fail_side_effect', {
         p_tenant_id: tenantId,
         p_claim_key: claimKey,
-        p_claim_token: isValidUuid(claimToken) ? claimToken : null,
+        p_claim_token: claimToken,
         p_error: errorMessage,
         p_is_retryable: isRetryable,
         p_retry_delay_seconds: retryDelaySec,
@@ -2935,7 +3079,7 @@ export const db = {
         { tenantId, claimKey, status: claim.status }
       );
     }
-    if (claimToken && claim.claim_token && claim.claim_token !== claimToken) {
+    if (claim.claim_token && claim.claim_token !== claimToken) {
       throw new SideEffectPersistenceError(
         `Cannot fail claim '${claimKey}': claim_token mismatch`,
         { tenantId, claimKey, expected: claim.claim_token, actual: claimToken }
@@ -2947,6 +3091,72 @@ export const db = {
     claim.status = status;
     claim.last_error = errorMessage;
     claim.next_retry_at = nextRetry || undefined;
+    claim.lease_expires_at = undefined;
+    claim.updated_at = nowIso;
+  },
+
+  async recordSideEffectUnknown(
+    tenantId: string = DEFAULT_TENANT_ID,
+    claimKey: string,
+    errorMessage: string,
+    responsePayload?: Record<string, unknown>,
+    claimToken?: string
+  ): Promise<void> {
+    if (!claimToken || !isValidUuid(claimToken)) {
+      throw new SideEffectPersistenceError(
+        `claim_token is mandatory for recordSideEffectUnknown on claim '${claimKey}'`,
+        { tenantId, claimKey }
+      );
+    }
+
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client.rpc('record_side_effect_unknown', {
+        p_tenant_id: tenantId,
+        p_claim_key: claimKey,
+        p_claim_token: claimToken,
+        p_error: errorMessage,
+        p_result: responsePayload || {},
+      });
+
+      if (error) {
+        throw new SideEffectPersistenceError(
+          `Database error recording unknown status for claim '${claimKey}': ${error.message}`,
+          { tenantId, claimKey, claimToken, error: error.message }
+        );
+      }
+      if (!data) {
+        throw new SideEffectPersistenceError(
+          `Failed to record unknown status for side effect claim '${claimKey}': claim not in PROCESSING status or claim_token mismatch`,
+          { tenantId, claimKey, claimToken }
+        );
+      }
+      return;
+    }
+
+    assertProductionDbReady();
+    const claim = globalStore.side_effect_claims.find(
+      (c) => c.tenant_id === tenantId && c.claim_key === claimKey
+    );
+    if (!claim) {
+      throw new SideEffectPersistenceError(`Claim '${claimKey}' not found`, { tenantId, claimKey });
+    }
+    if (claim.status !== 'PROCESSING') {
+      throw new SideEffectPersistenceError(
+        `Cannot record unknown for claim '${claimKey}' in non-PROCESSING status '${claim.status}'`,
+        { tenantId, claimKey, status: claim.status }
+      );
+    }
+    if (claim.claim_token && claim.claim_token !== claimToken) {
+      throw new SideEffectPersistenceError(
+        `Cannot record unknown for claim '${claimKey}': claim_token mismatch`,
+        { tenantId, claimKey, expected: claim.claim_token, actual: claimToken }
+      );
+    }
+    const nowIso = new Date().toISOString();
+    claim.status = 'UNKNOWN';
+    claim.last_error = errorMessage;
+    claim.result = responsePayload;
     claim.updated_at = nowIso;
   },
 

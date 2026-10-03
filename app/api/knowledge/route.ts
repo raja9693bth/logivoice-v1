@@ -8,7 +8,7 @@ import { handleApiError } from '@/lib/api/error-handler';
 export async function GET(req: NextRequest) {
   try {
     const authContext = await getAuthContext(req);
-    requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'SYSTEM', 'VOICE_GATEWAY']);
+    requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'SYSTEM']);
 
     const { searchParams } = new URL(req.url);
     const rawQuery = {

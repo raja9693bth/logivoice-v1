@@ -371,7 +371,7 @@ export default function KnowledgeBasePage() {
           </div>
 
           <div>
-            <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Approval &amp; Governance Status</label>
+            <span className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Approval &amp; Governance Status</span>
             {!editingItem ? (
               <div className="p-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300 flex items-center gap-2">
                 <Clock className="w-4 h-4 shrink-0" />
@@ -390,26 +390,15 @@ export default function KnowledgeBasePage() {
                   <span className="text-slate-500 text-[11px] font-medium block">Permitted Governance Transitions:</span>
                   <div className="flex flex-wrap gap-2">
                     {editingItem.status === 'DRAFT' && (
-                      <>
-                        <button
-                          type="button"
-                          disabled={saving}
-                          onClick={(e) => handleSave(e, 'UNDER_REVIEW')}
-                          className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-medium flex items-center gap-1.5 disabled:opacity-50 cursor-pointer shadow-xs"
-                        >
-                          <Send className="w-3.5 h-3.5" />
-                          <span>Submit for Review</span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={saving}
-                          onClick={(e) => handleSave(e, 'ARCHIVED')}
-                          className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700 font-medium flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
-                        >
-                          <Archive className="w-3.5 h-3.5" />
-                          <span>Archive</span>
-                        </button>
-                      </>
+                      <button
+                        type="button"
+                        disabled={saving}
+                        onClick={(e) => handleSave(e, 'UNDER_REVIEW')}
+                        className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-medium flex items-center gap-1.5 disabled:opacity-50 cursor-pointer shadow-xs"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        <span>Submit for Review</span>
+                      </button>
                     )}
 
                     {editingItem.status === 'UNDER_REVIEW' && (
@@ -432,39 +421,19 @@ export default function KnowledgeBasePage() {
                           <ArrowRight className="w-3.5 h-3.5" />
                           <span>Return to Draft</span>
                         </button>
-                        <button
-                          type="button"
-                          disabled={saving}
-                          onClick={(e) => handleSave(e, 'ARCHIVED')}
-                          className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700 font-medium flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
-                        >
-                          <Archive className="w-3.5 h-3.5" />
-                          <span>Archive</span>
-                        </button>
                       </>
                     )}
 
                     {editingItem.status === 'APPROVED' && (
-                      <>
-                        <button
-                          type="button"
-                          disabled={saving}
-                          onClick={(e) => handleSave(e, 'UNDER_REVIEW')}
-                          className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-medium flex items-center gap-1.5 disabled:opacity-50 cursor-pointer shadow-xs"
-                        >
-                          <Send className="w-3.5 h-3.5" />
-                          <span>Submit Revision</span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={saving}
-                          onClick={(e) => handleSave(e, 'ARCHIVED')}
-                          className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700 font-medium flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
-                        >
-                          <Archive className="w-3.5 h-3.5" />
-                          <span>Archive Policy</span>
-                        </button>
-                      </>
+                      <button
+                        type="button"
+                        disabled={saving}
+                        onClick={(e) => handleSave(e, 'ARCHIVED')}
+                        className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700 font-medium flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                      >
+                        <Archive className="w-3.5 h-3.5" />
+                        <span>Archive Policy</span>
+                      </button>
                     )}
 
                     {editingItem.status === 'ARCHIVED' && (

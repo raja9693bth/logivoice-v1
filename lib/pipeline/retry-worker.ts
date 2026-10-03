@@ -28,37 +28,27 @@ export async function runRetryWorker(limit = 10): Promise<{
   const results: RetryExecutionResult[] = [];
 
   for (const claim of eligibleClaims) {
-    // Atomically claim the retryable row with CAS and a fresh worker token
-    const claimRes = await db.claimSideEffect(
-      claim.tenant_id,
-      claim.claim_key,
-      claim.job_type,
-      claim.call_id
-    );
-
-    if (!claimRes.claimed) {
-      results.push({
-        claim_key: claim.claim_key,
-        job_type: claim.job_type,
-        status: 'SKIPPED',
-        message: 'Could not acquire exclusive lease; claimed by another worker',
-      });
-      continue;
-    }
-
     try {
       if (claim.job_type === 'POST_CALL_PIPELINE') {
         const externalCallId = claim.claim_key.split(':').pop() || '';
         const call = await db.getCallByExternalId(externalCallId, claim.tenant_id);
         if (!call) {
-          await db.failSideEffect(
+          const orphanedClaim = await db.claimSideEffect(
             claim.tenant_id,
             claim.claim_key,
-            `Call record for ${externalCallId} not found`,
-            false,
-            60000,
-            claimRes.claim_token
+            claim.job_type,
+            claim.call_id
           );
+          if (orphanedClaim.claimed) {
+            await db.failSideEffect(
+              claim.tenant_id,
+              claim.claim_key,
+              `Call record for ${externalCallId} not found`,
+              false,
+              60000,
+              orphanedClaim.claim_token
+            );
+          }
           results.push({
             claim_key: claim.claim_key,
             job_type: claim.job_type,
@@ -87,21 +77,29 @@ export async function runRetryWorker(limit = 10): Promise<{
         results.push({
           claim_key: claim.claim_key,
           job_type: claim.job_type,
-          status: 'PROCESSED',
+          status: res.success ? 'PROCESSED' : 'FAILED',
           message: res.message,
         });
       } else if (claim.job_type === 'SHEETS_SYNC' || claim.job_type === 'GOOGLE_SHEETS_SYNC') {
         const externalCallId = claim.claim_key.split(':').pop() || '';
         const call = await db.getCallByExternalId(externalCallId, claim.tenant_id);
         if (!call) {
-          await db.failSideEffect(
+          const orphanedClaim = await db.claimSideEffect(
             claim.tenant_id,
             claim.claim_key,
-            `Call record for ${externalCallId} not found`,
-            false,
-            60000,
-            claimRes.claim_token
+            claim.job_type,
+            claim.call_id
           );
+          if (orphanedClaim.claimed) {
+            await db.failSideEffect(
+              claim.tenant_id,
+              claim.claim_key,
+              `Call record for ${externalCallId} not found`,
+              false,
+              60000,
+              orphanedClaim.claim_token
+            );
+          }
           results.push({
             claim_key: claim.claim_key,
             job_type: claim.job_type,
@@ -120,27 +118,43 @@ export async function runRetryWorker(limit = 10): Promise<{
         });
       } else if (claim.job_type === 'FOLLOWUP_SEND') {
         if (!claim.call_id) {
-          await db.failSideEffect(
+          const orphanedClaim = await db.claimSideEffect(
             claim.tenant_id,
             claim.claim_key,
-            'Missing call_id on claim record',
-            false,
-            60000,
-            claimRes.claim_token
+            claim.job_type,
+            claim.call_id
           );
+          if (orphanedClaim.claimed) {
+            await db.failSideEffect(
+              claim.tenant_id,
+              claim.claim_key,
+              'Missing call_id on claim record',
+              false,
+              60000,
+              orphanedClaim.claim_token
+            );
+          }
           continue;
         }
         const call = await db.getCallById(claim.call_id, claim.tenant_id);
         const followup = await db.getFollowupByCallId(claim.call_id, claim.tenant_id);
         if (!call || !followup) {
-          await db.failSideEffect(
+          const orphanedClaim = await db.claimSideEffect(
             claim.tenant_id,
             claim.claim_key,
-            'Call or followup record not found',
-            false,
-            60000,
-            claimRes.claim_token
+            claim.job_type,
+            claim.call_id
           );
+          if (orphanedClaim.claimed) {
+            await db.failSideEffect(
+              claim.tenant_id,
+              claim.claim_key,
+              'Call or followup record not found',
+              false,
+              60000,
+              orphanedClaim.claim_token
+            );
+          }
           continue;
         }
 
@@ -160,14 +174,22 @@ export async function runRetryWorker(limit = 10): Promise<{
           message: `Followup send status: ${sendRes.status}`,
         });
       } else {
-        await db.failSideEffect(
+        const unknownJobClaim = await db.claimSideEffect(
           claim.tenant_id,
           claim.claim_key,
-          `Unknown side effect job type: ${claim.job_type}`,
-          false,
-          60000,
-          claimRes.claim_token
+          claim.job_type,
+          claim.call_id
         );
+        if (unknownJobClaim.claimed) {
+          await db.failSideEffect(
+            claim.tenant_id,
+            claim.claim_key,
+            `Unknown side effect job type: ${claim.job_type}`,
+            false,
+            60000,
+            unknownJobClaim.claim_token
+          );
+        }
         results.push({
           claim_key: claim.claim_key,
           job_type: claim.job_type,
@@ -177,14 +199,6 @@ export async function runRetryWorker(limit = 10): Promise<{
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : 'Unknown retry worker error';
-      await db.failSideEffect(
-        claim.tenant_id,
-        claim.claim_key,
-        errMsg,
-        (claim.attempt_count || 1) < (claim.max_attempts || 3),
-        60000,
-        claimRes.claim_token
-      );
       results.push({
         claim_key: claim.claim_key,
         job_type: claim.job_type,

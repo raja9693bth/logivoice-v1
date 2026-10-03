@@ -229,11 +229,11 @@ export type SaveCallOutcomeOutput = z.infer<typeof SaveCallOutcomeOutputSchema>;
 // =========================================================================
 export const SendFollowupInputSchema = z.object({
   call_id: z.string(),
-  recipient_phone: z.string().min(5),
-  channel: z.enum(['WHATSAPP', 'SMS', 'EMAIL']).default('WHATSAPP'),
-  template_id: z.string().optional(),
-  template_data: z.record(z.string(), z.unknown()).optional(),
-  message_content: z.string().optional(),
+  recipient_phone: z.string().optional(),
+  channel: z.enum(['WHATSAPP']).default('WHATSAPP'),
+  template_id: z
+    .enum(['INQUIRY_RECEIVED', 'QUOTE_ESTIMATE', 'QUOTE_CONFIRMED', 'TRACKING_STATUS'])
+    .default('INQUIRY_RECEIVED'),
   idempotency_key: z.string().optional(),
 });
 

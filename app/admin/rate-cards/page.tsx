@@ -71,13 +71,13 @@ export default function RateCardsPage() {
   const [formOrigin, setFormOrigin] = useState('');
   const [formDest, setFormDest] = useState('');
   const [formVehicle, setFormVehicle] = useState('');
-  const [formMinWeight, setFormMinWeight] = useState<number>(1);
-  const [formMaxWeight, setFormMaxWeight] = useState<number>(5);
-  const [formPrice, setFormPrice] = useState<number>(15000);
-  const [formMinCharge, setFormMinCharge] = useState<number>(12000);
-  const [formEffectiveFrom, setFormEffectiveFrom] = useState('2026-09-01');
-  const [formStatus, setFormStatus] = useState<'ACTIVE' | 'DRAFT' | 'EXPIRED'>('ACTIVE');
-  const [formTransitHours, setFormTransitHours] = useState<number>(24);
+  const [formMinWeight, setFormMinWeight] = useState<number | ''>('');
+  const [formMaxWeight, setFormMaxWeight] = useState<number | ''>('');
+  const [formPrice, setFormPrice] = useState<number | ''>('');
+  const [formMinCharge, setFormMinCharge] = useState<number | ''>('');
+  const [formEffectiveFrom, setFormEffectiveFrom] = useState('');
+  const [formStatus, setFormStatus] = useState<'ACTIVE' | 'DRAFT' | 'EXPIRED'>('DRAFT');
+  const [formTransitHours, setFormTransitHours] = useState<number | ''>('');
   const [formNotes, setFormNotes] = useState('');
   const [formQuoteType, setFormQuoteType] = useState<'ESTIMATE' | 'CONFIRMED'>('ESTIMATE');
   const [formSupportsConfirmed, setFormSupportsConfirmed] = useState<boolean>(false);
@@ -95,15 +95,15 @@ export default function RateCardsPage() {
     setEditingCard(null);
     setFormOrigin('');
     setFormDest('');
-    setFormVehicle('Eicher 14ft Open');
-    setFormMinWeight(1);
-    setFormMaxWeight(3.5);
-    setFormPrice(18000);
-    setFormMinCharge(15000);
-    setFormEffectiveFrom('2026-09-01');
-    setFormStatus('ACTIVE');
-    setFormTransitHours(24);
-    setFormNotes('Tolls included; standard detention rules apply.');
+    setFormVehicle('');
+    setFormMinWeight('');
+    setFormMaxWeight('');
+    setFormPrice('');
+    setFormMinCharge('');
+    setFormEffectiveFrom('');
+    setFormStatus('DRAFT');
+    setFormTransitHours('');
+    setFormNotes('');
     setFormQuoteType('ESTIMATE');
     setFormSupportsConfirmed(false);
     setFormEffectiveTo('');
@@ -118,11 +118,11 @@ export default function RateCardsPage() {
     setFormMinWeight(rc.weight_min_tons);
     setFormMaxWeight(rc.weight_max_tons);
     setFormPrice(rc.price_inr);
-    setFormMinCharge(rc.minimum_charge_inr);
+    setFormMinCharge(rc.minimum_charge_inr ?? '');
     setFormEffectiveFrom(rc.effective_from);
     setFormEffectiveTo(rc.effective_to || '');
     setFormStatus(rc.status);
-    setFormTransitHours(rc.transit_time_hours || 24);
+    setFormTransitHours(rc.transit_time_hours || '');
     setFormNotes(rc.surcharge_notes || '');
     setFormQuoteType(rc.quote_type || 'ESTIMATE');
     setFormSupportsConfirmed(Boolean(rc.supports_confirmed_quote));
@@ -133,59 +133,51 @@ export default function RateCardsPage() {
     e.preventDefault();
     setSaving(true);
     try {
+      const payload = {
+        origin: formOrigin,
+        destination: formDest,
+        vehicle_type: formVehicle,
+        weight_min_tons: formMinWeight === '' ? 0 : Number(formMinWeight),
+        weight_max_tons: formMaxWeight === '' ? 0 : Number(formMaxWeight),
+        price_inr: formPrice === '' ? 0 : Number(formPrice),
+        minimum_charge_inr: formMinCharge === '' ? null : Number(formMinCharge),
+        effective_from: formEffectiveFrom,
+        effective_to: formEffectiveTo || undefined,
+        status: formStatus,
+        transit_time_hours: formTransitHours === '' ? undefined : Number(formTransitHours),
+        surcharge_notes: formNotes || undefined,
+        quote_type: formQuoteType,
+        supports_confirmed_quote: formSupportsConfirmed,
+      };
+
       if (editingCard) {
         // Update via API
         const res = await fetch('/api/rates', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            id: editingCard.id,
-            origin: formOrigin,
-            destination: formDest,
-            vehicle_type: formVehicle,
-            weight_min_tons: formMinWeight,
-            weight_max_tons: formMaxWeight,
-            price_inr: formPrice,
-            minimum_charge_inr: formMinCharge,
-            effective_from: formEffectiveFrom,
-            status: formStatus,
-            transit_time_hours: formTransitHours,
-            surcharge_notes: formNotes,
-            effective_to: formEffectiveTo || undefined,
-            quote_type: formQuoteType,
-            supports_confirmed_quote: formSupportsConfirmed,
-          }),
+          body: JSON.stringify({ id: editingCard.id, ...payload }),
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || `HTTP ${res.status}`);
+        }
       } else {
         // Create via API
         const res = await fetch('/api/rates', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            origin: formOrigin,
-            destination: formDest,
-            vehicle_type: formVehicle,
-            weight_min_tons: formMinWeight,
-            weight_max_tons: formMaxWeight,
-            price_inr: formPrice,
-            minimum_charge_inr: formMinCharge,
-            effective_from: formEffectiveFrom,
-            effective_to: formEffectiveTo || undefined,
-            status: formStatus,
-            transit_time_hours: formTransitHours,
-            surcharge_notes: formNotes,
-            quote_type: formQuoteType,
-            supports_confirmed_quote: formSupportsConfirmed,
-          }),
+          body: JSON.stringify(payload),
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || `HTTP ${res.status}`);
+        }
       }
       setIsEditDrawerOpen(false);
       fetchRateCards();
-    } catch (err) {
+    } catch (err: any) {
       console.error('[RateCardsPage] Save rate card failed:', err);
-      setError('Failed to save rate card to database.');
+      setError(err?.message || 'Failed to save rate card to database.');
     } finally {
       setSaving(false);
     }
@@ -418,7 +410,7 @@ export default function RateCardsPage() {
                     {formatCurrencyINR(rc.price_inr)}
                   </td>
                   <td className="py-3 px-4 font-mono text-slate-700 dark:text-slate-300 text-xs">
-                    {formatCurrencyINR(rc.minimum_charge_inr)}
+                    {rc.minimum_charge_inr != null ? formatCurrencyINR(rc.minimum_charge_inr) : '—'}
                   </td>
                   <td className="py-3 px-4 text-slate-700 dark:text-slate-300">
                     {rc.transit_time_hours ? `${rc.transit_time_hours} hrs` : 'Standard'}
@@ -541,7 +533,7 @@ export default function RateCardsPage() {
                 step="0.5"
                 required
                 value={formMinWeight}
-                onChange={(e) => setFormMinWeight(Number.parseFloat(e.target.value))}
+                onChange={(e) => setFormMinWeight(e.target.value === '' ? '' : Number.parseFloat(e.target.value))}
                 className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
               />
             </div>
@@ -553,7 +545,7 @@ export default function RateCardsPage() {
                 step="0.5"
                 required
                 value={formMaxWeight}
-                onChange={(e) => setFormMaxWeight(Number.parseFloat(e.target.value))}
+                onChange={(e) => setFormMaxWeight(e.target.value === '' ? '' : Number.parseFloat(e.target.value))}
                 className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
               />
             </div>
@@ -567,18 +559,17 @@ export default function RateCardsPage() {
                 type="number"
                 required
                 value={formPrice}
-                onChange={(e) => setFormPrice(Number.parseInt(e.target.value, 10))}
+                onChange={(e) => setFormPrice(e.target.value === '' ? '' : Number.parseInt(e.target.value, 10))}
                 className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500 font-mono font-bold text-emerald-600 dark:text-emerald-400"
               />
             </div>
             <div>
-              <label htmlFor="formMinCharge" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Minimum Charge (₹ INR)</label>
+              <label htmlFor="formMinCharge" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Minimum Charge (₹ INR, Optional)</label>
               <input
                 id="formMinCharge"
                 type="number"
-                required
                 value={formMinCharge}
-                onChange={(e) => setFormMinCharge(Number.parseInt(e.target.value, 10))}
+                onChange={(e) => setFormMinCharge(e.target.value === '' ? '' : Number.parseInt(e.target.value, 10))}
                 className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500 font-mono"
               />
             </div>
@@ -591,7 +582,7 @@ export default function RateCardsPage() {
                 id="formTransitHours"
                 type="number"
                 value={formTransitHours}
-                onChange={(e) => setFormTransitHours(Number.parseInt(e.target.value, 10))}
+                onChange={(e) => setFormTransitHours(e.target.value === '' ? '' : Number.parseInt(e.target.value, 10))}
                 className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
               />
             </div>

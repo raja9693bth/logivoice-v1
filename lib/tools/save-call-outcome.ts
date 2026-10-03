@@ -169,9 +169,10 @@ export async function executeSaveCallOutcome(
       message: `Call outcome successfully persisted. Computed Lead Temperature: ${leadTemp}.`,
     };
   } catch (error) {
+    console.error('[SaveCallOutcomeTool] Internal error during execution:', error);
     return {
       status: 'FAILED',
-      message: error instanceof Error ? error.message : 'Error saving call outcome',
+      message: 'Call outcome persistence temporarily unavailable.',
     };
   }
 }

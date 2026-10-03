@@ -34,10 +34,11 @@ export async function executeLookupCustomer(
       message: `Verified customer found: ${customer.name}${customer.company ? ` (${customer.company})` : ''}`,
     };
   } catch (error) {
+    console.error('[LookupCustomerTool] Internal error during execution:', error);
     return {
       status: 'FAILED',
       customer: null,
-      message: error instanceof Error ? error.message : 'Database error during customer lookup',
+      message: 'Customer lookup temporarily unavailable.',
     };
   }
 }

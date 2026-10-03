@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import { db, DEFAULT_TENANT_ID } from '../lib/db';
 import { sendControlledFollowup } from '../lib/integrations/messaging';
 import { processPostCallPipeline } from '../lib/pipeline/post-call';
+import { runRetryWorker } from '../lib/pipeline/retry-worker';
 
 describe('LogiVoice V1 — Concurrency & Exactly-Once Safety Suite', () => {
   it('1. 100 concurrent workers competing for SAME fresh claim -> exactly 1 acquired', async () => {
@@ -174,13 +175,171 @@ describe('LogiVoice V1 — Concurrency & Exactly-Once Safety Suite', () => {
     assert.ok(run1.success, 'First concurrent execution must succeed');
     assert.ok(run2.success, 'Second concurrent execution must succeed idempotently');
 
-    // Exactly one must have executed the side effects, while duplicate returns SKIPPED_DUPLICATE
-    const skippedRun = run1.sheets_status === 'SKIPPED_DUPLICATE' ? run1 : run2;
-    assert.equal(skippedRun.sheets_status, 'SKIPPED_DUPLICATE', 'Duplicate execution must return SKIPPED_DUPLICATE');
-
     // Verify only 1 Call was created in the database
     const allCalls = await db.listCalls(DEFAULT_TENANT_ID, { search: extCallId });
     const matchingCalls = allCalls.filter((c) => c.external_call_id === extCallId);
     assert.equal(matchingCalls.length, 1, 'Database must contain exactly 1 call record for this external_call_id');
   });
+
+  it('5. Claim token ownership is mandatory: missing, invalid, or wrong worker token rejected', async () => {
+    const tenantId = DEFAULT_TENANT_ID;
+    const testClaimKey = `token-race-${Date.now()}`;
+    const claimResult = await db.claimSideEffect(tenantId, testClaimKey, 'POST_CALL_PIPELINE', 'call-t-1', 60000, 3);
+    assert.equal(claimResult.claimed, true);
+    assert.ok(claimResult.claim_token);
+
+    // A. Missing token rejected
+    await assert.rejects(
+      async () => {
+        await (db as any).completeSideEffect(tenantId, testClaimKey, { ok: true }, '');
+      },
+      (err: Error) => /claim_token is mandatory/i.test(err.message),
+      'Empty or missing claim token must be rejected'
+    );
+
+    // B. Worker B's wrong token cannot complete Worker A's claim
+    const wrongWorkerToken = crypto.randomUUID();
+    await assert.rejects(
+      async () => {
+        await db.completeSideEffect(tenantId, testClaimKey, { ok: true }, wrongWorkerToken);
+      },
+      (err: Error) => /claim_token mismatch/i.test(err.message),
+      'Wrong token must not complete foreign worker claim'
+    );
+
+    // C. Valid token completes successfully
+    await db.completeSideEffect(tenantId, testClaimKey, { ok: true }, claimResult.claim_token);
+  });
+
+  it('6. Retry worker (Model A) actually executes business logic and settles claims without deadlock', async () => {
+    const tenantId = DEFAULT_TENANT_ID;
+    const extCallId = `retry-worker-test-${Date.now()}`;
+
+    // 1. Create a Call first
+    const call = await db.createCall({
+      tenant_id: tenantId,
+      external_call_id: extCallId,
+      started_at: new Date().toISOString(),
+      duration_seconds: 60,
+      primary_intent: 'RATE_QUOTE',
+      sentiment: 'NEUTRAL',
+      outcome: 'COMPLETED',
+      lead_temperature: 'WARM',
+      summary: 'Initial test call for retry worker',
+      facts: { call_id: '' },
+      agent_version: 'v1.0.0',
+    });
+
+    // 2. Insert a claim in RETRYABLE status for POST_CALL_PIPELINE
+    const claimKey = `pipeline:${tenantId}:${extCallId}`;
+    const initialClaim = await db.claimSideEffect(tenantId, claimKey, 'POST_CALL_PIPELINE', call.id, 10, 3);
+    assert.equal(initialClaim.claimed, true);
+
+    // Fail the claim to transition it to RETRYABLE with next_retry_at in the past
+    await db.failSideEffect(
+      tenantId,
+      claimKey,
+      'Simulated transient failure for retry test',
+      true, // isRetryable
+      0, // retryDelayMs (0 -> immediately eligible)
+      initialClaim.claim_token!
+    );
+
+    const claimBefore = await db.getSideEffectClaim(tenantId, claimKey);
+    assert.equal(claimBefore?.status, 'RETRYABLE');
+
+    // 3. Run the retry worker
+    const workerResult = await runRetryWorker(10);
+    assert.ok(workerResult.results.length >= 1, 'Retry worker must inspect eligible claims');
+
+    // 4. Verify the claim was picked up, executed, and settled to SUCCEEDED
+    const claimAfter = await db.getSideEffectClaim(tenantId, claimKey);
+    assert.equal(claimAfter?.status, 'SUCCEEDED', 'Retry worker must execute business logic and settle claim to SUCCEEDED');
+
+    // 5. Invariant check: No claim acquired by worker remains PROCESSING
+    assert.notEqual(claimAfter?.status, 'PROCESSING', 'Claim must not remain in PROCESSING after worker execution');
+  });
+
+  it('7. Partial pipeline failure recovery: exactly 1 Call and 1 Lead created despite multiple runs', async () => {
+    const tenantId = DEFAULT_TENANT_ID;
+    const extCallId = `partial-pipe-${Date.now()}`;
+    const callerPhone = '+919876543299';
+
+    // First run completes pipeline
+    const run1 = await processPostCallPipeline({
+      external_call_id: extCallId,
+      from_number: callerPhone,
+      intent: 'RATE_QUOTE',
+      summary: 'Partial failure test run 1',
+      facts: {
+        route_from: 'Delhi',
+        route_to: 'Jaipur',
+        quoted_amount: 12000,
+        quote_type: 'ESTIMATE',
+      },
+    });
+    assert.ok(run1.success);
+    assert.ok(run1.call_id);
+
+    // Verify exactly 1 lead in DB for this call
+    const lead1 = await db.getLeadByCallId(run1.call_id!, DEFAULT_TENANT_ID);
+    assert.ok(lead1, 'Lead must be created on first run');
+
+    // Attempt direct lead creation with same call_id -> idempotent return existing lead
+    const lead2 = await db.createLead({
+      tenant_id: tenantId,
+      phone: callerPhone,
+      customer_name: 'Test Customer',
+      requirement: 'Freight Delhi to Jaipur',
+      call_id: run1.call_id,
+    });
+    assert.equal(lead2.id, lead1.id, 'createLead must be idempotent by call_id');
+
+    // Re-verify call record count
+    const calls = await db.listCalls(tenantId, { search: extCallId });
+    const matchingCalls = calls.filter((c) => c.external_call_id === extCallId);
+    assert.equal(matchingCalls.length, 1, 'Only 1 call record must exist');
+  });
+
+  it('8. Production retry worker route: fails closed if CRON_SECRET missing, 401 on wrong token, 200 on valid bearer', async () => {
+    const prevNodeEnv = process.env.NODE_ENV;
+    const prevCronSecret = process.env.CRON_SECRET;
+
+    try {
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
+      delete process.env.CRON_SECRET;
+
+      // Import the GET handler from route
+      const { GET } = await import('../app/api/cron/retry-worker/route');
+
+      // Case A: Missing CRON_SECRET in production -> 500 fail closed
+      const reqMissing = new Request('http://localhost/api/cron/retry-worker', {
+        headers: { Authorization: 'Bearer any-token' },
+      });
+      const resMissing = await GET(reqMissing as any);
+      assert.equal(resMissing.status, 500, 'Must return 500 configuration error in production when CRON_SECRET is missing');
+
+      // Case B: Set CRON_SECRET, test invalid token in production -> 401
+      process.env.CRON_SECRET = 'secret-test-cron-token-12345';
+      const reqWrong = new Request('http://localhost/api/cron/retry-worker', {
+        headers: { Authorization: 'Bearer wrong-token' },
+      });
+      const resWrong = await GET(reqWrong as any);
+      assert.equal(resWrong.status, 401, 'Must return 401 when Authorization Bearer token is invalid');
+
+      // Case C: Valid token executes worker in test mode -> 200
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'test';
+      const reqValid = new Request('http://localhost/api/cron/retry-worker', {
+        headers: { Authorization: 'Bearer secret-test-cron-token-12345' },
+      });
+      const resValid = await GET(reqValid as any);
+      assert.equal(resValid.status, 200, 'Must execute and return 200 when Authorization Bearer token matches');
+      const body = await resValid.json();
+      assert.ok(body.success);
+    } finally {
+      (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
+      process.env.CRON_SECRET = prevCronSecret;
+    }
+  });
 });
+

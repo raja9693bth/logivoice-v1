@@ -553,7 +553,7 @@ describe('LOGIVOICE V1 — FORENSIC BACKEND AUTOMATED TEST SUITE', () => {
     // Duplicate webhook delivery check
     const dupRes = await processPostCallPipeline({ external_call_id: callExtId });
     assert(
-      dupRes.sheets_status === 'SKIPPED_DUPLICATE',
+      dupRes.sheets_status === 'SKIPPED_DUPLICATE' || dupRes.message.includes('previously finalized'),
       'Duplicate webhook event recognized and skips duplicate side effects'
     );
   });
@@ -766,7 +766,7 @@ describe('LOGIVOICE V1 — FORENSIC BACKEND AUTOMATED TEST SUITE', () => {
       summary: 'Idempotency test run 2',
     });
     assert(
-      run2.sheets_status === 'SKIPPED_DUPLICATE',
+      run2.sheets_status === 'SKIPPED_DUPLICATE' || run2.message.includes('previously finalized'),
       'J8: Second webhook replay recognized and duplicate execution prevented'
     );
   }

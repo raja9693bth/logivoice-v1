@@ -34,6 +34,8 @@ const MIGRATION_FILES = [
   '20260919000000_drop_obsolete_global_call_unique.sql',
   '20260920000000_integrity_hardening.sql',
   '20261003000000_side_effect_claims_and_transcript_alignment.sql',
+  '20261003010000_atomic_side_effects_and_tool_executions.sql',
+  '20261003020000_enterprise_integrity_hardening.sql',
 ];
 
 function getDbUrl(dbName: string): string {
@@ -471,4 +473,171 @@ describe('PostgreSQL Runtime Truth & Database Integrity Suite', () => {
       await client.end();
     }
   });
+
+  // =========================================================================
+  // 8. MANDATORY CLAIM TOKEN OWNERSHIP & UNKNOWN SETTLEMENT RPC
+  // =========================================================================
+  it('8. Claim Token Ownership: Mandatory token verification and UNKNOWN settlement', async () => {
+    const client = new Client({ connectionString: getDbUrl(FRESH_DB_NAME) });
+    await client.connect();
+
+    try {
+      const tenantId = '00000000-0000-0000-0000-000000000001';
+      const claimKey = `claim:token-auth:${Date.now()}`;
+      const tokenA = '11111111-1111-4111-8111-111111111111';
+      const tokenB = '22222222-2222-4222-8222-222222222222';
+
+      // Insert claim with tokenA
+      await client.query(`
+        INSERT INTO public.side_effect_claims (
+          tenant_id, claim_key, job_type, status, attempt_count, lease_expires_at, claim_token, claimed_by
+        )
+        VALUES ($1, $2, 'POST_CALL_PIPELINE', 'PROCESSING', 1, NOW() + interval '5 minutes', $3, 'worker-a')
+      `, [tenantId, claimKey, tokenA]);
+
+      // A. Attempt completion with NULL token -> must throw error
+      let nullThrew = false;
+      try {
+        await client.query(`SELECT public.complete_side_effect($1, $2, NULL, '{"test":true}'::jsonb)`, [tenantId, claimKey]);
+      } catch (err: any) {
+        nullThrew = /mandatory/i.test(err.message);
+      }
+      assert.ok(nullThrew, 'complete_side_effect with NULL token must throw exception');
+
+      // B. Attempt completion with wrong token (tokenB) -> returns false (0 rows updated)
+      const wrongTokenRes = await client.query(
+        `SELECT public.complete_side_effect($1, $2, $3, '{"test":true}'::jsonb) as updated`,
+        [tenantId, claimKey, tokenB]
+      );
+      assert.equal(wrongTokenRes.rows[0].updated, false, 'complete_side_effect with wrong token must return false');
+
+      // C. Settle with record_side_effect_unknown using tokenA -> returns true and status is UNKNOWN
+      const unknownRes = await client.query(
+        `SELECT public.record_side_effect_unknown($1, $2, $3, 'Network timeout', '{"provider":"META"}'::jsonb) as updated`,
+        [tenantId, claimKey, tokenA]
+      );
+      assert.equal(unknownRes.rows[0].updated, true, 'record_side_effect_unknown with valid token must succeed');
+
+      const checkClaim = await client.query(`SELECT status, last_error FROM public.side_effect_claims WHERE tenant_id = $1 AND claim_key = $2`, [tenantId, claimKey]);
+      assert.equal(checkClaim.rows[0].status, 'UNKNOWN');
+      assert.equal(checkClaim.rows[0].last_error, 'Network timeout');
+    } finally {
+      await client.end();
+    }
+  });
+
+  // =========================================================================
+  // 9. LEAD UNIQUENESS PER CALL
+  // =========================================================================
+  it('9. Lead Idempotency: Unique constraint prevents duplicate leads per call', async () => {
+    const client = new Client({ connectionString: getDbUrl(FRESH_DB_NAME) });
+    await client.connect();
+
+    try {
+      const tenantId = '00000000-0000-0000-0000-000000000001';
+      const callId = '33333333-3333-4333-8333-333333333333';
+      const custId = '44444444-4444-4444-8444-444444444444';
+
+      await client.query(`
+        INSERT INTO public.customers (id, tenant_id, name, phone, phone_normalized)
+        VALUES ('${custId}', '${tenantId}', 'Lead Shipper', '+919876543211', '+919876543211')
+        ON CONFLICT (id) DO NOTHING;
+      `);
+
+      await client.query(`
+        INSERT INTO public.calls (id, tenant_id, external_call_id, started_at, primary_intent, sentiment, outcome, lead_temperature, summary, agent_version)
+        VALUES ('${callId}', '${tenantId}', 'ext-lead-call-001', NOW(), 'RATE_QUOTE', 'POSITIVE', 'COMPLETED', 'HOT', 'Booking inquiry', 'v1.0')
+        ON CONFLICT (id) DO NOTHING;
+      `);
+
+      // First lead creation
+      await client.query(`
+        INSERT INTO public.leads (tenant_id, customer_id, call_id, requirement, next_action)
+        VALUES ($1, $2, $3, '10 tons Delhi to Mumbai', 'Follow up')
+      `, [tenantId, custId, callId]);
+
+      // Second lead creation with same (tenant_id, call_id) -> must throw 23505 unique violation
+      let duplicateLeadThrew = false;
+      try {
+        await client.query(`
+          INSERT INTO public.leads (tenant_id, customer_id, call_id, requirement, next_action)
+          VALUES ($1, $2, $3, '10 tons Delhi to Mumbai', 'Follow up')
+        `, [tenantId, custId, callId]);
+      } catch (err: any) {
+        duplicateLeadThrew = err.code === '23505';
+      }
+      assert.ok(duplicateLeadThrew, 'Duplicate lead creation for same call must violate unique index uq_leads_tenant_call');
+    } finally {
+      await client.end();
+    }
+  });
+
+  // =========================================================================
+  // 10. RATE CARDS BATCH INTEGRITY & DETERMINISTIC ADVISORY LOCK
+  // =========================================================================
+  it('10. Rate Cards: Advisory locking and batch-internal identical duplicate rejection', async () => {
+    const client = new Client({ connectionString: getDbUrl(FRESH_DB_NAME) });
+    await client.connect();
+
+    try {
+      const tenantId = '00000000-0000-0000-0000-000000000001';
+
+      // A. Batch with identical duplicate rows must be rejected
+      const duplicateBatch = [
+        {
+          origin: 'Pune',
+          destination: 'Nagpur',
+          vehicle_type: 'Tata 407',
+          weight_min_tons: 1,
+          weight_max_tons: 3,
+          price_inr: 12000,
+          effective_from: '2026-10-01',
+          status: 'ACTIVE',
+        },
+        {
+          origin: 'Pune',
+          destination: 'Nagpur',
+          vehicle_type: 'Tata 407',
+          weight_min_tons: 1,
+          weight_max_tons: 3,
+          price_inr: 12000,
+          effective_from: '2026-10-01',
+          status: 'ACTIVE',
+        },
+      ];
+
+      let duplicateBatchThrew = false;
+      try {
+        await client.query(`SELECT * FROM public.bulk_import_rate_cards($1, $2::jsonb)`, [tenantId, JSON.stringify(duplicateBatch)]);
+      } catch (err: any) {
+        duplicateBatchThrew = /batch-internal overlap detected/i.test(err.message);
+      }
+      assert.ok(duplicateBatchThrew, 'Batch with identical duplicate rows must be rejected by bulk_import_rate_cards');
+
+      // B. Valid single rate card insertion with NULL minimum_charge_inr must preserve NULL
+      const validCard = [
+        {
+          origin: 'Kolkata',
+          destination: 'Ranchi',
+          vehicle_type: 'Eicher 17ft',
+          weight_min_tons: 2,
+          weight_max_tons: 6,
+          price_inr: 18000,
+          minimum_charge_inr: null,
+          effective_from: '2026-10-01',
+          status: 'ACTIVE',
+        },
+      ];
+
+      const importRes = await client.query(`SELECT * FROM public.bulk_import_rate_cards($1, $2::jsonb)`, [tenantId, JSON.stringify(validCard)]);
+      assert.equal(importRes.rows[0].inserted_count, 1);
+
+      const insertedId = importRes.rows[0].rate_card_ids[0];
+      const cardRow = await client.query(`SELECT minimum_charge_inr FROM public.rate_cards WHERE id = $1`, [insertedId]);
+      assert.equal(cardRow.rows[0].minimum_charge_inr, null, 'NULL commercial value must remain NULL, never coerced to 0');
+    } finally {
+      await client.end();
+    }
+  });
 });
+

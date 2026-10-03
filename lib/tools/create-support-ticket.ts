@@ -80,10 +80,11 @@ export async function executeCreateSupportTicket(
       message: `Support ticket registered under ticket ID ${referenceNo}. Assigned priority: ${input.priority}.`,
     };
   } catch (error) {
+    console.error('[CreateSupportTicketTool] Internal error during execution:', error);
     return {
       status: 'FAILED',
       priority: input.priority,
-      message: error instanceof Error ? error.message : 'Error registering support ticket',
+      message: 'Support ticket registration temporarily unavailable.',
     };
   }
 }

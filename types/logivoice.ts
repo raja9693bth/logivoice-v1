@@ -265,7 +265,7 @@ export interface RateCard {
   weight_min_tons: number;
   weight_max_tons: number;
   price_inr: number;
-  minimum_charge_inr: number;
+  minimum_charge_inr?: number | null;
   effective_from: string;
   effective_to?: string;
   status: 'ACTIVE' | 'DRAFT' | 'EXPIRED';
@@ -322,6 +322,8 @@ export interface ToolExecution {
   external_call_id?: string | null;
   tool_name: string;
   execution_status: string;
+  business_status?: string | null;
+  verified?: boolean;
   success: boolean;
   safe_result?: Record<string, unknown> | null;
   latency_ms?: number | null;

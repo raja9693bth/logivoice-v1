@@ -18,12 +18,20 @@ export const EnvironmentSchema = z
     RETELL_TOOL_SECRET: z.string().optional(),
     RETELL_ALLOW_LEGACY_SIGNATURE: z.enum(['true', 'false']).default('false'),
 
+    // Cron / Internal Workers
+    CRON_SECRET: z.string().optional(),
+
+    // Database & Testing
+    DATABASE_URL: z.string().optional(),
+    PLAYWRIGHT_BASE_URL: z.string().optional(),
+
     // Tenant Configuration
     AUTHORITATIVE_TENANT_ID: z.string().uuid().default('00000000-0000-0000-0000-000000000001'),
 
     // Supabase
     SUPABASE_URL: z.string().optional(),
     SUPABASE_SECRET_KEY: z.string().optional(),
+    SUPABASE_ANON_KEY: z.string().optional(),
     NEXT_PUBLIC_SUPABASE_URL: z.string().optional(),
     NEXT_PUBLIC_SUPABASE_ANON_KEY: z.string().optional(),
     NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: z.string().optional(),
@@ -39,11 +47,14 @@ export const EnvironmentSchema = z
     ENABLE_LIVE_TELEPHONY_TRANSFER: z.enum(['true', 'false']).default('false'),
     TELEPHONY_PROVIDER_ACCOUNT_SID: z.string().optional(),
     TELEPHONY_PROVIDER_AUTH_TOKEN: z.string().optional(),
+    TWILIO_ACCOUNT_SID: z.string().optional(),
+    TWILIO_AUTH_TOKEN: z.string().optional(),
 
-    // Meta WhatsApp Business Cloud API
+    // Meta WhatsApp Business Cloud API & Messaging
     WHATSAPP_API_KEY: z.string().optional(),
     WHATSAPP_API_TOKEN: z.string().optional(),
     WHATSAPP_PHONE_NUMBER_ID: z.string().optional(),
+    SMS_API_KEY: z.string().optional(),
 
     // Development & Testing
     ENABLE_MOCK_INTEGRATIONS: z.enum(['true', 'false']).default('false'),

@@ -57,3 +57,12 @@ jobs:
         run: npm run build
         env:
           NEXT_TELEMETRY_DISABLED: '1'
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run E2E Smoke Tests
+        run: npm run test:e2e
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'
+          PLAYWRIGHT_TEST: '1'

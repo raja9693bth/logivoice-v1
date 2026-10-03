@@ -110,54 +110,13 @@ export async function executeProviderCallTransfer(
       const data = await res.json();
       responseData = data;
       providerTransferId = data.sid || data.id;
-    } else if (process.env.RETELL_API_KEY && req.callId) {
-      // B. Retell Native Call Transfer (When Retell owns the active call context)
-      providerName = 'RETELL_TELEPHONY_BRIDGE';
-      const retellUrl = 'https://api.retellai.com/v2/transfer-call';
-
-      const res = await fetch(retellUrl, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${process.env.RETELL_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          call_id: req.callId,
-          transfer_to: req.targetPhone,
-        }),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!res.ok) {
-        let errDetails = `HTTP ${res.status}`;
-        try {
-          const errJson = await res.json();
-          errDetails = errJson.message || errDetails;
-        } catch {
-          // Fallback to HTTP status
-        }
-
-        return {
-          success: false,
-          status: 'PROVIDER_REJECTED',
-          provider: providerName,
-          error: `Retell transfer bridge rejected transfer: ${errDetails}`,
-          message: `Retell transfer bridge rejected transfer to ${req.targetRole} (${req.targetPhone}).`,
-        };
-      }
-
-      const data = await res.json();
-      responseData = data;
-      providerTransferId = data.call_id || req.callId;
     } else {
       clearTimeout(timeoutId);
       return {
         success: false,
         status: 'PROVIDER_ERROR',
         provider: 'TELEPHONY_GATEWAY',
-        error: 'Invalid telephony call identifier or unconfigured provider credentials. "current" is not a valid call identifier.',
+        error: 'Active call transfer requires a valid Twilio CallSid (CA...) or supported telephony provider integration.',
         message: 'No active provider telephony context found for call transfer.',
       };
     }
@@ -182,7 +141,7 @@ export async function executeProviderCallTransfer(
       status: transferStatus,
       providerTransferId,
       provider: providerName,
-      message: `Call transferred successfully to ${req.targetName || req.targetRole} at ${req.targetPhone}.`,
+      message: `Call transfer request accepted by provider for ${req.targetName || req.targetRole} at ${req.targetPhone}.`,
     };
   } catch (err) {
     clearTimeout(timeoutId);

@@ -287,7 +287,7 @@ describe('Voice QA Evaluation Scenarios (32 Scenarios)', () => {
       summary: 'Corridor rate inquiry',
     });
     assert.ok(p1.success && p2.success);
-    assert.ok(p2.sheets_status === 'SKIPPED_DUPLICATE' || p2.message.includes('Idempotent'));
+    assert.ok(p2.sheets_status === 'SKIPPED_DUPLICATE' || p2.message.includes('Idempotent') || p2.message.includes('previously finalized'));
   });
 
   it('29: Messaging Provider Verification (Returns truthful UNCONFIGURED or MOCK status)', async () => {

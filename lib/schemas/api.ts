@@ -8,6 +8,29 @@
 import { z } from 'zod';
 
 // =========================================================================
+// CALENDAR DATE VALIDATOR (Prompt Item 34)
+// =========================================================================
+export const IsoCalendarDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Must be in YYYY-MM-DD calendar date format')
+  .refine(
+    (val) => {
+      const parts = val.split('-').map(Number);
+      const year = parts[0];
+      const month = parts[1];
+      const day = parts[2];
+      if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+      const date = new Date(Date.UTC(year, month - 1, day));
+      return (
+        date.getUTCFullYear() === year &&
+        date.getUTCMonth() === month - 1 &&
+        date.getUTCDate() === day
+      );
+    },
+    { message: 'Must be a valid real ISO calendar date' }
+  );
+
+// =========================================================================
 // CALLS API SCHEMAS
 export const CallFactsApiSchema = z
   .object({
@@ -16,7 +39,7 @@ export const CallFactsApiSchema = z
     weight: z.string().max(50).optional(),
     vehicle_type: z.string().max(50).optional(),
     material_type: z.string().max(100).optional(),
-    pickup_date: z.string().max(50).optional(),
+    pickup_date: IsoCalendarDateSchema.optional(),
     quoted_amount: z.number().nonnegative().optional(),
     quote_type: z.enum(['ESTIMATE', 'CONFIRMED']).optional(),
     tracking_id: z.string().max(50).optional(),
@@ -153,9 +176,9 @@ export const CreateRateCardApiSchema = z.object({
   weight_min_tons: z.number().nonnegative().max(100),
   weight_max_tons: z.number().positive().max(100),
   price_inr: z.number().positive().max(10000000),
-  minimum_charge_inr: z.number().nonnegative().max(10000000),
-  effective_from: z.string().max(50),
-  effective_to: z.string().max(50).optional(),
+  minimum_charge_inr: z.number().nonnegative().max(10000000).nullable().optional(),
+  effective_from: IsoCalendarDateSchema,
+  effective_to: IsoCalendarDateSchema.optional(),
   status: z.enum(['ACTIVE', 'DRAFT', 'EXPIRED']).default('ACTIVE'),
   transit_time_hours: z.number().int().nonnegative().max(720).default(24),
   quote_type: z.enum(['ESTIMATE', 'CONFIRMED']).default('ESTIMATE'),
@@ -171,9 +194,9 @@ export const UpdateRateCardApiSchema = z.object({
   weight_min_tons: z.number().nonnegative().max(100).optional(),
   weight_max_tons: z.number().positive().max(100).optional(),
   price_inr: z.number().positive().max(10000000).optional(),
-  minimum_charge_inr: z.number().nonnegative().max(10000000).optional(),
-  effective_from: z.string().max(50).optional(),
-  effective_to: z.string().max(50).optional(),
+  minimum_charge_inr: z.number().nonnegative().max(10000000).nullable().optional(),
+  effective_from: IsoCalendarDateSchema.optional(),
+  effective_to: IsoCalendarDateSchema.optional(),
   status: z.enum(['ACTIVE', 'DRAFT', 'EXPIRED']).optional(),
   transit_time_hours: z.number().int().nonnegative().max(720).optional(),
   quote_type: z.enum(['ESTIMATE', 'CONFIRMED']).optional(),
@@ -373,7 +396,7 @@ export const GetRateQuoteQuerySchema = z.object({
   destination: z.string().max(100).optional(),
   vehicle_type: z.string().max(50).optional(),
   weight_tons: z.coerce.number().positive().max(1000).optional(),
-  pickup_date: z.string().max(50).optional(),
+  pickup_date: IsoCalendarDateSchema.optional(),
   status: z.enum(['ACTIVE', 'DRAFT', 'EXPIRED', 'INACTIVE']).optional(),
   search: z.string().max(100).optional(),
   limit: z.coerce.number().int().min(1).max(500).optional(),

@@ -40,28 +40,9 @@ export function BentoCard({
   className?: string;
   onClick?: () => void;
 }) {
-  return (
-    <div
-      onClick={onClick}
-      role={onClick ? 'button' : undefined}
-      tabIndex={onClick ? 0 : undefined}
-      onKeyDown={
-        onClick
-          ? (e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                onClick();
-              }
-            }
-          : undefined
-      }
-      className={cn(
-        'bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800/80 rounded-xl p-5 flex flex-col justify-between hover:border-slate-300 dark:hover:border-slate-700/80 transition-all group shadow-xs min-w-0 max-w-full',
-        onClick && 'cursor-pointer hover:bg-slate-50/80 dark:hover:bg-slate-800/40 focus:outline-hidden focus:ring-2 focus:ring-sky-500',
-        className
-      )}
-    >
-      <div className="flex items-start justify-between gap-3 mb-3">
+  const content = (
+    <>
+      <div className="flex items-start justify-between gap-3 mb-3 w-full">
         <span className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider truncate">
           {title}
         </span>
@@ -72,7 +53,7 @@ export function BentoCard({
         )}
       </div>
 
-      <div className="space-y-1 min-w-0">
+      <div className="space-y-1 min-w-0 w-full text-left">
         <div className="text-2xl font-bold text-slate-900 dark:text-white tracking-tight flex items-baseline gap-2 flex-wrap">
           <span className="truncate">{value}</span>
           {badgeText && (
@@ -97,6 +78,30 @@ export function BentoCard({
           </div>
         )}
       </div>
+    </>
+  );
+
+  const baseClassName = cn(
+    'bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800/80 rounded-xl p-5 flex flex-col justify-between hover:border-slate-300 dark:hover:border-slate-700/80 transition-all group shadow-xs min-w-0 max-w-full text-left',
+    onClick && 'cursor-pointer hover:bg-slate-50/80 dark:hover:bg-slate-800/40 focus:outline-hidden focus:ring-2 focus:ring-sky-500',
+    className
+  );
+
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className={baseClassName}
+      >
+        {content}
+      </button>
+    );
+  }
+
+  return (
+    <div className={baseClassName}>
+      {content}
     </div>
   );
 }

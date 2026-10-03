@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx tests/backend.test.ts && tsx tests/voice-qa-scenarios.test.ts",
     "test:integration": "node --import tsx --test tests/db-integration.test.ts",
-    "test:coverage": "node --import tsx --test --experimental-test-coverage --test-reporter=lcov --test-reporter-destination=coverage/lcov.info tests/backend.test.ts tests/voice-qa-scenarios.test.ts"
+    "test:coverage": "node -e \"fs.mkdirSync('coverage', { recursive: true })\" && node --import tsx --test --experimental-test-coverage --test-reporter=lcov --test-reporter-destination=coverage/lcov.info tests/backend.test.ts tests/voice-qa-scenarios.test.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.3",

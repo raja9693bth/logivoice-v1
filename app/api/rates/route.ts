@@ -112,9 +112,9 @@ export async function POST(req: NextRequest) {
       await db.logAuditEvent(
         {
           tenant_id: authContext.tenantId,
-          event_type: 'BULK_RATE_IMPORT',
+          event_type: 'RATE_BULK_IMPORTED',
           actor: authContext.userId,
-          actor_type: 'DISPATCHER',
+          actor_type: (authContext.role === 'VOICE_GATEWAY' ? 'AI_AGENT' : authContext.role) as any,
           actor_id: authContext.userId,
           severity: 'INFO',
           details: {
@@ -159,6 +159,26 @@ export async function POST(req: NextRequest) {
       authContext.tenantId
     );
 
+    // Log rate creation audit event
+    await db.logAuditEvent(
+      {
+        tenant_id: authContext.tenantId,
+        event_type: 'RATE_CREATED',
+        actor: authContext.userId,
+        actor_type: (authContext.role === 'VOICE_GATEWAY' ? 'AI_AGENT' : authContext.role) as any,
+        actor_id: authContext.userId,
+        severity: 'INFO',
+        details: {
+          rate_card_id: newCard.id,
+          origin: newCard.origin,
+          destination: newCard.destination,
+          vehicle_type: newCard.vehicle_type,
+          price_inr: newCard.price_inr,
+        },
+      },
+      authContext.tenantId
+    );
+
     return NextResponse.json({ rate_card: newCard }, { status: 201 });
   } catch (error) {
     return handleApiError(error, 'api/rates:POST');
@@ -190,6 +210,23 @@ export async function PUT(req: NextRequest) {
     if (!updated) {
       return NextResponse.json({ error: 'Rate card not found' }, { status: 404 });
     }
+
+    // Log rate update audit event
+    await db.logAuditEvent(
+      {
+        tenant_id: authContext.tenantId,
+        event_type: 'RATE_UPDATED',
+        actor: authContext.userId,
+        actor_type: (authContext.role === 'VOICE_GATEWAY' ? 'AI_AGENT' : authContext.role) as any,
+        actor_id: authContext.userId,
+        severity: 'INFO',
+        details: {
+          rate_card_id: id,
+          updated_fields: Object.keys(updates),
+        },
+      },
+      authContext.tenantId
+    );
 
     return NextResponse.json({ rate_card: updated });
   } catch (error) {

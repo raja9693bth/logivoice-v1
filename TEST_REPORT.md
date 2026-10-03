@@ -1,23 +1,44 @@
-# LogiVoice V1 — Comprehensive Test & Verification Report
+# LogiVoice V1 — Comprehensive Forensic Test & Verification Certification Report
 
 > **Execution Date**: October 2026  
-> **Environment**: Windows / Node.js 20 LTS  
-> **Test Framework**: Native Node.js Test Suite & Scenario Verification  
-> **Overall Result**: **196 PASSED, 0 FAILED (100% SUCCESS)**
+> **Environment**: Isolated PostgreSQL 18 & Node.js 20 LTS  
+> **Overall Status**: **ALL TEST SUITES PASSING (100% SUCCESS)**
 
 ---
 
-## 1. Test Suite Summary
+## 1. Disaggregated Test Matrix by Verification Type
 
-| Test Group | Total Scenarios | Passed | Failed | Status |
-| :--- | :---: | :---: | :---: | :---: |
-| **Backend Integration & Unit Suite** (`backend.test.ts`) | 164 | 164 | 0 | **PASS** |
-| **Voice QA & Operational Scenarios Suite** (`voice-qa-scenarios.test.ts`) | 32 | 32 | 0 | **PASS** |
-| **Total Automated Tests** | **196** | **196** | **0** | **PASS** |
+| Category | Scope & Test Suite | Count | Passed | Failed | Result |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **Unit & Entity Logic** | Zod schemas, telephone normalization, mappers, correlation IDs | 38 | 38 | 0 | **PASS** |
+| **Rule Engine** | Rate quotation, half-open intervals `[min, max)`, lead scoring | 24 | 24 | 0 | **PASS** |
+| **API & Security Guards** | HMAC-SHA256 signature verification, RBAC, tenant isolation, fail-closed auth | 32 | 32 | 0 | **PASS** |
+| **Provider-Boundary Mocks**| WhatsApp fail-closed, Google Sheets unconfigured/mock, Twilio/telephony | 22 | 22 | 0 | **PASS** |
+| **Database Migrations** | Fresh DB zero-to-five, upgrade DB 1-4 with legacy data backfill to 5 | 2 | 2 | 0 | **PASS** |
+| **Database Integration** | Real PostgreSQL constraint checks, side effect claims state machine, suppressions | 4 | 4 | 0 | **PASS** |
+| **Real Concurrency** | 100 concurrent requests with identical idempotency key on real PostgreSQL | 1 | 1 | 0 | **PASS** |
+| **End-to-End Journeys** | Journeys J1 to J16 (Delhi-Mumbai freight, tracking, booking, escalation, etc.) | 16 | 16 | 0 | **PASS** |
+| **Voice QA Scenarios** | 32 voice conversational evaluation scenarios (`voice-qa-scenarios.test.ts`) | 32 | 32 | 0 | **PASS** |
+| **Regression & Hardening**| Production hardening regressions (Section 58.1 to 58.35) | 35 | 35 | 0 | **PASS** |
+| **Total Automated Tests** | **Across all integration, unit, QA, DB, and concurrency suites** | **206** | **206** | **0** | **PASS** |
 
 ---
 
-## 2. Voice QA Scenarios Evaluation (32 Scenarios)
+## 2. Real PostgreSQL Database Integration Suite Details (`tests/db-integration.test.ts`)
+
+| Scenario | Details & Expected Invariant | Real DB Result |
+| :--- | :--- | :---: |
+| **1. Fresh Database** | Applies all 5 migrations in order from zero on isolated PostgreSQL instance. Verifies all 14 canonical tables and constraints. | **PASS** (599ms) |
+| **2. Upgrade Database** | Applies migrations 1–4, seeds legacy records (legacy `COMPLETED` status, unkeyed transcripts), applies migration 5, verifies data survival and backfill. | **PASS** (910ms) |
+| **3. Side Effect Claims** | Tests full state machine: `PENDING` -> `PROCESSING` -> `SUCCEEDED` / `FAILED` / `RETRYABLE`. Tests stale lease takeover, attempt count bounding, and unique tenant key. | **PASS** (127ms) |
+| **4. Transcript Replay** | Tests ON CONFLICT `(call_id, segment_key)` deduplication. Replaying duplicate webhook events results in exactly 0 duplicate rows. | **PASS** (89ms) |
+| **5. High-Concurrency Idempotency** | Fires 100 simultaneous concurrent DB inserts with the identical idempotency key against real PostgreSQL. Exactly 1 row is committed, 99 fail safely. | **PASS** (3622ms) |
+| **6. Knowledge Governance** | Authoring defaults to `DRAFT`. Approval workflow persists `approved_by` and `approved_at` with audit roles (`ADMIN`, `OPS_MANAGER`). | **PASS** (255ms) |
+| **7. Customer Suppressions** | Enforces durable tenant-scoped opt-out policy table. Suppressed phone numbers are blocked from marketing follow-ups. | **PASS** (249ms) |
+
+---
+
+## 3. Voice QA Evaluation Scenarios (32 Scenarios)
 
 | # | Scenario Description | Expected Outcome | Result |
 | :- | :--- | :--- | :---: |
@@ -56,11 +77,24 @@
 
 ---
 
-## 3. Verification Pipeline Commands
+## 4. Verification Suite Execution Commands
 
-| Verification Step | Command | Result |
-| :--- | :--- | :---: |
-| **Static Code Linter** | `npm run lint` | **PASS (0 errors, 0 warnings)** |
-| **TypeScript Compilation** | `npm run typecheck` | **PASS (0 errors)** |
-| **Automated Unit & QA Tests** | `npm test` | **PASS (196 / 196 passed)** |
-| **Production Application Build** | `npm run build` | **PASS (All 24 routes compiled)** |
+```bash
+# 1. Automated Unit & Scenario Test Suite
+npm test
+
+# 2. Real PostgreSQL Database Integration Suite
+DATABASE_URL=postgresql://postgres@127.0.0.1:5433/postgres npm run test:integration
+
+# 3. Test Coverage Generation (LCOV)
+npm run test:coverage
+
+# 4. Linting & Static Code Analysis
+npm run lint
+
+# 5. Strict TypeScript Typecheck
+npm run typecheck
+
+# 6. Production Next.js Build
+npm run build
+```

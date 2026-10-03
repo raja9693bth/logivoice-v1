@@ -56,7 +56,7 @@ export default function KnowledgeBasePage() {
   const [formCategory, setFormCategory] = useState<KnowledgeItem['category']>('OPERATIONAL_FAQ');
   const [formTitle, setFormTitle] = useState('');
   const [formContent, setFormContent] = useState('');
-  const [formStatus, setFormStatus] = useState<KnowledgeItem['status']>('APPROVED');
+  const [formStatus, setFormStatus] = useState<KnowledgeItem['status']>('DRAFT');
 
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
@@ -77,7 +77,7 @@ export default function KnowledgeBasePage() {
     setFormCategory('OPERATIONAL_FAQ');
     setFormTitle('');
     setFormContent('');
-    setFormStatus('APPROVED');
+    setFormStatus('DRAFT');
     setIsDrawerOpen(true);
   };
 
@@ -280,8 +280,9 @@ export default function KnowledgeBasePage() {
       >
         <form onSubmit={handleSave} className="space-y-4 text-xs">
           <div>
-            <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Knowledge Category</label>
+            <label htmlFor="knowledge-category" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Knowledge Category</label>
             <select
+              id="knowledge-category"
               value={formCategory}
               onChange={(e) => setFormCategory(e.target.value as any)}
               className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
@@ -295,8 +296,9 @@ export default function KnowledgeBasePage() {
           </div>
 
           <div>
-            <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Title / Policy Topic</label>
+            <label htmlFor="knowledge-title" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Title / Policy Topic</label>
             <input
+              id="knowledge-title"
               type="text"
               required
               value={formTitle}
@@ -307,8 +309,9 @@ export default function KnowledgeBasePage() {
           </div>
 
           <div>
-            <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Content / Policy Rules</label>
+            <label htmlFor="knowledge-content" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Content / Policy Rules</label>
             <textarea
+              id="knowledge-content"
               rows={6}
               required
               value={formContent}
@@ -319,15 +322,16 @@ export default function KnowledgeBasePage() {
           </div>
 
           <div>
-            <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Approval Status</label>
+            <label htmlFor="knowledge-status" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Approval Status</label>
             <select
+              id="knowledge-status"
               value={formStatus}
               onChange={(e) => setFormStatus(e.target.value as any)}
               className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
             >
-              <option value="APPROVED">APPROVED (Active in Voice RAG)</option>
               <option value="DRAFT">DRAFT (Under Internal Review)</option>
               <option value="UNDER_REVIEW">UNDER_REVIEW</option>
+              <option value="APPROVED">APPROVED (Active in Voice RAG)</option>
             </select>
           </div>
 

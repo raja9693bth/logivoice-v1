@@ -69,10 +69,8 @@ export interface Customer {
 export type SideEffectStatus =
   | 'PENDING'
   | 'PROCESSING'
-  | 'COMPLETED'
   | 'SUCCEEDED'
   | 'FAILED'
-  | 'REJECTED'
   | 'RETRYABLE'
   | 'UNKNOWN';
 
@@ -80,19 +78,18 @@ export interface SideEffectClaim {
   id: string;
   tenant_id: string;
   claim_key: string;
-  job_type?: string;
-  effect_type?: string;
+  job_type: string;
   call_id?: string;
   status: SideEffectStatus;
   attempt_count: number;
+  max_attempts: number;
   payload?: Record<string, unknown>;
-  response_payload?: Record<string, unknown>;
   result?: Record<string, unknown>;
-  error?: string;
   last_error?: string;
   claimed_at: string;
   claimed_by?: string;
-  expires_at?: string;
+  lease_expires_at?: string;
+  next_retry_at?: string;
   completed_at?: string;
   created_at: string;
   updated_at: string;
@@ -111,8 +108,7 @@ export interface CustomerSuppression {
 }
 
 
-export interface CallFacts {
-  call_id: string;
+export interface CallerCapturedFacts {
   route_from?: string;
   route_to?: string;
   weight?: string;
@@ -121,11 +117,23 @@ export interface CallFacts {
   material_type?: string;
   pickup_date?: string;
   pickup_time?: string;
+  special_requirements?: string;
+}
+
+export interface VerifiedOperationalFacts {
   quoted_amount?: number;
   quote_type?: 'ESTIMATE' | 'CONFIRMED';
   tracking_id?: string;
+  tracking_status?: string;
+  tracking_location?: string;
+  verified_eta?: string;
   booking_reference?: string;
-  special_requirements?: string;
+  transfer_status?: 'TRANSFERRED' | 'TRANSFER_UNAVAILABLE' | 'CALLBACK_SCHEDULED';
+  provider_message_status?: string;
+}
+
+export interface CallFacts extends CallerCapturedFacts, VerifiedOperationalFacts {
+  call_id: string;
 }
 
 export interface TranscriptTurn {
@@ -284,6 +292,9 @@ export interface KnowledgeItem {
   status: 'APPROVED' | 'DRAFT' | 'UNDER_REVIEW' | 'ARCHIVED';
   last_updated: string;
   version: string;
+  approved_by?: string;
+  approved_at?: string;
+  created_by?: string;
 }
 
 export interface AuditEvent {
@@ -292,7 +303,7 @@ export interface AuditEvent {
   call_id?: string;
   event_type: string;
   actor: string;
-  actor_type?: 'AI_AGENT' | 'DISPATCHER' | 'ADMIN' | 'OPS_MANAGER' | 'SYSTEM' | 'WEBHOOK';
+  actor_type?: 'AI_AGENT' | 'DISPATCHER' | 'ADMIN' | 'OPS_MANAGER' | 'SYSTEM' | 'WEBHOOK' | 'USER';
   actor_id?: string;
   severity: AuditSeverity;
   tool_name?: string;
@@ -309,6 +320,6 @@ export interface DispatcherKPIs {
   open_requests: number;
   hot_leads: number;
   warm_leads: number;
-  avg_response_latency_ms: number;
-  tool_success_rate_percent: number;
+  avg_response_latency_ms: number | null;
+  tool_success_rate_percent: number | null;
 }

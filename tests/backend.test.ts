@@ -279,7 +279,8 @@ describe('LOGIVOICE V1 — FORENSIC BACKEND AUTOMATED TEST SUITE', () => {
       'Unconfigured Google Sheets returns truthful UNCONFIGURED state (never false SYNCED)'
     );
 
-    // WhatsApp: Opted-out number check
+    // WhatsApp: Opted-out number check (Seeded explicitly into customer_suppressions per Prompt Item 10)
+    await db.setCustomerSuppression(DEFAULT_TENANT_ID, '+91 90000 00000', 'WHATSAPP', true, 'Test user opt-out');
     const optedOut = await sendFollowupMessage({
       channel: 'WHATSAPP',
       recipient: '+91 90000 00000',
@@ -588,17 +589,25 @@ describe('LOGIVOICE V1 — FORENSIC BACKEND AUTOMATED TEST SUITE', () => {
       'Tool gateway strictly blocks unapproved tool names'
     );
 
-    // D: Server-to-Server Provider Authentication Token Verification
+    // D: Server-to-Server Provider Authentication: Generic auth context rejects RETELL_API_KEY (Prompt Item 17)
     const fakeServerReq = {
       headers: new Headers({
         'x-api-key': process.env.RETELL_API_KEY || 'test-key',
         'x-tenant-id': DEFAULT_TENANT_ID,
       }),
     } as any;
-    const providerAuth = await getAuthContext(fakeServerReq);
+    let rejected = false;
+    try {
+      const providerAuth = await getAuthContext(fakeServerReq);
+      if (!providerAuth.isAuthenticated || providerAuth.role !== 'VOICE_GATEWAY') {
+        rejected = true;
+      }
+    } catch {
+      rejected = true;
+    }
     assert(
-      providerAuth.isAuthenticated && providerAuth.role === 'VOICE_GATEWAY',
-      'Server-to-server Retell API token resolves to authenticated VOICE_GATEWAY role'
+      rejected,
+      'Generic getAuthContext strictly rejects RETELL_API_KEY as a generic bearer token'
     );
 
     // E: Fault Tolerance: Downstream failure preserves primary record
@@ -1066,7 +1075,12 @@ describe('LOGIVOICE V1 — FORENSIC BACKEND AUTOMATED TEST SUITE', () => {
 
   const r20 = await dispatchTool({
     tool_name: 'transfer_to_human',
-    arguments: { reason: 'Live escalation test', target_role: 'Operations Manager', caller_phone: '+91 98201 55432' },
+    arguments: {
+      call_id: 'CA12345678901234567890123456789012',
+      reason: 'Live escalation test',
+      target_role: 'Operations Manager',
+      caller_phone: '+91 98201 55432',
+    },
   }, auth);
   assert(r20.status === 'TRANSFERRED', 'REGRESSION 20: Transfer returns TRANSFERRED only when telephony provider confirms execution');
 

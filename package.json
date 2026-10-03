@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "tsx tests/backend.test.ts && tsx tests/voice-qa-scenarios.test.ts"
+    "test": "tsx tests/backend.test.ts && tsx tests/voice-qa-scenarios.test.ts",
+    "test:integration": "node --import tsx --test tests/db-integration.test.ts",
+    "test:coverage": "node --import tsx --test --experimental-test-coverage --test-reporter=lcov --test-reporter-destination=coverage/lcov.info tests/backend.test.ts tests/voice-qa-scenarios.test.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.3",
@@ -26,10 +28,12 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.10",
+    "pg": "^8.23.1",
     "tailwindcss": "^4",
     "tsx": "^4.23.13",
     "typescript": "^5"

@@ -29,6 +29,21 @@ export type RateLookupOutcome =
   | { status: 'UNAVAILABLE' };
 
 /**
+ * Validates whether a string is a strict, valid ISO calendar date (YYYY-MM-DD).
+ */
+export function isValidIsoDate(dateStr: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return false;
+  const [yearStr, monthStr, dayStr] = dateStr.split('-');
+  const year = Number.parseInt(yearStr, 10);
+  const month = Number.parseInt(monthStr, 10);
+  const day = Number.parseInt(dayStr, 10);
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > 31) return false;
+  const d = new Date(Date.UTC(year, month - 1, day));
+  return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
+}
+
+/**
  * Checks whether two numerical intervals [minA, maxA) and [minB, maxB) overlap.
  */
 export function intervalsOverlap(minA: number, maxA: number, minB: number, maxB: number): boolean {
@@ -143,12 +158,22 @@ export function evaluateApprovedRate(
     };
   }
 
-  // 3. Candidate filtering
+  // 3. Candidate filtering using canonical [min, max) semantics for adjacent bands
   let candidates = validActiveCards.filter((c) => {
     if (vehicle && c.vehicle_type.trim().toLowerCase() !== vehicle) return false;
     if (weight !== undefined) {
       if (weight < c.weight_min_tons) return false;
       if (weight > c.weight_max_tons) return false;
+      if (weight === c.weight_max_tons) {
+        // Upper bound boundary check: if an adjacent higher band starts at this exact weight, this band yields
+        const hasAdjacentHigher = validActiveCards.some(
+          (other) =>
+            other.id !== c.id &&
+            other.vehicle_type.trim().toLowerCase() === c.vehicle_type.trim().toLowerCase() &&
+            other.weight_min_tons === weight
+        );
+        if (hasAdjacentHigher) return false;
+      }
     }
     return true;
   });
@@ -324,11 +349,20 @@ export function parseRateCardsCsv(
   const effectiveFromIdx = getIdx('effective_from', 'valid_from', 'start_date');
   const effectiveToIdx = getIdx('effective_to', 'valid_to', 'expiry_date');
 
-  if (originIdx === -1 || destIdx === -1 || vehicleIdx === -1 || priceIdx === -1) {
+  if (
+    originIdx === -1 ||
+    destIdx === -1 ||
+    vehicleIdx === -1 ||
+    priceIdx === -1 ||
+    minWIdx === -1 ||
+    maxWIdx === -1
+  ) {
     return {
       validRows: [],
       allRows: [],
-      errors: ['Missing required CSV headers: origin, destination, vehicle_type, and price_inr are mandatory.'],
+      errors: [
+        'Missing required CSV headers: origin, destination, vehicle_type, price_inr, weight_min_tons, and weight_max_tons are mandatory.',
+      ],
     };
   }
 
@@ -336,7 +370,7 @@ export function parseRateCardsCsv(
   const validRows: ParsedCsvRateRow[] = [];
   const errors: string[] = [];
 
-  const seenKeys = new Map<string, { minW: number; maxW: number }[]>();
+  const seenKeys = new Map<string, { minW: number; maxW: number; from: string; to?: string }[]>();
 
   for (let i = 1; i < tokenRows.length; i++) {
     const parts = tokenRows[i];
@@ -345,49 +379,59 @@ export function parseRateCardsCsv(
     const origin = (parts[originIdx] || '').trim();
     const destination = (parts[destIdx] || '').trim();
     const vehicleType = (parts[vehicleIdx] || '').trim();
-    const priceRaw = parts[priceIdx] || '';
-    const minWRaw = minWIdx !== -1 ? parts[minWIdx] : '1';
-    const maxWRaw = maxWIdx !== -1 ? parts[maxWIdx] : '5';
-    const minChargeRaw = minChargeIdx !== -1 ? parts[minChargeIdx] : '0';
-    const transitRaw = transitIdx !== -1 ? parts[transitIdx] : '24';
-    const effectiveFromRaw = effectiveFromIdx !== -1 ? parts[effectiveFromIdx] : new Date().toISOString().split('T')[0];
-    const effectiveToRaw = effectiveToIdx !== -1 ? parts[effectiveToIdx] : undefined;
-
-    const price = Number.parseFloat(priceRaw);
-    const minW = Number.parseFloat(minWRaw || '1');
-    const maxW = Number.parseFloat(maxWRaw || '5');
-    const minCharge = Number.parseFloat(minChargeRaw || '0');
-    const transit = Number.parseInt(transitRaw || '24', 10);
+    const priceRaw = (parts[priceIdx] || '').trim();
+    const minWRaw = minWIdx !== -1 ? (parts[minWIdx] || '').trim() : '';
+    const maxWRaw = maxWIdx !== -1 ? (parts[maxWIdx] || '').trim() : '';
+    const minChargeRaw = minChargeIdx !== -1 ? (parts[minChargeIdx] || '').trim() : '';
+    const transitRaw = transitIdx !== -1 ? (parts[transitIdx] || '').trim() : '';
+    const effectiveFromRaw = effectiveFromIdx !== -1 ? (parts[effectiveFromIdx] || '').trim() : new Date().toISOString().split('T')[0];
+    const effectiveToRaw = effectiveToIdx !== -1 ? (parts[effectiveToIdx] || '').trim() || undefined : undefined;
 
     let rowErr: string | undefined;
+
+    const price = Number.parseFloat(priceRaw);
+    const minW = Number.parseFloat(minWRaw);
+    const maxW = Number.parseFloat(maxWRaw);
+    const minCharge = minChargeRaw ? Number.parseFloat(minChargeRaw) : 0;
+    const transit = transitRaw ? Number.parseInt(transitRaw, 10) : 24;
 
     if (!origin || !destination) {
       rowErr = 'Missing origin or destination';
     } else if (!vehicleType) {
       rowErr = 'Missing vehicle type';
-    } else if (Number.isNaN(price) || price <= 0) {
+    } else if (!priceRaw || Number.isNaN(price) || price <= 0) {
       rowErr = 'Invalid price INR (must be positive number)';
-    } else if (Number.isNaN(minW) || minW < 0) {
-      rowErr = 'Invalid min weight tons';
-    } else if (Number.isNaN(maxW) || maxW <= minW) {
+    } else if (!minWRaw || Number.isNaN(minW) || minW < 0) {
+      rowErr = 'Invalid min weight tons (must be explicit non-negative number)';
+    } else if (!maxWRaw || Number.isNaN(maxW) || maxW <= minW) {
       rowErr = 'Max weight must be greater than min weight';
+    } else if (!effectiveFromRaw || !isValidIsoDate(effectiveFromRaw)) {
+      rowErr = `Invalid effective_from date '${effectiveFromRaw}'. Expected valid ISO calendar date (YYYY-MM-DD).`;
+    } else if (effectiveToRaw && !isValidIsoDate(effectiveToRaw)) {
+      rowErr = `Invalid effective_to date '${effectiveToRaw}'. Expected valid ISO calendar date (YYYY-MM-DD).`;
+    } else if (effectiveToRaw && effectiveToRaw < effectiveFromRaw) {
+      rowErr = 'effective_to cannot be earlier than effective_from date.';
     }
 
     const corridorKey = `${origin.toLowerCase()}|${destination.toLowerCase()}|${vehicleType.toLowerCase()}`;
 
-    // In-CSV Overlap Detection:
+    // In-CSV Overlap Detection (considering both weight interval and date range)
     if (!rowErr) {
       const existingBands = seenKeys.get(corridorKey) || [];
-      const hasCsvOverlap = existingBands.some((b) => intervalsOverlap(b.minW, b.maxW, minW, maxW));
+      const hasCsvOverlap = existingBands.some(
+        (b) =>
+          intervalsOverlap(b.minW, b.maxW, minW, maxW) &&
+          dateRangesOverlap(b.from, b.to, effectiveFromRaw, effectiveToRaw)
+      );
       if (hasCsvOverlap) {
-        rowErr = 'Overlapping weight band for same lane and vehicle in this CSV';
+        rowErr = 'Overlapping tariff band for same lane, vehicle, and date interval in this CSV';
       } else {
-        existingBands.push({ minW, maxW });
+        existingBands.push({ minW, maxW, from: effectiveFromRaw, to: effectiveToRaw });
         seenKeys.set(corridorKey, existingBands);
       }
     }
 
-    // Existing Database Active Cards Conflict Check:
+    // Existing Database Active Cards Conflict Check (weights + dates)
     let isConflict = false;
     let conflictNote: string | undefined;
     if (!rowErr) {
@@ -397,7 +441,8 @@ export function parseRateCardsCsv(
           c.destination.toLowerCase() === destination.toLowerCase() &&
           c.vehicle_type.toLowerCase() === vehicleType.toLowerCase() &&
           c.status === 'ACTIVE' &&
-          intervalsOverlap(c.weight_min_tons, c.weight_max_tons, minW, maxW)
+          intervalsOverlap(c.weight_min_tons, c.weight_max_tons, minW, maxW) &&
+          dateRangesOverlap(c.effective_from, c.effective_to, effectiveFromRaw, effectiveToRaw)
       );
 
       if (dbConflicts.length > 0) {
@@ -410,16 +455,16 @@ export function parseRateCardsCsv(
       origin,
       destination,
       vehicle_type: vehicleType,
-      weight_min_tons: Number.isNaN(minW) ? 1 : minW,
-      weight_max_tons: Number.isNaN(maxW) ? 5 : maxW,
+      weight_min_tons: Number.isNaN(minW) ? 0 : minW,
+      weight_max_tons: Number.isNaN(maxW) ? 0 : maxW,
       price_inr: Number.isNaN(price) ? 0 : price,
       minimum_charge_inr: Number.isNaN(minCharge) ? 0 : minCharge,
       transit_time_hours: Number.isNaN(transit) ? 24 : transit,
-      effective_from: effectiveFromRaw || new Date().toISOString().split('T')[0],
+      effective_from: effectiveFromRaw,
       effective_to: effectiveToRaw || undefined,
       quote_type: 'ESTIMATE',
       supports_confirmed_quote: false,
-      status: 'ACTIVE',
+      status: 'DRAFT',
       error: rowErr,
       conflict: isConflict,
       conflictNote,

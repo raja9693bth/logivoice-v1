@@ -198,7 +198,7 @@ export const CreateKnowledgeApiSchema = z.object({
   ]),
   title: z.string().min(3).max(200),
   content: z.string().min(5).max(5000),
-  status: z.enum(['APPROVED', 'DRAFT', 'UNDER_REVIEW', 'ARCHIVED']).default('APPROVED'),
+  status: z.enum(['APPROVED', 'DRAFT', 'UNDER_REVIEW', 'ARCHIVED']).default('DRAFT'),
   version: z.string().max(32).default('1.0'),
 }).strict();
 

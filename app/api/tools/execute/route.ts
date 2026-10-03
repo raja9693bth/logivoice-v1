@@ -7,10 +7,11 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthContext, requireRole, AuthorizationError } from '@/lib/auth/context';
+import { getAuthContext, requireRole } from '@/lib/auth/context';
 import { dispatchTool } from '@/lib/tools/gateway';
 import { createCorrelationContext, logTrace } from '@/lib/observability/correlation';
 import { ExecuteToolApiSchema } from '@/lib/schemas/api';
+import { handleApiError } from '@/lib/api/error-handler';
 
 function redactToolArgs(args: Record<string, unknown>): Record<string, unknown> {
   const redacted: Record<string, unknown> = {};
@@ -29,7 +30,7 @@ function redactToolArgs(args: Record<string, unknown>): Record<string, unknown> 
 export async function POST(req: NextRequest) {
   try {
     const authContext = await getAuthContext(req);
-    requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'VOICE_GATEWAY', 'SYSTEM']);
+    requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'SYSTEM']);
 
     const correlation = createCorrelationContext(authContext.tenantId, undefined, 'TOOL_EXECUTE_API');
 
@@ -66,15 +67,6 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json(result);
   } catch (error) {
-    if (error instanceof AuthorizationError) {
-      return NextResponse.json({ error: error.message }, { status: error.statusCode });
-    }
-    return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : 'Tool execution failed',
-      },
-      { status: 500 }
-    );
+    return handleApiError(error, 'api/tools/execute:POST');
   }
 }

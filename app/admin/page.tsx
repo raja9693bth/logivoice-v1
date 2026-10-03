@@ -57,10 +57,11 @@ export default function DashboardPage() {
     }
 
     try {
-      const [callsRes, requestsRes, leadsRes] = await Promise.all([
+      const [callsRes, requestsRes, leadsRes, kpisRes] = await Promise.all([
         fetch('/api/calls'),
         fetch('/api/requests'),
         fetch('/api/leads'),
+        fetch('/api/dashboard/kpis'),
       ]);
 
       if (callsRes.status === 401 || requestsRes.status === 401) {
@@ -68,13 +69,14 @@ export default function DashboardPage() {
         return;
       }
 
-      if (!callsRes.ok || !requestsRes.ok || !leadsRes.ok) {
+      if (!callsRes.ok || !requestsRes.ok || !leadsRes.ok || !kpisRes.ok) {
         throw new Error('Failed to fetch real-time operational data from backend services.');
       }
 
       const callsData = await callsRes.json();
       const requestsData = await requestsRes.json();
       const leadsData = await leadsRes.json();
+      const kpisData = await kpisRes.json();
 
       const fetchedCalls: Call[] = callsData.calls || [];
       const fetchedRequests: OperationsRequest[] = requestsData.requests || [];
@@ -83,53 +85,7 @@ export default function DashboardPage() {
       setCalls(fetchedCalls);
       setRequests(fetchedRequests);
       setLeads(fetchedLeads);
-
-      // Compute authoritative KPIs dynamically from live data (Asia/Kolkata timezone)
-      const todayDateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-      const callsTodayCount = fetchedCalls.filter((c) => {
-        if (!c.started_at) return false;
-        return new Date(c.started_at).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) === todayDateStr;
-      }).length;
-
-      const missed = fetchedCalls.filter((c) => c.outcome === 'MISSED' || c.outcome === 'FAILED').length;
-      const escalated = fetchedCalls.filter(
-        (c) => c.outcome === 'TRANSFERRED' || c.escalation_status?.is_escalated
-      ).length;
-      const openReqs = fetchedRequests.filter((r) => r.status === 'PENDING' || r.status === 'IN_REVIEW').length;
-      const hotLeads = fetchedLeads.filter((l) => l.temperature === 'HOT').length;
-      const warmLeads = fetchedLeads.filter((l) => l.temperature === 'WARM').length;
-
-      // Calculate tool telemetry from real tool events
-      const latencies: number[] = [];
-      let totalTools = 0;
-      let successfulTools = 0;
-      for (const c of fetchedCalls) {
-        if (c.tool_events && c.tool_events.length > 0) {
-          for (const te of c.tool_events) {
-            totalTools++;
-            if (te.execution_status === 'SUCCESS' || te.status === 'SUCCESS' || te.status === 'PENDING') successfulTools++;
-            if (typeof te.latency_ms === 'number' && te.latency_ms > 0) {
-              latencies.push(te.latency_ms);
-            }
-          }
-        }
-      }
-      const avgLatencyMs = latencies.length > 0
-        ? Math.round(latencies.reduce((acc, l) => acc + l, 0) / latencies.length)
-        : 0;
-      const toolSuccessRate = totalTools > 0 ? Math.round((successfulTools / totalTools) * 100) : 100;
-
-      setKpis({
-        calls_today: callsTodayCount,
-        calls_trend: callsTodayCount > 0 ? `${callsTodayCount} calls today` : 'No calls today',
-        missed_calls: missed,
-        escalated_calls: escalated,
-        open_requests: openReqs,
-        hot_leads: hotLeads,
-        warm_leads: warmLeads,
-        avg_response_latency_ms: avgLatencyMs,
-        tool_success_rate_percent: toolSuccessRate,
-      });
+      setKpis(kpisData.kpis);
     } catch (err) {
       console.warn('[DashboardPage] Real API fetch error:', err);
       setError(err instanceof Error ? err.message : 'Database/API service temporarily unreachable.');
@@ -323,7 +279,9 @@ export default function DashboardPage() {
               <div className="flex justify-between text-xs mb-1">
                 <span className="text-slate-500 dark:text-slate-400">Call Success / Completion</span>
                 <span className="text-slate-900 dark:text-white font-mono font-semibold">
-                  {calls.length > 0 ? `${kpis?.tool_success_rate_percent ?? 0}%` : 'No data'}
+                  {kpis?.tool_success_rate_percent !== null && kpis?.tool_success_rate_percent !== undefined
+                    ? `${kpis.tool_success_rate_percent}%`
+                    : 'No telemetry'}
                 </span>
               </div>
               <div className="w-full bg-slate-100 dark:bg-slate-800 h-1.5 rounded-full overflow-hidden">
@@ -339,7 +297,9 @@ export default function DashboardPage() {
               <div className="flex justify-between text-xs mb-1">
                 <span className="text-slate-500 dark:text-slate-400">Avg Tool Response Latency</span>
                 <span className="text-slate-900 dark:text-white font-mono font-semibold">
-                  {(kpis?.avg_response_latency_ms ?? 0) > 0 ? `${kpis?.avg_response_latency_ms}ms` : 'No telemetry'}
+                  {kpis?.avg_response_latency_ms !== null && kpis?.avg_response_latency_ms !== undefined
+                    ? `${kpis.avg_response_latency_ms}ms`
+                    : 'Not measured'}
                 </span>
               </div>
               <div className="w-full bg-slate-100 dark:bg-slate-800 h-1.5 rounded-full overflow-hidden">

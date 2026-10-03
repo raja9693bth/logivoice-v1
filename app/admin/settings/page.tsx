@@ -341,8 +341,9 @@ export default function SettingsPage() {
               <h2 className="text-sm font-semibold text-slate-900 dark:text-white">Client Business Identity</h2>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
                 <div>
-                  <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Brand Name Used on Voice Calls</label>
+                  <label htmlFor="brand-name" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Brand Name Used on Voice Calls</label>
                   <input
+                    id="brand-name"
                     type="text"
                     value={brandName}
                     onChange={(e) => setBrandName(e.target.value)}
@@ -350,8 +351,9 @@ export default function SettingsPage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Legal Registered Entity Name</label>
+                  <label htmlFor="legal-name" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Legal Registered Entity Name</label>
                   <input
+                    id="legal-name"
                     type="text"
                     value={legalName}
                     onChange={(e) => setLegalName(e.target.value)}
@@ -359,8 +361,9 @@ export default function SettingsPage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Business Nature / Category</label>
+                  <label htmlFor="business-type" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Business Nature / Category</label>
                   <input
+                    id="business-type"
                     type="text"
                     value={businessType}
                     onChange={(e) => setBusinessType(e.target.value)}
@@ -368,8 +371,9 @@ export default function SettingsPage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Primary Operating Regions (Comma Separated)</label>
+                  <label htmlFor="operating-regions" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Primary Operating Regions (Comma Separated)</label>
                   <input
+                    id="operating-regions"
                     type="text"
                     value={operatingRegions}
                     onChange={(e) => setOperatingRegions(e.target.value)}
@@ -377,8 +381,9 @@ export default function SettingsPage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Operating Business Hours</label>
+                  <label htmlFor="working-hours" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Operating Business Hours</label>
                   <input
+                    id="working-hours"
                     type="text"
                     value={workingHours}
                     onChange={(e) => setWorkingHours(e.target.value)}
@@ -386,8 +391,9 @@ export default function SettingsPage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Operational Timezone</label>
+                  <label htmlFor="operational-timezone" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Operational Timezone</label>
                   <input
+                    id="operational-timezone"
                     type="text"
                     disabled
                     value={timezone}
@@ -398,8 +404,9 @@ export default function SettingsPage() {
               </div>
 
             <div>
-              <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">AI Identity Disclosure Statement</label>
+              <label htmlFor="disclosure-wording" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">AI Identity Disclosure Statement</label>
               <input
+                id="disclosure-wording"
                 type="text"
                 value={disclosureWording}
                 onChange={(e) => setDisclosureWording(e.target.value)}
@@ -418,8 +425,9 @@ export default function SettingsPage() {
             <h2 className="text-sm font-semibold text-slate-900 dark:text-white">Voice &amp; Conversation Behaviour</h2>
             <div className="space-y-4 text-xs">
               <div>
-                <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Primary Conversation Language</label>
+                <label htmlFor="primary-language" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Primary Conversation Language</label>
                 <select
+                  id="primary-language"
                   value={primaryLang}
                   onChange={(e) => setPrimaryLang(e.target.value)}
                   className="w-full max-w-md bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg p-2 text-slate-900 dark:text-white focus:outline-hidden focus:border-sky-500"
@@ -431,8 +439,9 @@ export default function SettingsPage() {
               </div>
 
               <div>
-                <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Voice Persona &amp; Acoustic Style</label>
+                <label htmlFor="voice-persona" className="block text-slate-700 dark:text-slate-300 font-medium mb-1">Voice Persona &amp; Acoustic Style</label>
                 <input
+                  id="voice-persona"
                   type="text"
                   value={voicePersona}
                   onChange={(e) => setVoicePersona(e.target.value)}

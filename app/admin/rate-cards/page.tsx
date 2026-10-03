@@ -52,7 +52,7 @@ export default function RateCardsPage() {
   }, []);
 
   React.useEffect(() => {
-    fetchRateCards();
+    void fetchRateCards();
   }, [fetchRateCards]);
 
   // Form State

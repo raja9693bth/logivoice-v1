@@ -48,7 +48,7 @@ export default function SystemAuditPage() {
   }, []);
 
   React.useEffect(() => {
-    fetchAuditEvents();
+    void fetchAuditEvents();
   }, [fetchAuditEvents]);
 
   const filteredEvents = useMemo(() => {

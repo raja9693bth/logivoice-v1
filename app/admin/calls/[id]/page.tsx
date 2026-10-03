@@ -45,7 +45,7 @@ export default function CallDetailPage({ params }: { params: Promise<{ id: strin
     setIsLoading(true);
     setError(null);
 
-    fetch(`/api/calls/${resolvedParams.id}`)
+    void fetch(`/api/calls/${resolvedParams.id}`)
       .then(async (res) => {
         if (res.status === 401) {
           window.location.href = '/login';

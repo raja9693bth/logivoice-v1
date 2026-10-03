@@ -49,7 +49,7 @@ export default function KnowledgeBasePage() {
   }, []);
 
   React.useEffect(() => {
-    fetchKnowledge();
+    void fetchKnowledge();
   }, [fetchKnowledge]);
 
   // Form State

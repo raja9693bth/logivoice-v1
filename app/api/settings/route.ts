@@ -3,6 +3,7 @@ import { getAuthContext, requireRole } from '@/lib/auth/context';
 import { db } from '@/lib/db';
 import { UpdateSettingsApiSchema } from '@/lib/schemas/api';
 import { handleApiError } from '@/lib/api/error-handler';
+import { parseAndValidateJson } from '@/lib/api/request-helper';
 
 import { isSupabaseLive } from '@/lib/db';
 
@@ -50,22 +51,10 @@ export async function PUT(req: NextRequest) {
     // Section 33: Sensitive settings mutations restricted to ADMIN and OPS_MANAGER
     requireRole(authContext, ['ADMIN', 'OPS_MANAGER', 'SYSTEM']);
 
-    let body: unknown;
-    try {
-      body = await req.json();
-    } catch {
-      return NextResponse.json({ error: 'Malformed JSON payload' }, { status: 400 });
-    }
+    const { data: updateData, errorResponse } = await parseAndValidateJson(req, UpdateSettingsApiSchema);
+    if (errorResponse) return errorResponse;
 
-    const parseResult = UpdateSettingsApiSchema.safeParse(body);
-    if (!parseResult.success) {
-      return NextResponse.json(
-        { error: 'Validation failed', details: parseResult.error.flatten() },
-        { status: 400 }
-      );
-    }
-
-    const updated = await db.updateClientConfig(authContext.tenantId, parseResult.data);
+    const updated = await db.updateClientConfig(authContext.tenantId, updateData);
 
     // Log settings update audit event
     await db.logAuditEvent(
@@ -77,7 +66,7 @@ export async function PUT(req: NextRequest) {
         actor_id: authContext.userId,
         severity: 'INFO',
         details: {
-          updated_fields: Object.keys(parseResult.data),
+          updated_fields: Object.keys(updateData),
         },
       },
       authContext.tenantId

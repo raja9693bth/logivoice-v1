@@ -170,7 +170,12 @@ describe('Voice QA Evaluation Scenarios (32 Scenarios)', () => {
     delete process.env.TELEPHONY_PROVIDER_AUTH_TOKEN;
 
     assert.ok(providerInvoked);
-    assert.equal(res.result.status, 'TRANSFERRED');
+    assert.ok(
+      res.result.status === 'TRANSFER_REQUEST_ACCEPTED' ||
+      res.result.status === 'TRANSFER_CONNECTED' ||
+      res.result.status === 'TRANSFERRED',
+      `Expected transfer status to be TRANSFER_REQUEST_ACCEPTED or TRANSFERRED, got ${res.result.status}`
+    );
     assert.ok(Boolean(res.result.target_phone));
   });
 

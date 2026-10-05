@@ -18,6 +18,7 @@ import { MOCK_LEADS } from '@/lib/mock/logivoice-data';
 import { formatDateTime } from '@/lib/utils';
 import { Drawer } from '@/components/ui/Drawer';
 import { EmptyState } from '@/components/ui/EmptyState';
+import { PaginationControls } from '@/components/ui/PaginationControls';
 import { Lead, LeadTemperature } from '@/types/logivoice';
 
 export default function LeadsPage() {
@@ -259,33 +260,15 @@ export default function LeadsPage() {
       )}
 
       {/* Pagination Controls */}
-      {totalCount > PAGE_SIZE && (
-        <div className="flex items-center justify-between px-3 py-3 rounded-xl bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-xs">
-          <span className="text-slate-500 dark:text-slate-400">
-            Showing <span className="font-semibold text-slate-900 dark:text-white">{offset + 1}</span> to{' '}
-            <span className="font-semibold text-slate-900 dark:text-white">{Math.min(offset + leads.length, totalCount)}</span> of{' '}
-            <span className="font-semibold text-slate-900 dark:text-white">{totalCount}</span> leads
-          </span>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-              disabled={offset === 0 || loading}
-              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
-            >
-              Previous
-            </button>
-            <button
-              type="button"
-              onClick={() => setOffset(offset + PAGE_SIZE)}
-              disabled={offset + leads.length >= totalCount || loading}
-              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
-            >
-              Next
-            </button>
-          </div>
-        </div>
-      )}
+      <PaginationControls
+        offset={offset}
+        limit={PAGE_SIZE}
+        totalCount={totalCount}
+        currentCount={leads.length}
+        itemLabel="leads"
+        isLoading={loading}
+        onPageChange={(newOffset) => setOffset(newOffset)}
+      />
 
       {/* Lead Inspection Drawer */}
       <Drawer

@@ -4,6 +4,7 @@ import { db } from '@/lib/db';
 import { LeadTemperature } from '@/types/logivoice';
 import { CreateLeadApiSchema, UpdateLeadApiSchema, ListLeadsQuerySchema } from '@/lib/schemas/api';
 import { handleApiError } from '@/lib/api/error-handler';
+import { parseJsonBody } from '@/lib/api/request-helper';
 
 export async function GET(req: NextRequest) {
   try {
@@ -56,12 +57,8 @@ export async function POST(req: NextRequest) {
     const authContext = await getAuthContext(req);
     requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'SYSTEM']);
 
-    let body: unknown;
-    try {
-      body = await req.json();
-    } catch {
-      return NextResponse.json({ error: 'Malformed JSON payload' }, { status: 400 });
-    }
+    const { data: body, errorResponse } = await parseJsonBody(req);
+    if (errorResponse) return errorResponse;
 
     const parseResult = CreateLeadApiSchema.safeParse(body);
     if (!parseResult.success) {
@@ -105,12 +102,8 @@ export async function PATCH(req: NextRequest) {
     const authContext = await getAuthContext(req);
     requireRole(authContext, ['DISPATCHER', 'OPS_MANAGER', 'ADMIN', 'SYSTEM']);
 
-    let body: unknown;
-    try {
-      body = await req.json();
-    } catch {
-      return NextResponse.json({ error: 'Malformed JSON payload' }, { status: 400 });
-    }
+    const { data: body, errorResponse } = await parseJsonBody(req);
+    if (errorResponse) return errorResponse;
 
     const parseResult = UpdateLeadApiSchema.safeParse(body);
     if (!parseResult.success) {

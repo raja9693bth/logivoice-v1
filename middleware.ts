@@ -11,8 +11,15 @@ export async function middleware(request: NextRequest) {
 
   const isProduction = process.env.NODE_ENV === 'production';
 
-  // 1. Non-production or Playwright E2E dev session cookie check
-  if (!isProduction || process.env.PLAYWRIGHT_TEST === '1') {
+  // 1. Non-production test bypass: Strictly forbidden in production under all conditions
+  const allowDevBypass =
+    !isProduction &&
+    (process.env.PLAYWRIGHT_TEST === '1' ||
+      process.env.ALLOW_DEV_SESSION === '1' ||
+      process.env.NODE_ENV === 'development' ||
+      process.env.NODE_ENV === 'test');
+
+  if (allowDevBypass) {
     const devCookie = request.cookies.get('logivoice_dev_session')?.value;
     if (devCookie === 'true') {
       return NextResponse.next();

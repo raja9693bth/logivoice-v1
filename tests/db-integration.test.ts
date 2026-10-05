@@ -36,6 +36,7 @@ const MIGRATION_FILES = [
   '20261003000000_side_effect_claims_and_transcript_alignment.sql',
   '20261003010000_atomic_side_effects_and_tool_executions.sql',
   '20261003020000_enterprise_integrity_hardening.sql',
+  '20261005000000_rate_cards_atomic_concurrency.sql',
 ];
 
 function getDbUrl(dbName: string): string {

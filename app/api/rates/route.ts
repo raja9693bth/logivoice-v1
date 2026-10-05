@@ -3,6 +3,7 @@ import { getAuthContext, requireRole } from '@/lib/auth/context';
 import { db } from '@/lib/db';
 import { CreateRateCardApiSchema, UpdateRateCardApiSchema, GetRateQuoteQuerySchema, BulkCreateRateCardsApiSchema } from '@/lib/schemas/api';
 import { handleApiError } from '@/lib/api/error-handler';
+import { parseJsonBody, parseAndValidateJson } from '@/lib/api/request-helper';
 
 export async function GET(req: NextRequest) {
   try {
@@ -78,17 +79,34 @@ export async function GET(req: NextRequest) {
   }
 }
 
+function mapRateCardPayload(val: any, tenantId: string, sourceVersion: string) {
+  return {
+    tenant_id: tenantId,
+    origin: val.origin,
+    destination: val.destination,
+    vehicle_type: val.vehicle_type,
+    weight_min_tons: val.weight_min_tons,
+    weight_max_tons: val.weight_max_tons,
+    price_inr: val.price_inr,
+    minimum_charge_inr: val.minimum_charge_inr,
+    effective_from: val.effective_from,
+    effective_to: val.effective_to,
+    status: val.status,
+    transit_time_hours: val.transit_time_hours,
+    quote_type: val.quote_type,
+    supports_confirmed_quote: val.supports_confirmed_quote,
+    source_version: sourceVersion,
+    surcharge_notes: val.surcharge_notes,
+  };
+}
+
 export async function POST(req: NextRequest) {
   try {
     const authContext = await getAuthContext(req);
     requireRole(authContext, ['ADMIN', 'OPS_MANAGER', 'SYSTEM']);
 
-    let body: unknown;
-    try {
-      body = await req.json();
-    } catch {
-      return NextResponse.json({ error: 'Malformed JSON payload' }, { status: 400 });
-    }
+    const { data: body, errorResponse } = await parseJsonBody(req);
+    if (errorResponse) return errorResponse;
 
     // Bulk Rate Card Import Handler
     if (typeof body === 'object' && body !== null && 'bulk' in body && (body as any).bulk === true) {
@@ -99,24 +117,9 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         );
       }
-      const itemsToInsert = bulkParse.data.items.map((val) => ({
-        tenant_id: authContext.tenantId,
-        origin: val.origin,
-        destination: val.destination,
-        vehicle_type: val.vehicle_type,
-        weight_min_tons: val.weight_min_tons,
-        weight_max_tons: val.weight_max_tons,
-        price_inr: val.price_inr,
-        minimum_charge_inr: val.minimum_charge_inr,
-        effective_from: val.effective_from,
-        effective_to: val.effective_to,
-        status: val.status,
-        transit_time_hours: val.transit_time_hours,
-        quote_type: val.quote_type,
-        supports_confirmed_quote: val.supports_confirmed_quote,
-        source_version: 'v1.2-csv-bulk-import',
-        surcharge_notes: val.surcharge_notes,
-      }));
+      const itemsToInsert = bulkParse.data.items.map((val) =>
+        mapRateCardPayload(val, authContext.tenantId, 'v1.2-csv-bulk-import')
+      );
 
       const res = await db.bulkCreateRateCards(itemsToInsert, authContext.tenantId);
 
@@ -133,24 +136,7 @@ export async function POST(req: NextRequest) {
 
     const val = parseResult.data;
     const newCard = await db.createRateCard(
-      {
-        tenant_id: authContext.tenantId,
-        origin: val.origin,
-        destination: val.destination,
-        vehicle_type: val.vehicle_type,
-        weight_min_tons: val.weight_min_tons,
-        weight_max_tons: val.weight_max_tons,
-        price_inr: val.price_inr,
-        minimum_charge_inr: val.minimum_charge_inr,
-        effective_from: val.effective_from,
-        effective_to: val.effective_to,
-        status: val.status,
-        transit_time_hours: val.transit_time_hours,
-        quote_type: val.quote_type,
-        supports_confirmed_quote: val.supports_confirmed_quote,
-        source_version: 'v1.2-admin-created',
-        surcharge_notes: val.surcharge_notes,
-      },
+      mapRateCardPayload(val, authContext.tenantId, 'v1.2-admin-created'),
       authContext.tenantId
     );
 
@@ -185,22 +171,10 @@ export async function PUT(req: NextRequest) {
     const authContext = await getAuthContext(req);
     requireRole(authContext, ['ADMIN', 'OPS_MANAGER', 'SYSTEM']);
 
-    let body: unknown;
-    try {
-      body = await req.json();
-    } catch {
-      return NextResponse.json({ error: 'Malformed JSON payload' }, { status: 400 });
-    }
+    const { data: putData, errorResponse } = await parseAndValidateJson(req, UpdateRateCardApiSchema);
+    if (errorResponse) return errorResponse;
 
-    const parseResult = UpdateRateCardApiSchema.safeParse(body);
-    if (!parseResult.success) {
-      return NextResponse.json(
-        { error: 'Validation failed', details: parseResult.error.flatten() },
-        { status: 400 }
-      );
-    }
-
-    const { id, ...updates } = parseResult.data;
+    const { id, ...updates } = putData;
     const updated = await db.updateRateCard(id, updates, authContext.tenantId);
     if (!updated) {
       return NextResponse.json({ error: 'Rate card not found' }, { status: 404 });

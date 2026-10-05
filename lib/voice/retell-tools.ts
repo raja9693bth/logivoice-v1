@@ -152,11 +152,10 @@ export const RETELL_TOOL_DEFINITIONS = [
       type: 'object',
       properties: {
         call_id: { type: 'string', description: 'Reference call ID' },
-        recipient_phone: { type: 'string', description: 'Destination mobile number' },
         channel: {
           type: 'string',
-          enum: ['WHATSAPP', 'SMS', 'EMAIL'],
-          description: 'Channel to send on (WHATSAPP supported)',
+          enum: ['WHATSAPP'],
+          description: 'Channel to send on (WHATSAPP)',
         },
         template_id: {
           type: 'string',
@@ -164,7 +163,7 @@ export const RETELL_TOOL_DEFINITIONS = [
           description: 'Approved template identifier',
         },
       },
-      required: ['call_id', 'recipient_phone'],
+      required: ['call_id'],
     },
   },
 ];

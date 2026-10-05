@@ -48,14 +48,6 @@ import {
   dbFollowupToDomain,
   domainAuditToDbRow,
   isValidUuid,
-  CallsDbRow,
-  CallFactsDbRow,
-  LeadsDbRow,
-  OperationsRequestsDbRow,
-  KnowledgeItemsDbRow,
-  FollowupsDbRow,
-  CustomersDbRow,
-  AuditEventsDbRow,
 } from './mappers';
 
 export class SideEffectPersistenceError extends Error {
@@ -69,32 +61,7 @@ export function sanitizePostgrestSearch(input: string): string {
   return input.replace(/[,()%"'.:]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-export {
-  domainCallToDbRow,
-  dbCallToDomain,
-  domainLeadToDbRow,
-  dbLeadToDomain,
-  domainRequestToDbRow,
-  dbRequestToDomain,
-  domainKnowledgeToDbRow,
-  dbKnowledgeToDomain,
-  domainCustomerToDbRow,
-  dbCustomerToDomain,
-  domainFollowupToDbRow,
-  dbFollowupToDomain,
-  domainAuditToDbRow,
-  isValidUuid,
-};
-export type {
-  CallsDbRow,
-  CallFactsDbRow,
-  LeadsDbRow,
-  OperationsRequestsDbRow,
-  KnowledgeItemsDbRow,
-  FollowupsDbRow,
-  CustomersDbRow,
-  AuditEventsDbRow,
-};
+export * from './mappers';
 
 export interface TrackingRecord {
   id: string;
@@ -793,9 +760,94 @@ async function validateTenantEntityOwnership(
   }
 }
 
+function getValidProcessingClaim(
+  tenantId: string,
+  claimKey: string,
+  claimToken: string,
+  action: string
+): SideEffectClaim {
+  assertProductionDbReady();
+  const claim = globalStore.side_effect_claims.find(
+    (c) => c.tenant_id === tenantId && c.claim_key === claimKey
+  );
+  if (!claim) {
+    throw new SideEffectPersistenceError(`Claim '${claimKey}' not found`, { tenantId, claimKey });
+  }
+  if (claim.status !== 'PROCESSING') {
+    throw new SideEffectPersistenceError(
+      `Cannot ${action} claim '${claimKey}' in non-PROCESSING status '${claim.status}'`,
+      { tenantId, claimKey, status: claim.status }
+    );
+  }
+  if (claim.claim_token && claim.claim_token !== claimToken) {
+    throw new SideEffectPersistenceError(
+      `Cannot ${action} claim '${claimKey}': claim_token mismatch`,
+      { tenantId, claimKey, expected: claim.claim_token, actual: claimToken }
+    );
+  }
+  return claim;
+}
+
+// In-memory lane mutex for deterministic concurrency control
+const laneMutexes = new Map<string, Promise<void>>();
+async function withLaneLock<T>(laneKey: string, fn: () => Promise<T>): Promise<T> {
+  const currentLock = laneMutexes.get(laneKey) || Promise.resolve();
+  let release: () => void = () => {};
+  const nextLock = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  laneMutexes.set(laneKey, currentLock.then(() => nextLock));
+  await currentLock;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (laneMutexes.get(laneKey) === nextLock) {
+      laneMutexes.delete(laneKey);
+    }
+  }
+}
+
+function computeToolAggregates(
+  toolExecs: Array<{ success?: boolean | null; execution_status?: string | null; latency_ms?: number | null }>
+): {
+  avg_response_latency_ms: number | null;
+  tool_success_rate_percent: number | null;
+} {
+  const SUCCESSFUL_STATUSES = new Set(['SUCCESS', 'MATCH', 'FOUND', 'SAVED', 'REQUEST_CREATED', 'SENT', 'TRANSFER_CONNECTED', 'QUOTED']);
+  const measuredLatencies: number[] = [];
+  let totalToolAttempts = 0;
+  let successfulToolExecutions = 0;
+
+  for (const te of toolExecs) {
+    totalToolAttempts++;
+    const isSuccess = te.success === true || (typeof te.execution_status === 'string' && SUCCESSFUL_STATUSES.has(te.execution_status.toUpperCase()));
+    if (isSuccess) {
+      successfulToolExecutions++;
+    }
+    if (typeof te.latency_ms === 'number' && te.latency_ms > 0) {
+      measuredLatencies.push(te.latency_ms);
+    }
+  }
+
+  const toolSuccessRate = totalToolAttempts > 0
+    ? Math.round((successfulToolExecutions / totalToolAttempts) * 100)
+    : null;
+
+  const avgToolLatencyMs = measuredLatencies.length > 0
+    ? Math.round(measuredLatencies.reduce((acc, l) => acc + l, 0) / measuredLatencies.length)
+    : null;
+
+  return {
+    avg_response_latency_ms: avgToolLatencyMs,
+    tool_success_rate_percent: toolSuccessRate,
+  };
+}
+
 // =========================================================================
 // REPOSITORY IMPLEMENTATION
 // =========================================================================
+
 
 export const db = {
   // -----------------------------------------------------------------------
@@ -1936,41 +1988,56 @@ export const db = {
     const laneOrigin = (rateCardData.origin || '').trim().toLowerCase();
     const laneDest = (rateCardData.destination || '').trim().toLowerCase();
     const laneVehicle = (rateCardData.vehicle_type || '').trim().toLowerCase();
+    const laneKey = `${tenantId}:${laneOrigin}:${laneDest}:${laneVehicle}`;
 
-    if (rateCardData.status === 'ACTIVE') {
-      const allCards = await this.listRateCards(tenantId, { status: 'ACTIVE' });
-      const conflict = allCards.find(
-        (c) =>
-          c.origin.trim().toLowerCase() === laneOrigin &&
-          c.destination.trim().toLowerCase() === laneDest &&
-          c.vehicle_type.trim().toLowerCase() === laneVehicle &&
-          rateCardData.weight_min_tons < c.weight_max_tons &&
-          rateCardData.weight_max_tons > c.weight_min_tons &&
-          (!rateCardData.effective_to || !c.effective_from || rateCardData.effective_to >= c.effective_from) &&
-          (!c.effective_to || !rateCardData.effective_from || c.effective_to >= rateCardData.effective_from)
-      );
-      if (conflict) {
-        throw new Error(
-          `Conflict: An overlapping ACTIVE rate card already exists for lane ${rateCardData.origin}->${rateCardData.destination} (${rateCardData.vehicle_type}) covering weight band ${conflict.weight_min_tons}-${conflict.weight_max_tons} tons.`
-        );
+    return withLaneLock(laneKey, async () => {
+      if (await isSupabaseLive()) {
+        const client = createAdminClient();
+        const { data, error } = await client.rpc('create_rate_card_atomic', {
+          p_tenant_id: tenantId,
+          p_card: {
+            ...rateCardData,
+            tenant_id: rateCardData.tenant_id || tenantId,
+          },
+        });
+        if (error) {
+          throw new Error(error.message);
+        }
+        if (data && (Array.isArray(data) ? data.length > 0 : data)) {
+          return (Array.isArray(data) ? data[0] : data) as RateCard;
+        }
       }
-    }
 
-    const id = crypto.randomUUID();
-    const newCard: RateCard = {
-      ...rateCardData,
-      id,
-      tenant_id: rateCardData.tenant_id || tenantId,
-      source_version: rateCardData.source_version || 'v1.0',
-    };
-    if (await isSupabaseLive()) {
-      const client = createAdminClient();
-      const { data, error } = await client.from('rate_cards').insert([newCard]).select().single();
-      if (!error && data) return data as RateCard;
-    }
-    assertProductionDbReady();
-    globalStore.rate_cards.unshift(newCard);
-    return newCard;
+      if (rateCardData.status === 'ACTIVE') {
+        const allCards = await this.listRateCards(tenantId, { status: 'ACTIVE' });
+        const conflict = allCards.find(
+          (c) =>
+            c.origin.trim().toLowerCase() === laneOrigin &&
+            c.destination.trim().toLowerCase() === laneDest &&
+            c.vehicle_type.trim().toLowerCase() === laneVehicle &&
+            rateCardData.weight_min_tons < c.weight_max_tons &&
+            rateCardData.weight_max_tons > c.weight_min_tons &&
+            (!rateCardData.effective_to || !c.effective_from || rateCardData.effective_to >= c.effective_from) &&
+            (!c.effective_to || !rateCardData.effective_from || c.effective_to >= rateCardData.effective_from)
+        );
+        if (conflict) {
+          throw new Error(
+            `Conflict: An overlapping ACTIVE rate card already exists for lane ${rateCardData.origin}->${rateCardData.destination} (${rateCardData.vehicle_type}) covering weight band ${conflict.weight_min_tons}-${conflict.weight_max_tons} tons.`
+          );
+        }
+      }
+
+      const id = crypto.randomUUID();
+      const newCard: RateCard = {
+        ...rateCardData,
+        id,
+        tenant_id: rateCardData.tenant_id || tenantId,
+        source_version: rateCardData.source_version || 'v1.0',
+      };
+      assertProductionDbReady();
+      globalStore.rate_cards.unshift(newCard);
+      return newCard;
+    });
   },
 
   async updateRateCard(
@@ -2016,49 +2083,57 @@ export const db = {
     if (updates.quote_type !== undefined) sanitizedUpdates.quote_type = updates.quote_type;
     if (updates.supports_confirmed_quote !== undefined) sanitizedUpdates.supports_confirmed_quote = updates.supports_confirmed_quote;
 
-    const targetStatus = sanitizedUpdates.status !== undefined ? sanitizedUpdates.status : existing.status;
-    if (targetStatus === 'ACTIVE') {
-      const mergedOrigin = (sanitizedUpdates.origin || existing.origin).trim().toLowerCase();
-      const mergedDest = (sanitizedUpdates.destination || existing.destination).trim().toLowerCase();
-      const mergedVehicle = (sanitizedUpdates.vehicle_type || existing.vehicle_type).trim().toLowerCase();
-      const allCards = await this.listRateCards(tenantId, { status: 'ACTIVE' });
-      const conflict = allCards.find(
-        (c) =>
-          c.id !== id &&
-          c.origin.trim().toLowerCase() === mergedOrigin &&
-          c.destination.trim().toLowerCase() === mergedDest &&
-          c.vehicle_type.trim().toLowerCase() === mergedVehicle &&
-          mergedMin < c.weight_max_tons &&
-          mergedMax > c.weight_min_tons &&
-          (!mergedTo || !c.effective_from || mergedTo >= c.effective_from) &&
-          (!c.effective_to || !mergedFrom || c.effective_to >= mergedFrom)
-      );
-      if (conflict) {
-        throw new Error(
-          `Conflict: An overlapping ACTIVE rate card already exists for lane ${existing.origin}->${existing.destination} (${existing.vehicle_type}) covering weight band ${conflict.weight_min_tons}-${conflict.weight_max_tons} tons.`
-        );
-      }
-    }
+    const mergedOrigin = (sanitizedUpdates.origin || existing.origin).trim().toLowerCase();
+    const mergedDest = (sanitizedUpdates.destination || existing.destination).trim().toLowerCase();
+    const mergedVehicle = (sanitizedUpdates.vehicle_type || existing.vehicle_type).trim().toLowerCase();
+    const laneKey = `${tenantId}:${mergedOrigin}:${mergedDest}:${mergedVehicle}`;
 
-    if (await isSupabaseLive()) {
-      const client = createAdminClient();
-      const { data, error } = await client
-        .from('rate_cards')
-        .update(sanitizedUpdates)
-        .eq('id', id)
-        .eq('tenant_id', tenantId)
-        .select()
-        .single();
-      if (!error && data) return data as RateCard;
-    }
-    assertProductionDbReady();
-    const idx = globalStore.rate_cards.findIndex((rc) => rc.id === id && rc.tenant_id === tenantId);
-    if (idx === -1) return null;
-    globalStore.rate_cards[idx] = {
-      ...globalStore.rate_cards[idx],
-      ...sanitizedUpdates,
-    };
-    return globalStore.rate_cards[idx];
+    return withLaneLock(laneKey, async () => {
+      if (await isSupabaseLive()) {
+        const client = createAdminClient();
+        const { data, error } = await client.rpc('update_rate_card_atomic', {
+          p_tenant_id: tenantId,
+          p_id: id,
+          p_updates: sanitizedUpdates,
+        });
+        if (error) {
+          throw new Error(error.message);
+        }
+        if (data && (Array.isArray(data) ? data.length > 0 : data)) {
+          return (Array.isArray(data) ? data[0] : data) as RateCard;
+        }
+      }
+
+      const targetStatus = sanitizedUpdates.status !== undefined ? sanitizedUpdates.status : existing.status;
+      if (targetStatus === 'ACTIVE') {
+        const allCards = await this.listRateCards(tenantId, { status: 'ACTIVE' });
+        const conflict = allCards.find(
+          (c) =>
+            c.id !== id &&
+            c.origin.trim().toLowerCase() === mergedOrigin &&
+            c.destination.trim().toLowerCase() === mergedDest &&
+            c.vehicle_type.trim().toLowerCase() === mergedVehicle &&
+            mergedMin < c.weight_max_tons &&
+            mergedMax > c.weight_min_tons &&
+            (!mergedTo || !c.effective_from || mergedTo >= c.effective_from) &&
+            (!c.effective_to || !mergedFrom || c.effective_to >= mergedFrom)
+        );
+        if (conflict) {
+          throw new Error(
+            `Conflict: An overlapping ACTIVE rate card already exists for lane ${existing.origin}->${existing.destination} (${existing.vehicle_type}) covering weight band ${conflict.weight_min_tons}-${conflict.weight_max_tons} tons.`
+          );
+        }
+      }
+
+      assertProductionDbReady();
+      const idx = globalStore.rate_cards.findIndex((rc) => rc.id === id && rc.tenant_id === tenantId);
+      if (idx === -1) return null;
+      globalStore.rate_cards[idx] = {
+        ...globalStore.rate_cards[idx],
+        ...sanitizedUpdates,
+      };
+      return globalStore.rate_cards[idx];
+    });
   },
 
   // -----------------------------------------------------------------------
@@ -2473,7 +2548,11 @@ export const db = {
     tenantId: string = DEFAULT_TENANT_ID
   ): Promise<{ transferred: boolean; targetNumber?: string; provider?: string; transferId?: string } | null> {
     const exec = await this.getLatestSuccessfulToolExecution(callIdOrExternalId, 'transfer_to_human', tenantId);
-    if (exec && exec.safe_result) {
+    if (
+      exec &&
+      (exec.business_status === 'TRANSFER_CONNECTED' || exec.business_status === 'TRANSFERRED') &&
+      exec.safe_result
+    ) {
       return {
         transferred: true,
         targetNumber: (exec.safe_result.target_phone || exec.safe_result.targetNumber) as string,
@@ -2707,12 +2786,11 @@ export const db = {
     return globalStore.followups.filter((f: FollowupRecord) => f.tenant_id === tenantId);
   },
 
+
   // -----------------------------------------------------------------------
   // DISPATCHER KPIS
   // -----------------------------------------------------------------------
   async getKPIs(tenantId: string = DEFAULT_TENANT_ID): Promise<DispatcherKPIs> {
-    const SUCCESSFUL_STATUSES = new Set(['SUCCESS', 'MATCH', 'FOUND', 'SAVED', 'REQUEST_CREATED', 'SENT', 'TRANSFER_CONNECTED', 'QUOTED']);
-
     if (await isSupabaseLive()) {
       const client = createAdminClient();
       const todayKolkata = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -2742,30 +2820,7 @@ export const db = {
       const hotLeadsCount = hotLeadsRes.count ?? 0;
       const warmLeadsCount = warmLeadsRes.count ?? 0;
 
-      const measuredLatencies: number[] = [];
-      let totalToolAttempts = 0;
-      let successfulToolExecutions = 0;
-
-      if (toolExecRes.data && toolExecRes.data.length > 0) {
-        for (const te of toolExecRes.data) {
-          totalToolAttempts++;
-          const isSuccess = te.success === true || (typeof te.execution_status === 'string' && SUCCESSFUL_STATUSES.has(te.execution_status.toUpperCase()));
-          if (isSuccess) {
-            successfulToolExecutions++;
-          }
-          if (typeof te.latency_ms === 'number' && te.latency_ms > 0) {
-            measuredLatencies.push(te.latency_ms);
-          }
-        }
-      }
-
-      const toolSuccessRate = totalToolAttempts > 0
-        ? Math.round((successfulToolExecutions / totalToolAttempts) * 100)
-        : null;
-
-      const avgToolLatencyMs = measuredLatencies.length > 0
-        ? Math.round(measuredLatencies.reduce((acc, l) => acc + l, 0) / measuredLatencies.length)
-        : null;
+      const { avg_response_latency_ms, tool_success_rate_percent } = computeToolAggregates(toolExecRes.data || []);
 
       return {
         calls_today: callsTodayCount,
@@ -2775,8 +2830,8 @@ export const db = {
         open_requests: openReqsCount,
         hot_leads: hotLeadsCount,
         warm_leads: warmLeadsCount,
-        avg_response_latency_ms: avgToolLatencyMs,
-        tool_success_rate_percent: toolSuccessRate,
+        avg_response_latency_ms,
+        tool_success_rate_percent,
       };
     }
 
@@ -2800,28 +2855,7 @@ export const db = {
       return callDateStr === todayStr;
     });
 
-    const measuredLatencies: number[] = [];
-    let totalToolAttempts = 0;
-    let successfulToolExecutions = 0;
-
-    for (const te of toolExecs) {
-      totalToolAttempts++;
-      const isSuccess = te.success === true || SUCCESSFUL_STATUSES.has(te.execution_status?.toUpperCase() || '');
-      if (isSuccess) {
-        successfulToolExecutions++;
-      }
-      if (typeof te.latency_ms === 'number' && te.latency_ms > 0) {
-        measuredLatencies.push(te.latency_ms);
-      }
-    }
-
-    const toolSuccessRate = totalToolAttempts > 0
-      ? Math.round((successfulToolExecutions / totalToolAttempts) * 100)
-      : null;
-
-    const avgToolLatencyMs = measuredLatencies.length > 0
-      ? Math.round(measuredLatencies.reduce((acc, l) => acc + l, 0) / measuredLatencies.length)
-      : null;
+    const { avg_response_latency_ms, tool_success_rate_percent } = computeToolAggregates(toolExecs);
 
     return {
       calls_today: callsToday.length,
@@ -2831,8 +2865,8 @@ export const db = {
       open_requests: openReqs,
       hot_leads: hotLeads,
       warm_leads: warmLeads,
-      avg_response_latency_ms: avgToolLatencyMs,
-      tool_success_rate_percent: toolSuccessRate,
+      avg_response_latency_ms,
+      tool_success_rate_percent,
     };
   },
 
@@ -2998,25 +3032,7 @@ export const db = {
       return;
     }
 
-    assertProductionDbReady();
-    const claim = globalStore.side_effect_claims.find(
-      (c) => c.tenant_id === tenantId && c.claim_key === claimKey
-    );
-    if (!claim) {
-      throw new SideEffectPersistenceError(`Claim '${claimKey}' not found`, { tenantId, claimKey });
-    }
-    if (claim.status !== 'PROCESSING') {
-      throw new SideEffectPersistenceError(
-        `Cannot complete claim '${claimKey}' in non-PROCESSING status '${claim.status}'`,
-        { tenantId, claimKey, status: claim.status }
-      );
-    }
-    if (claim.claim_token && claim.claim_token !== claimToken) {
-      throw new SideEffectPersistenceError(
-        `Cannot complete claim '${claimKey}': claim_token mismatch`,
-        { tenantId, claimKey, expected: claim.claim_token, actual: claimToken }
-      );
-    }
+    const claim = getValidProcessingClaim(tenantId, claimKey, claimToken, 'complete');
     const nowIso = new Date().toISOString();
     claim.status = 'SUCCEEDED';
     claim.completed_at = nowIso;
@@ -3066,25 +3082,7 @@ export const db = {
       return;
     }
 
-    assertProductionDbReady();
-    const claim = globalStore.side_effect_claims.find(
-      (c) => c.tenant_id === tenantId && c.claim_key === claimKey
-    );
-    if (!claim) {
-      throw new SideEffectPersistenceError(`Claim '${claimKey}' not found`, { tenantId, claimKey });
-    }
-    if (claim.status !== 'PROCESSING') {
-      throw new SideEffectPersistenceError(
-        `Cannot fail claim '${claimKey}' in non-PROCESSING status '${claim.status}'`,
-        { tenantId, claimKey, status: claim.status }
-      );
-    }
-    if (claim.claim_token && claim.claim_token !== claimToken) {
-      throw new SideEffectPersistenceError(
-        `Cannot fail claim '${claimKey}': claim_token mismatch`,
-        { tenantId, claimKey, expected: claim.claim_token, actual: claimToken }
-      );
-    }
+    const claim = getValidProcessingClaim(tenantId, claimKey, claimToken, 'fail');
     const nowIso = new Date().toISOString();
     const status: SideEffectStatus = isRetryable ? 'RETRYABLE' : 'FAILED';
     const nextRetry = isRetryable ? new Date(Date.now() + retryDelayMs).toISOString() : null;
@@ -3134,25 +3132,7 @@ export const db = {
       return;
     }
 
-    assertProductionDbReady();
-    const claim = globalStore.side_effect_claims.find(
-      (c) => c.tenant_id === tenantId && c.claim_key === claimKey
-    );
-    if (!claim) {
-      throw new SideEffectPersistenceError(`Claim '${claimKey}' not found`, { tenantId, claimKey });
-    }
-    if (claim.status !== 'PROCESSING') {
-      throw new SideEffectPersistenceError(
-        `Cannot record unknown for claim '${claimKey}' in non-PROCESSING status '${claim.status}'`,
-        { tenantId, claimKey, status: claim.status }
-      );
-    }
-    if (claim.claim_token && claim.claim_token !== claimToken) {
-      throw new SideEffectPersistenceError(
-        `Cannot record unknown for claim '${claimKey}': claim_token mismatch`,
-        { tenantId, claimKey, expected: claim.claim_token, actual: claimToken }
-      );
-    }
+    const claim = getValidProcessingClaim(tenantId, claimKey, claimToken, 'record unknown for');
     const nowIso = new Date().toISOString();
     claim.status = 'UNKNOWN';
     claim.last_error = errorMessage;
@@ -3185,13 +3165,12 @@ export const db = {
     const nowIso = new Date().toISOString();
     if (await isSupabaseLive()) {
       const client = createAdminClient();
+      // Discover RETRYABLE with next_retry_at <= now AND expired PROCESSING with lease_expires_at < now
       const { data, error } = await client
         .from('side_effect_claims')
         .select('*')
-        .eq('status', 'RETRYABLE')
-        .lte('next_retry_at', nowIso)
-        .or(`lease_expires_at.is.null,lease_expires_at.lt.${nowIso}`)
-        .order('next_retry_at', { ascending: true })
+        .or(`and(status.eq.RETRYABLE,next_retry_at.lte.${nowIso}),and(status.eq.PROCESSING,lease_expires_at.lt.${nowIso})`)
+        .order('next_retry_at', { ascending: true, nullsFirst: false })
         .limit(limit);
 
       if (error || !data) return [];
@@ -3200,15 +3179,73 @@ export const db = {
 
     assertProductionDbReady();
     return globalStore.side_effect_claims
-      .filter(
-        (c) =>
-          c.status === 'RETRYABLE' &&
-          c.next_retry_at &&
-          c.next_retry_at <= nowIso &&
-          (c.attempt_count || 0) < (c.max_attempts || 3) &&
-          (!c.lease_expires_at || c.lease_expires_at < nowIso)
-      )
+      .filter((c) => {
+        if ((c.attempt_count || 0) >= (c.max_attempts || 3)) return false;
+        if (c.status === 'RETRYABLE') {
+          return (!c.next_retry_at || c.next_retry_at <= nowIso) && (!c.lease_expires_at || c.lease_expires_at < nowIso);
+        }
+        if (c.status === 'PROCESSING') {
+          return Boolean(c.lease_expires_at && c.lease_expires_at < nowIso);
+        }
+        return false;
+      })
       .slice(0, limit);
+  },
+
+  async listUnknownClaims(limit = 20): Promise<SideEffectClaim[]> {
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const { data, error } = await client
+        .from('side_effect_claims')
+        .select('*')
+        .eq('status', 'UNKNOWN')
+        .order('updated_at', { ascending: true })
+        .limit(limit);
+
+      if (error || !data) return [];
+      return data as SideEffectClaim[];
+    }
+
+    assertProductionDbReady();
+    return globalStore.side_effect_claims
+      .filter((c) => c.status === 'UNKNOWN')
+      .slice(0, limit);
+  },
+
+  async updateClaimReconciliation(
+    tenantId: string,
+    claimKey: string,
+    resultStatus: string,
+    providerRef?: string
+  ): Promise<void> {
+    const nowIso = new Date().toISOString();
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      const updates: Record<string, unknown> = {
+        updated_at: nowIso,
+      };
+      if (providerRef) {
+        updates.provider_reference = providerRef;
+      }
+      await client
+        .from('side_effect_claims')
+        .update(updates)
+        .eq('tenant_id', tenantId)
+        .eq('claim_key', claimKey);
+      return;
+    }
+
+    assertProductionDbReady();
+    const claim = globalStore.side_effect_claims.find(
+      (c) => c.tenant_id === tenantId && c.claim_key === claimKey
+    );
+    if (claim) {
+      claim.last_reconciled_at = nowIso;
+      claim.reconciliation_attempts = (claim.reconciliation_attempts || 0) + 1;
+      claim.reconciliation_result = resultStatus;
+      if (providerRef) claim.provider_reference = providerRef;
+      claim.updated_at = nowIso;
+    }
   },
 
   // -----------------------------------------------------------------------

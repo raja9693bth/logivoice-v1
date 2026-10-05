@@ -74,12 +74,6 @@ export default function LoginPage() {
     }
   };
 
-  const handleDemoFill = () => {
-    setEmail('dispatcher@logivoice.local');
-    setPassword('LogiVoice@2026');
-    setError(null);
-  };
-
   const handleDevBypass = () => {
     if (process.env.NODE_ENV === 'production') return;
     document.cookie = 'logivoice_dev_session=true; path=/; max-age=86400; SameSite=Lax';
@@ -185,19 +179,9 @@ export default function LoginPage() {
             </button>
           </form>
 
-          {/* Development / Demo Autofill Helper */}
+          {/* Development / Demo Evaluation Helper */}
           {isDev && (
             <div className="pt-2 border-t border-slate-200 dark:border-slate-800/60 flex flex-col gap-2 text-[11px] text-slate-500 dark:text-slate-400">
-              <div className="flex items-center justify-between">
-                <span>Development Evaluation?</span>
-                <button
-                  type="button"
-                  onClick={handleDemoFill}
-                  className="text-sky-600 dark:text-sky-400 hover:text-sky-700 dark:hover:text-sky-300 underline font-medium focus:outline-hidden cursor-pointer"
-                >
-                  Autofill Credentials
-                </button>
-              </div>
               <div className="flex items-center justify-between">
                 <span>Offline / Local Dev Mode:</span>
                 <button

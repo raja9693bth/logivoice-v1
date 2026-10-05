@@ -86,9 +86,22 @@ export async function executeProviderCallTransfer(
       const authHeader = `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}`;
       const providerUrl = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Calls/${encodeURIComponent(req.callId!)}.json`;
 
-      const safeCallerPhone = req.callerPhone ? escapeXml(req.callerPhone.replace(/[^0-9+]/g, '')) : '';
-      const safeTargetPhone = escapeXml(req.targetPhone.replace(/[^0-9+]/g, ''));
-      const safeTwiml = `<Response><Dial callerId="${safeCallerPhone}">${safeTargetPhone}</Dial></Response>`;
+      const E164_PHONE_REGEX = /^\+?[1-9]\d{1,14}$/;
+      const cleanTargetPhone = req.targetPhone.replace(/[\s()-]/g, '');
+      if (!E164_PHONE_REGEX.test(cleanTargetPhone)) {
+        return {
+          success: false,
+          status: 'PROVIDER_ERROR',
+          provider: 'TWILIO_REST_GATEWAY',
+          error: 'Target phone number does not conform to valid E.164 standard.',
+          message: 'Invalid target phone format for call transfer.',
+        };
+      }
+
+      const cleanCallerPhone = req.callerPhone ? req.callerPhone.replace(/[\s()-]/g, '') : '';
+      const safeCallerPhone = cleanCallerPhone && E164_PHONE_REGEX.test(cleanCallerPhone) ? cleanCallerPhone : '';
+      const callerAttr = safeCallerPhone ? ` callerId="${encodeURIComponent(safeCallerPhone)}"` : '';
+      const safeTwiml = `<Response><Dial${callerAttr}>${encodeURIComponent(cleanTargetPhone)}</Dial></Response>`;
 
       const res = await fetch(providerUrl, {
         method: 'POST',

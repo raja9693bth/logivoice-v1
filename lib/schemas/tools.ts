@@ -145,7 +145,16 @@ export const TransferToHumanInputSchema = z.object({
 });
 
 export const TransferToHumanOutputSchema = z.object({
-  status: z.enum(['TRANSFERRED', 'TRANSFER_UNAVAILABLE', 'CALLBACK_SCHEDULED', 'FAILED']),
+  status: z.enum([
+    'TRANSFERRED',
+    'TRANSFER_REQUEST_ACCEPTED',
+    'TRANSFER_INITIATED',
+    'TRANSFER_CONNECTED',
+    'TRANSFER_RINGING',
+    'TRANSFER_UNAVAILABLE',
+    'CALLBACK_SCHEDULED',
+    'FAILED',
+  ]),
   target_phone: z.string().optional(),
   target_role: z.string().optional(),
   callback_reference: z.string().optional(),

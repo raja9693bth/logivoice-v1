@@ -289,7 +289,7 @@ export async function dispatchTool(
       (tool_name === 'get_tracking_status' && businessStatus === 'FOUND') ||
       (tool_name === 'create_booking_request' && (businessStatus === 'CONFIRMED' || businessStatus === 'PENDING_CONFIRMATION')) ||
       (tool_name === 'create_support_ticket' && businessStatus === 'SUCCESS') ||
-      (tool_name === 'transfer_to_human' && (businessStatus === 'TRANSFERRED' || businessStatus === 'TRANSFER_REQUEST_ACCEPTED')) ||
+      (tool_name === 'transfer_to_human' && (businessStatus === 'TRANSFERRED' || businessStatus === 'TRANSFER_CONNECTED')) ||
       (tool_name === 'send_followup' && (businessStatus === 'SENT' || businessStatus === 'DELIVERED')) ||
       (tool_name === 'save_call_outcome' && businessStatus === 'SAVED') ||
       (tool_name === 'lookup_customer' && businessStatus === 'FOUND');

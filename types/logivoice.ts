@@ -93,6 +93,10 @@ export interface SideEffectClaim {
   lease_expires_at?: string;
   next_retry_at?: string;
   completed_at?: string;
+  last_reconciled_at?: string;
+  reconciliation_attempts?: number;
+  provider_reference?: string;
+  reconciliation_result?: string | Record<string, unknown>;
   created_at: string;
   updated_at: string;
 }

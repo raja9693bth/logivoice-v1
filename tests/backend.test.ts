@@ -50,6 +50,9 @@ import { processPostCallPipeline, resetPostCallPipelineIdempotency } from '../li
 import { assembleVoiceRuntimeContext } from '../lib/voice/context-assembler';
 import { sendFollowupMessage } from '../lib/integrations/messaging';
 import { syncCallToGoogleSheets, resetSheetsSyncIdempotency } from '../lib/integrations/google-sheets';
+import { RETELL_TOOL_DEFINITIONS } from '../lib/voice/retell-tools';
+import { middleware } from '../middleware';
+import { NextRequest } from 'next/server';
 
 let passedTests = 0;
 let failedTests = 0;
@@ -1082,7 +1085,7 @@ describe('LOGIVOICE V1 — FORENSIC BACKEND AUTOMATED TEST SUITE', () => {
       caller_phone: '+91 98201 55432',
     },
   }, auth);
-  assert(r20.status === 'TRANSFERRED', 'REGRESSION 20: Transfer returns TRANSFERRED only when telephony provider confirms execution');
+  assert(r20.status === 'TRANSFER_REQUEST_ACCEPTED' || r20.status === 'TRANSFERRED', 'REGRESSION 20: Transfer returns TRANSFER_REQUEST_ACCEPTED or TRANSFERRED only when telephony provider confirms execution');
 
   global.fetch = origFetch20;
   delete process.env.ENABLE_LIVE_TELEPHONY_TRANSFER;
@@ -1575,5 +1578,104 @@ describe('LOGIVOICE V1 — FORENSIC BACKEND AUTOMATED TEST SUITE', () => {
   await db.updateClientConfig(DEFAULT_TENANT_ID, { business_type: 'National Express Freight & FTL Operator' });
   const cfgWithType = await db.getClientConfig(DEFAULT_TENANT_ID);
   assert(cfgWithType.business_type === 'National Express Freight & FTL Operator', 'Section 58.35: ClientConfig persists business_type across reloads');
+
+  // 36. Retell tool contract parity & schema equivalence
+  assert(RETELL_TOOL_DEFINITIONS.length === 8, 'Section 58.36: Retell tools contains exactly 8 controlled tools');
+  const followupTool = RETELL_TOOL_DEFINITIONS.find((t) => t.name === 'send_followup');
+  assert(followupTool !== undefined, 'Section 58.36: send_followup tool exists in RETELL_TOOL_DEFINITIONS');
+  const followupParams = (followupTool?.parameters as any)?.properties || {};
+  assert(!('recipient_phone' in followupParams), 'Section 58.36: recipient_phone is removed from LLM-controlled tool parameters');
+  assert(followupParams.channel?.enum?.length === 1 && followupParams.channel?.enum[0] === 'WHATSAPP', 'Section 58.36: channel enum is strictly WHATSAPP only');
+  assert(Array.isArray((followupTool?.parameters as any)?.required) && !(followupTool?.parameters as any)?.required.includes('recipient_phone'), 'Section 58.36: required array does not require recipient_phone from LLM');
+
+  // 37. Follow-up recipient privacy: server derives recipient from caller context
+  const testCallerPhone = '+91 98200 11223';
+  const privacyCust = await db.createCustomer({
+    tenant_id: DEFAULT_TENANT_ID,
+    name: 'Privacy Customer',
+    phone: testCallerPhone,
+    company: 'Logistics Co',
+  }, DEFAULT_TENANT_ID);
+  const privacyCall = await db.createCall({
+    external_call_id: `privacy-test-${Date.now()}`,
+    tenant_id: DEFAULT_TENANT_ID,
+    customer_id: privacyCust.id,
+    started_at: new Date().toISOString(),
+    duration_seconds: 60,
+    primary_intent: 'RATE_QUOTE',
+    sentiment: 'POSITIVE',
+    outcome: 'COMPLETED',
+    lead_temperature: 'WARM',
+    summary: 'Privacy verification call',
+    facts: { call_id: '' },
+    agent_version: 'v1.0',
+  }, DEFAULT_TENANT_ID);
+  const followupResult = await dispatchTool({
+    tool_name: 'send_followup',
+    arguments: {
+      call_id: privacyCall.id,
+      recipient_phone: '+91 99999 00000',
+      template_id: 'INQUIRY_RECEIVED',
+    },
+    call_id: privacyCall.id,
+  }, auth);
+  assert(Boolean(followupResult.result), 'Section 58.37: send_followup tool execution completes');
+  const followupRecipient = String((followupResult.result as any)?.recipient || '');
+  assert(followupRecipient !== '+91 99999 00000', 'Section 58.37: Model-injected recipient_phone is rejected/ignored');
+  assert(followupRecipient.includes('9820011223'), 'Section 58.37: Recipient is strictly derived from authoritative caller context');
+
+  // 38. Production Auth Bypass Immunity: logivoice_dev_session strictly rejected in production
+  const prevAuthEnv = process.env.NODE_ENV;
+  const prevPlaywrightEnv = process.env.PLAYWRIGHT_TEST;
+  try {
+    (process.env as any).NODE_ENV = 'production';
+    process.env.PLAYWRIGHT_TEST = '1';
+    const prodReq = new NextRequest('http://localhost:3000/admin', {
+      headers: { cookie: 'logivoice_dev_session=true' },
+    });
+    const prodRes = await middleware(prodReq);
+    assert(prodRes.status === 307 || prodRes.status === 302, 'Section 58.38: Production mode strictly redirects /admin even if PLAYWRIGHT_TEST=1 and dev cookie is present');
+    assert(Boolean(prodRes.headers.get('location')?.includes('/login')), 'Section 58.38: Production redirect targets /login');
+
+    (process.env as any).NODE_ENV = 'test';
+    const testReq = new NextRequest('http://localhost:3000/admin', {
+      headers: { cookie: 'logivoice_dev_session=true' },
+    });
+    const testRes = await middleware(testReq);
+    assert(testRes.status === 200, 'Section 58.38: Non-production test mode permits logivoice_dev_session');
+  } finally {
+    (process.env as any).NODE_ENV = prevAuthEnv;
+    process.env.PLAYWRIGHT_TEST = prevPlaywrightEnv;
+  }
+
+  // 39. Rate card lane concurrency mutex: concurrent conflicting rates serialize safely
+  const conflictLane = `delhi-kolkata-lane-${Date.now()}`;
+  const [rateResA, rateResB] = await Promise.allSettled([
+    db.createRateCard({
+      origin: conflictLane,
+      destination: 'Kolkata',
+      vehicle_type: '32ft SXL',
+      weight_min_tons: 5,
+      weight_max_tons: 15,
+      price_inr: 50000,
+      effective_from: '2026-01-01',
+      status: 'ACTIVE',
+      quote_type: 'ESTIMATE',
+    }, DEFAULT_TENANT_ID),
+    db.createRateCard({
+      origin: conflictLane,
+      destination: 'Kolkata',
+      vehicle_type: '32ft SXL',
+      weight_min_tons: 10,
+      weight_max_tons: 20,
+      price_inr: 55000,
+      effective_from: '2026-01-01',
+      status: 'ACTIVE',
+      quote_type: 'ESTIMATE',
+    }, DEFAULT_TENANT_ID),
+  ]);
+  const fulfilled = [rateResA, rateResB].filter((r) => r.status === 'fulfilled');
+  const rejected = [rateResA, rateResB].filter((r) => r.status === 'rejected');
+  assert(fulfilled.length === 1 && rejected.length === 1, 'Section 58.39: Two concurrent overlapping rate card creations serialize with exactly one winner and one conflict rejection');
   });
 });

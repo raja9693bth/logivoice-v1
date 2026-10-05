@@ -101,20 +101,30 @@ export async function executeTransferToHuman(
           providerResult.status === 'TRANSFER_REQUEST_ACCEPTED' ||
           providerResult.status === 'TRANSFER_CONNECTED')
       ) {
+        const transferBusinessStatus =
+          providerResult.status === 'TRANSFER_CONNECTED'
+            ? 'TRANSFER_CONNECTED'
+            : 'TRANSFER_REQUEST_ACCEPTED';
+
         // Audit log verified provider escalation
         await logTransferAudit(tenantId, input.call_id, input.reason, targetContact.role, targetPhone, {
           context_summary: input.context_summary,
           provider: providerResult.provider,
           provider_transfer_id: providerResult.providerTransferId,
-          transfer_state: providerResult.status,
+          transfer_state: transferBusinessStatus,
           provider_confirmed: true,
         });
 
+        const statusMessage =
+          transferBusinessStatus === 'TRANSFER_CONNECTED'
+            ? `Transfer connected to ${targetContact.name} (${targetContact.role}) at ${targetPhone}.`
+            : `Transfer request accepted by provider for ${targetContact.name} (${targetContact.role}) at ${targetPhone}. Awaiting bridge connection.`;
+
         return {
-          status: 'TRANSFERRED',
+          status: transferBusinessStatus,
           target_role: targetContact.role,
           target_phone: targetPhone,
-          message: `Transferring caller to ${targetContact.name} (${targetContact.role}) at ${targetPhone}. Escalation reason: ${input.reason}.`,
+          message: statusMessage,
         };
       }
 

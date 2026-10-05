@@ -31,6 +31,47 @@ export const IsoCalendarDateSchema = z
   );
 
 // =========================================================================
+// SHARED CANONICAL ENUMS
+// =========================================================================
+export const CallIntentEnum = z.enum([
+  'RATE_QUOTE',
+  'TRACKING',
+  'BOOKING',
+  'SERVICE_AREA',
+  'GENERAL',
+  'COMPLAINT',
+  'HUMAN_REQUEST',
+  'EXISTING_CUSTOMER',
+  'UNSUPPORTED_REQUEST',
+]);
+
+export const CallSentimentEnum = z.enum(['POSITIVE', 'NEUTRAL', 'FRUSTRATED', 'ANGRY']);
+
+export const CallOutcomeEnum = z.enum([
+  'IN_PROGRESS',
+  'COMPLETED',
+  'TRANSFERRED',
+  'CALLBACK_SCHEDULED',
+  'MISSED',
+  'FAILED',
+  'ABANDONED',
+]);
+
+export const KnowledgeCategoryEnum = z.enum([
+  'RATE_POLICY',
+  'TRACKING_POLICY',
+  'SERVICE_AREA',
+  'BOOKING_RULES',
+  'OPERATIONAL_FAQ',
+  'ESCALATION_RULES',
+  'SERVICE_RULE',
+  'SURCHARGE_POLICY',
+  'COMMERCIAL_CLAUSE',
+]);
+
+export const KnowledgeStatusEnum = z.enum(['APPROVED', 'DRAFT', 'UNDER_REVIEW', 'ARCHIVED']);
+
+// =========================================================================
 // CALLS API SCHEMAS
 export const CallFactsApiSchema = z
   .object({
@@ -66,21 +107,9 @@ export const CreateCallApiSchema = z.object({
   started_at: z.string().datetime().optional(),
   ended_at: z.string().datetime().optional(),
   duration_seconds: z.number().int().nonnegative().max(86400).default(0),
-  primary_intent: z
-    .enum([
-      'RATE_QUOTE',
-      'TRACKING',
-      'BOOKING',
-      'SERVICE_AREA',
-      'GENERAL',
-      'COMPLAINT',
-      'HUMAN_REQUEST',
-      'EXISTING_CUSTOMER',
-      'UNSUPPORTED_REQUEST',
-    ])
-    .default('GENERAL'),
-  sentiment: z.enum(['POSITIVE', 'NEUTRAL', 'FRUSTRATED', 'ANGRY']).default('NEUTRAL'),
-  outcome: z.enum(['IN_PROGRESS', 'COMPLETED', 'TRANSFERRED', 'CALLBACK_SCHEDULED', 'MISSED', 'FAILED', 'ABANDONED']).default('IN_PROGRESS'),
+  primary_intent: CallIntentEnum.default('GENERAL'),
+  sentiment: CallSentimentEnum.default('NEUTRAL'),
+  outcome: CallOutcomeEnum.default('IN_PROGRESS'),
   summary: z.string().max(4000).default(''),
   facts: CallFactsApiSchema,
   escalation_status: CallEscalationStatusApiSchema,
@@ -90,21 +119,9 @@ export const CreateCallApiSchema = z.object({
 export const UpdateCallApiSchema = z.object({
   ended_at: z.string().datetime().optional(),
   duration_seconds: z.number().int().nonnegative().max(86400).optional(),
-  primary_intent: z
-    .enum([
-      'RATE_QUOTE',
-      'TRACKING',
-      'BOOKING',
-      'SERVICE_AREA',
-      'GENERAL',
-      'COMPLAINT',
-      'HUMAN_REQUEST',
-      'EXISTING_CUSTOMER',
-      'UNSUPPORTED_REQUEST',
-    ])
-    .optional(),
-  sentiment: z.enum(['POSITIVE', 'NEUTRAL', 'FRUSTRATED', 'ANGRY']).optional(),
-  outcome: z.enum(['IN_PROGRESS', 'COMPLETED', 'TRANSFERRED', 'CALLBACK_SCHEDULED', 'MISSED', 'FAILED', 'ABANDONED']).optional(),
+  primary_intent: CallIntentEnum.optional(),
+  sentiment: CallSentimentEnum.optional(),
+  outcome: CallOutcomeEnum.optional(),
   lead_temperature: z.enum(['HOT', 'WARM', 'COLD', 'REVIEW']).optional(),
   summary: z.string().max(4000).optional(),
   facts: CallFactsApiSchema,
@@ -208,41 +225,19 @@ export const UpdateRateCardApiSchema = z.object({
 // KNOWLEDGE BASE API SCHEMAS
 // =========================================================================
 export const CreateKnowledgeApiSchema = z.object({
-  category: z.enum([
-    'RATE_POLICY',
-    'TRACKING_POLICY',
-    'SERVICE_AREA',
-    'BOOKING_RULES',
-    'OPERATIONAL_FAQ',
-    'ESCALATION_RULES',
-    'SERVICE_RULE',
-    'SURCHARGE_POLICY',
-    'COMMERCIAL_CLAUSE',
-  ]),
+  category: KnowledgeCategoryEnum,
   title: z.string().min(3).max(200),
   content: z.string().min(5).max(5000),
-  status: z.enum(['APPROVED', 'DRAFT', 'UNDER_REVIEW', 'ARCHIVED']).default('DRAFT'),
+  status: KnowledgeStatusEnum.default('DRAFT'),
   version: z.string().max(32).default('1.0'),
 }).strict();
 
 export const UpdateKnowledgeApiSchema = z.object({
   id: z.string().min(1),
-  category: z
-    .enum([
-      'RATE_POLICY',
-      'TRACKING_POLICY',
-      'SERVICE_AREA',
-      'BOOKING_RULES',
-      'OPERATIONAL_FAQ',
-      'ESCALATION_RULES',
-      'SERVICE_RULE',
-      'SURCHARGE_POLICY',
-      'COMMERCIAL_CLAUSE',
-    ])
-    .optional(),
+  category: KnowledgeCategoryEnum.optional(),
   title: z.string().min(3).max(200).optional(),
   content: z.string().min(5).max(5000).optional(),
-  status: z.enum(['APPROVED', 'DRAFT', 'UNDER_REVIEW', 'ARCHIVED']).optional(),
+  status: KnowledgeStatusEnum.optional(),
 }).strict();
 
 // =========================================================================

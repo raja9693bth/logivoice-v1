@@ -22,6 +22,8 @@ import { MOCK_CALLS } from '@/lib/mock/logivoice-data';
 import { formatCurrencyINR, formatDuration, formatDateTime } from '@/lib/utils';
 import { Drawer } from '@/components/ui/Drawer';
 import { EmptyState } from '@/components/ui/EmptyState';
+import { PaginationControls } from '@/components/ui/PaginationControls';
+import { ErrorAlert } from '@/components/ui/ErrorAlert';
 import { Call } from '@/types/logivoice';
 
 function CallsPageContent() {
@@ -138,21 +140,7 @@ function CallsPageContent() {
       </div>
 
       {/* Error Alert */}
-      {error && (
-        <div className="p-4 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 flex items-center justify-between text-xs text-rose-800 dark:text-rose-300">
-          <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600 dark:text-rose-400" />
-            <span>{error}</span>
-          </div>
-          <button
-            type="button"
-            onClick={fetchCalls}
-            className="px-2.5 py-1 rounded-md bg-rose-600 hover:bg-rose-500 text-white font-medium text-[11px] transition-colors cursor-pointer"
-          >
-            Retry
-          </button>
-        </div>
-      )}
+      <ErrorAlert error={error} onDismiss={() => setError(null)} />
 
       {/* Filter & Search Bar */}
       <div className="p-4 rounded-xl bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 space-y-3 shadow-xs">
@@ -344,33 +332,15 @@ function CallsPageContent() {
       )}
 
       {/* Pagination Controls */}
-      {totalCount > PAGE_SIZE && (
-        <div className="flex items-center justify-between px-3 py-3 rounded-xl bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-xs">
-          <span className="text-slate-500 dark:text-slate-400">
-            Showing <span className="font-semibold text-slate-900 dark:text-white">{offset + 1}</span> to{' '}
-            <span className="font-semibold text-slate-900 dark:text-white">{Math.min(offset + calls.length, totalCount)}</span> of{' '}
-            <span className="font-semibold text-slate-900 dark:text-white">{totalCount}</span> sessions
-          </span>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-              disabled={offset === 0 || isLoading}
-              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
-            >
-              Previous
-            </button>
-            <button
-              type="button"
-              onClick={() => setOffset(offset + PAGE_SIZE)}
-              disabled={offset + calls.length >= totalCount || isLoading}
-              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
-            >
-              Next
-            </button>
-          </div>
-        </div>
-      )}
+      <PaginationControls
+        offset={offset}
+        limit={PAGE_SIZE}
+        totalCount={totalCount}
+        currentCount={calls.length}
+        itemLabel="sessions"
+        isLoading={isLoading}
+        onPageChange={(newOffset) => setOffset(newOffset)}
+      />
 
       {/* Quick View Drawer */}
       <Drawer

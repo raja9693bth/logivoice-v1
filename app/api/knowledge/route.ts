@@ -4,6 +4,7 @@ import { db } from '@/lib/db';
 import { retrieveRelevantKnowledge } from '@/lib/knowledge/retrieval';
 import { CreateKnowledgeApiSchema, UpdateKnowledgeApiSchema, ListKnowledgeQuerySchema } from '@/lib/schemas/api';
 import { handleApiError } from '@/lib/api/error-handler';
+import { parseAndValidateJson } from '@/lib/api/request-helper';
 
 export async function GET(req: NextRequest) {
   try {
@@ -60,22 +61,9 @@ export async function POST(req: NextRequest) {
     const authContext = await getAuthContext(req);
     requireRole(authContext, ['ADMIN', 'OPS_MANAGER', 'SYSTEM']);
 
-    let body: unknown;
-    try {
-      body = await req.json();
-    } catch {
-      return NextResponse.json({ error: 'Malformed JSON payload' }, { status: 400 });
-    }
+    const { data: val, errorResponse } = await parseAndValidateJson(req, CreateKnowledgeApiSchema);
+    if (errorResponse) return errorResponse;
 
-    const parseResult = CreateKnowledgeApiSchema.safeParse(body);
-    if (!parseResult.success) {
-      return NextResponse.json(
-        { error: 'Validation failed', details: parseResult.error.flatten() },
-        { status: 400 }
-      );
-    }
-
-    const val = parseResult.data;
     // Policy rule: New knowledge items MUST always start in DRAFT status
     const newItem = await db.createKnowledgeItem(
       {
@@ -119,22 +107,10 @@ export async function PATCH(req: NextRequest) {
     const authContext = await getAuthContext(req);
     requireRole(authContext, ['ADMIN', 'OPS_MANAGER', 'SYSTEM']);
 
-    let body: unknown;
-    try {
-      body = await req.json();
-    } catch {
-      return NextResponse.json({ error: 'Malformed JSON payload' }, { status: 400 });
-    }
+    const { data: patchData, errorResponse } = await parseAndValidateJson(req, UpdateKnowledgeApiSchema);
+    if (errorResponse) return errorResponse;
 
-    const parseResult = UpdateKnowledgeApiSchema.safeParse(body);
-    if (!parseResult.success) {
-      return NextResponse.json(
-        { error: 'Validation failed', details: parseResult.error.flatten() },
-        { status: 400 }
-      );
-    }
-
-    const { id, ...updates } = parseResult.data;
+    const { id, ...updates } = patchData;
     const finalUpdates = {
       ...updates,
       ...(updates.status === 'APPROVED' ? { approved_by: authContext.userId, approved_at: new Date().toISOString() } : {}),

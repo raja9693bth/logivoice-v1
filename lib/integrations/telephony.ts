@@ -37,6 +37,18 @@ export interface TelephonyTransferResult {
 }
 
 /**
+ * Sanitizes XML attribute and element values to prevent XML injection (CWE-91).
+ */
+export function escapeXml(unsafe: string): string {
+  return unsafe
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/**
  * Invokes live provider transfer operation.
  * Supported providers: Twilio REST API / SIP Referral, Retell Telephony Bridge.
  */
@@ -74,6 +86,10 @@ export async function executeProviderCallTransfer(
       const authHeader = `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}`;
       const providerUrl = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Calls/${encodeURIComponent(req.callId!)}.json`;
 
+      const safeCallerPhone = req.callerPhone ? escapeXml(req.callerPhone.replace(/[^0-9+]/g, '')) : '';
+      const safeTargetPhone = escapeXml(req.targetPhone.replace(/[^0-9+]/g, ''));
+      const safeTwiml = `<Response><Dial callerId="${safeCallerPhone}">${safeTargetPhone}</Dial></Response>`;
+
       const res = await fetch(providerUrl, {
         method: 'POST',
         headers: {
@@ -82,7 +98,7 @@ export async function executeProviderCallTransfer(
         },
         body: new URLSearchParams({
           To: req.targetPhone,
-          Twiml: `<Response><Dial callerId="${req.callerPhone || ''}">${req.targetPhone}</Dial></Response>`,
+          Twiml: safeTwiml,
         }).toString(),
         signal: controller.signal,
       });

@@ -17,8 +17,21 @@ export default function LoginPage() {
 
   useEffect(() => {
     setIsDev(process.env.NODE_ENV !== 'production');
+    let errCode: string | null = null;
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      errCode = params.get('error');
+      if (errCode === 'AUTH_TEMPORARILY_UNAVAILABLE') {
+        setError('Authentication service is temporarily unavailable. Please retry in a few moments.');
+        return;
+      }
+      if (errCode === 'DEPLOYMENT_CONFIGURATION_REQUIRED') {
+        setError('Deployment configuration required: Supabase credentials must be configured.');
+        return;
+      }
+    }
     const cfg = getSupabaseBrowserConfig();
-    if (!cfg.isConfigured && process.env.NODE_ENV === 'production') {
+    if (!cfg.isConfigured && process.env.NODE_ENV === 'production' && !errCode) {
       setError('Supabase authentication configuration missing: NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY is not configured.');
     }
   }, []);

@@ -16,6 +16,7 @@ import { SendFollowupInput, SendFollowupOutput } from '@/lib/schemas/tools';
 import {
   sendControlledFollowup,
   renderApprovedTemplate,
+  buildFollowupTemplateData,
   FollowupTemplateId,
   FollowupTemplateData,
 } from '@/lib/integrations/messaging';
@@ -89,20 +90,7 @@ export async function executeSendFollowup(
       templateId = call.facts.quote_type === 'CONFIRMED' ? 'QUOTE_CONFIRMED' : 'QUOTE_ESTIMATE';
     }
 
-    const brand = config.brand_name || config.business_name || 'LogiVoice';
-    const templateData: FollowupTemplateData = {
-      customerName: call.customer?.name || 'Valued Shipper',
-      brand,
-      origin: call.facts?.route_from,
-      destination: call.facts?.route_to,
-      vehicleType: call.facts?.vehicle_type,
-      quotedAmount: call.facts?.quoted_amount,
-      trackingId: call.facts?.tracking_id,
-      currentStatus: call.facts?.tracking_status,
-      currentLocation: call.facts?.tracking_location,
-      etaFormatted: call.facts?.verified_eta,
-      bookingUrl: config.booking_url,
-    };
+    const templateData: FollowupTemplateData = buildFollowupTemplateData(call, config);
 
     const renderedMessage = renderApprovedTemplate(templateId, templateData);
 

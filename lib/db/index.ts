@@ -718,14 +718,14 @@ let supabaseLiveStatus: boolean | null = null;
 let lastSupabaseCheckTime: number = 0;
 const SUPABASE_CHECK_TTL_MS = 15000; // 15 seconds cache to allow recovery detection
 
-export async function isSupabaseLive(): Promise<boolean> {
+export async function isSupabaseLive(timeoutMs = 2000): Promise<boolean> {
   if (simulatedDbFailure) return false;
   const now = Date.now();
   if (supabaseLiveStatus !== null && now - lastSupabaseCheckTime < SUPABASE_CHECK_TTL_MS) {
     return supabaseLiveStatus;
   }
   try {
-    const client = createAdminClient();
+    const client = createAdminClient(timeoutMs);
     const { error } = await client.from('tenants').select('id').limit(1);
     lastSupabaseCheckTime = now;
     if (!error) {
@@ -733,7 +733,7 @@ export async function isSupabaseLive(): Promise<boolean> {
       return true;
     }
   } catch {
-    // Database connection or table cache issue
+    // Database connection, timeout, or table cache issue
   }
   lastSupabaseCheckTime = now;
   supabaseLiveStatus = false;

@@ -16,6 +16,7 @@ import { NextRequest } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
 import { Retell } from 'retell-sdk';
 import { createAdminClient } from '@/lib/supabase/server';
+import { createBoundedFetch } from '@/lib/supabase/bounded-fetch';
 import { DEFAULT_TENANT_ID } from '@/lib/db';
 
 export type UserRole = 'DISPATCHER' | 'OPS_MANAGER' | 'ADMIN' | 'VOICE_GATEWAY' | 'SYSTEM';
@@ -139,6 +140,26 @@ function resolveUserMetadataContext(
   };
 }
 
+function resolveClaimsContext(
+  rawClaims: unknown,
+  isProduction: boolean,
+  label: string
+): AuthContext | null {
+  if (!rawClaims || typeof rawClaims !== 'object') return null;
+  const claims = rawClaims as Record<string, unknown>;
+  const userId = (claims.sub || claims.user_id || claims.id) as string;
+  if (!userId) return null;
+  const user = {
+    id: userId,
+    app_metadata: (claims.app_metadata as Record<string, unknown>) || {
+      tenant_id: claims.tenant_id,
+      role: claims.role || claims.user_role,
+    },
+  };
+  const ctx = resolveUserMetadataContext(user, isProduction, label);
+  return ctx.isAuthenticated ? ctx : null;
+}
+
 /**
  * Resolves the authenticated user, role, and tenant context from a Next.js request.
  * Strictly enforces that client-controlled headers cannot escalate privileges or override tenant boundaries.
@@ -209,9 +230,15 @@ export async function getAuthContext(
       }
     }
 
-    // Authoritative Supabase JWT validation
+    // Authoritative Supabase JWT validation (bounded)
     try {
-      const client = createAdminClient();
+      const client = createAdminClient(2500);
+      const { data: claimsData, error: claimsError } = await client.auth.getClaims(token);
+      if (!claimsError && claimsData?.claims) {
+        const authCtx = resolveClaimsContext(claimsData.claims, isProduction, 'JWT claims');
+        if (authCtx) return authCtx;
+      }
+
       const { data: { user }, error } = await client.auth.getUser(token);
       if (!error && user) {
         return resolveUserMetadataContext(user, isProduction, 'user token');
@@ -226,23 +253,37 @@ export async function getAuthContext(
   const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
 
   if (supabaseUrl && supabaseKey && 'cookies' in req && req.cookies && typeof req.cookies.getAll === 'function') {
-    try {
-      const cookiesObj = req.cookies;
-      const supabase = createServerClient(supabaseUrl, supabaseKey, {
-        cookies: {
-          getAll() {
-            return cookiesObj.getAll ? cookiesObj.getAll() : [];
-          },
-          setAll() {},
-        },
-      });
+    const allCookies = req.cookies.getAll ? req.cookies.getAll() : [];
+    const hasAuthCookie = allCookies.some((c) => c.name.startsWith('sb-') || c.name.includes('-auth-token'));
 
-      const { data: { user }, error } = await supabase.auth.getUser();
-      if (!error && user) {
-        return resolveUserMetadataContext(user, isProduction, 'cookie session');
+    if (hasAuthCookie) {
+      try {
+        const boundedFetch = createBoundedFetch(2500, 'Auth Context Cookie Verification');
+        const supabase = createServerClient(supabaseUrl, supabaseKey, {
+          cookies: {
+            getAll() {
+              return allCookies;
+            },
+            setAll() {},
+          },
+          global: {
+            fetch: boundedFetch,
+          },
+        });
+
+        const { data: claimsData, error: claimsError } = await supabase.auth.getClaims();
+        if (!claimsError && claimsData?.claims) {
+          const authCtx = resolveClaimsContext(claimsData.claims, isProduction, 'cookie claims');
+          if (authCtx) return authCtx;
+        }
+
+        const { data: { user }, error } = await supabase.auth.getUser();
+        if (!error && user) {
+          return resolveUserMetadataContext(user, isProduction, 'cookie session');
+        }
+      } catch {
+        // Bounded verification timeout or failure fails closed safely
       }
-    } catch {
-      // Cookie session verification failed or unavailable
     }
   }
 

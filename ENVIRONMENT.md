@@ -12,7 +12,8 @@ This document provides the authoritative contract for all environment variables 
 | `PORT` | Optional | Optional | Server-Only | No | Port on which the HTTP server listens (default: `3000`). |
 | `NEXT_PUBLIC_APP_URL` | Optional | Required | Public (Client + Server) | No | Canonical origin URL (e.g. `https://logivoice.example.com`). Used for callbacks and CORS. |
 | `NEXT_PUBLIC_SUPABASE_URL` | Optional | Required | Public (Client + Server) | No | Supabase API URL. Required for frontend authentication and client sessions. |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Optional | Required | Public (Client + Server) | No | Public Supabase anonymous client key for session token verification. Elevated keys must never be used here. |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Optional | Required | Public (Client + Server) | No | Canonical public Supabase client key (supported aliases: `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_ANON_KEY`). Elevated keys must never be used here. |
+| `AUTHORITATIVE_TENANT_ID` | Optional | Required (Production) | Server-Only | No | Authoritative tenant UUID. In production, placeholder tenant `00000000-0000-0000-0000-000000000001` is strictly forbidden. |
 | `SUPABASE_SECRET_KEY` | Optional | Required | Server-Only | No | Elevated Supabase service-role key for backend queries, RLS bypass on server routes, and database operations. |
 | `SUPABASE_SERVICE_ROLE_KEY` | Optional | Optional | Server-Only | No | Supported alias for `SUPABASE_SECRET_KEY`. |
 | `DATABASE_URL` | Optional | Optional | Server-Only | No | Direct PostgreSQL connection string for running migrations and isolated integration test suites. |

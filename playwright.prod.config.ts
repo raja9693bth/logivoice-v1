@@ -2,7 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests/e2e',
-  testIgnore: '**/production-auth.spec.ts',
+  testMatch: '**/production-auth.spec.ts',
   timeout: 30000,
   expect: {
     timeout: 5000,
@@ -24,9 +24,13 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'npm run dev',
+    command: 'npm run start',
     url: 'http://127.0.0.1:3000',
     reuseExistingServer: !process.env.CI,
     timeout: 60000,
+    env: {
+      NODE_ENV: 'production',
+      PORT: '3000',
+    },
   },
 });

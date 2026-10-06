@@ -10,8 +10,8 @@
 
 import { db } from '@/lib/db';
 import { processPostCallPipeline } from '@/lib/pipeline/post-call';
-import { syncCallToGoogleSheets } from '@/lib/integrations/google-sheets';
-import { sendControlledFollowup } from '@/lib/integrations/messaging';
+import { syncCallToGoogleSheets, checkIfCallExistsInGoogleSheets } from '@/lib/integrations/google-sheets';
+import { sendControlledFollowup, buildFollowupTemplateData } from '@/lib/integrations/messaging';
 import { SideEffectClaim, Call } from '@/types/logivoice';
 
 export interface RetryExecutionResult {
@@ -184,19 +184,7 @@ export async function runRetryWorker(limit = 10): Promise<{
           callId: call.id,
           recipientPhone: followup.recipient,
           templateId: (followup.template_id as any) || 'INQUIRY_RECEIVED',
-          templateData: {
-            customerName: call.customer?.name,
-            brand: config.brand_name || config.business_name || 'LogiVoice',
-            origin: call.facts?.route_from,
-            destination: call.facts?.route_to,
-            vehicleType: call.facts?.vehicle_type,
-            quotedAmount: call.facts?.quoted_amount,
-            trackingId: call.facts?.tracking_id,
-            currentStatus: call.facts?.tracking_status,
-            currentLocation: call.facts?.tracking_location,
-            etaFormatted: call.facts?.verified_eta,
-            bookingUrl: config.booking_url,
-          },
+          templateData: buildFollowupTemplateData(call, config),
           channel: 'WHATSAPP',
         });
 
@@ -280,20 +268,50 @@ export async function reconcileUnknownClaims(limit = 10): Promise<{
             message: 'Reconciliation confirmed Google Sheets append completed',
           });
         } else {
-          await transitionUnknownClaim(
-            tenantId,
-            claimKey,
-            claim.job_type,
-            claim.call_id,
-            'RETRYABLE',
-            'PENDING'
-          );
-          results.push({
-            claim_key: claimKey,
-            job_type: claim.job_type,
-            status: 'PROCESSED',
-            message: 'Reconciled from UNKNOWN to RETRYABLE for safe retry',
-          });
+          // Authoritatively query target worksheet to prevent duplicate appends (Phase 30)
+          const externalCallId = claimKey.split(':').pop() || '';
+          const sheetPresence = await checkIfCallExistsInGoogleSheets(externalCallId, tenantId);
+
+          if (sheetPresence === 'EXISTS') {
+            await transitionUnknownClaim(
+              tenantId,
+              claimKey,
+              claim.job_type,
+              claim.call_id,
+              'SUCCEEDED',
+              'SYNCED'
+            );
+            results.push({
+              claim_key: claimKey,
+              job_type: claim.job_type,
+              status: 'PROCESSED',
+              message: 'Reconciliation verified row already present in Google Sheet: marked SUCCEEDED',
+            });
+          } else if (sheetPresence === 'NOT_FOUND') {
+            await transitionUnknownClaim(
+              tenantId,
+              claimKey,
+              claim.job_type,
+              claim.call_id,
+              'RETRYABLE',
+              'PENDING'
+            );
+            results.push({
+              claim_key: claimKey,
+              job_type: claim.job_type,
+              status: 'PROCESSED',
+              message: 'Reconciliation verified row absent in Google Sheet: safe for controlled retry',
+            });
+          } else {
+            // Uncertain / provider unreachable: remain UNKNOWN
+            await db.updateClaimReconciliation(tenantId, claimKey, 'STILL_UNKNOWN');
+            results.push({
+              claim_key: claimKey,
+              job_type: claim.job_type,
+              status: 'UNKNOWN',
+              message: 'Google Sheets reconciliation uncertain: remained UNKNOWN awaiting verification',
+            });
+          }
         }
       } else if (claim.job_type === 'FOLLOWUP_SEND') {
         let isDispatched = false;
@@ -323,7 +341,8 @@ export async function reconcileUnknownClaims(limit = 10): Promise<{
             status: 'PROCESSED',
             message: 'Reconciliation confirmed WhatsApp follow-up was dispatched',
           });
-        } else {
+        } else if (claim.call_id) {
+          // Controlled safe resend only when distinct call record exists
           await transitionUnknownClaim(
             tenantId,
             claimKey,
@@ -337,6 +356,15 @@ export async function reconcileUnknownClaims(limit = 10): Promise<{
             job_type: claim.job_type,
             status: 'PROCESSED',
             message: 'Reconciled from UNKNOWN to RETRYABLE for controlled send',
+          });
+        } else {
+          // Phase 31: If uncertain or missing call record, do not blindly resend
+          await db.updateClaimReconciliation(tenantId, claimKey, 'STILL_UNKNOWN');
+          results.push({
+            claim_key: claimKey,
+            job_type: claim.job_type,
+            status: 'UNKNOWN',
+            message: 'Follow-up provider status uncertain: remained UNKNOWN for operator review',
           });
         }
       } else {

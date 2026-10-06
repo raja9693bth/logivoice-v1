@@ -2,12 +2,14 @@
  * LOGIVOICE V1 — AUTHORITATIVE TELEPHONY TRANSFER ADAPTER
  * 
  * Enforces:
- * 1. TRANSFERRED status is ONLY returned when an actual provider transfer operation
- *    is invoked over the network and accepted/confirmed by the telephony provider.
- * 2. Environment variables are configuration, NOT provider confirmation.
- * 3. Network timeouts, provider rejections, or unconfigured states fail closed and
- *    fall back to durable callback scheduling.
+ * 1. Strict E.164 phone number formatting and XML escaping for TwiML generation.
+ * 2. Official Twilio REST Call Update resource contract (Twiml parameter without unsupported To parameter).
+ * 3. Accurate provider status mapping: TRANSFER_REQUEST_ACCEPTED when instructions updated;
+ *    TRANSFER_CONNECTED only when destination leg is confirmed bridged.
+ * 4. Network timeouts (8s) fail closed and fall back to durable callback scheduling.
  */
+
+import { getCanonicalTelephonyCredentials } from '@/lib/env';
 
 export interface TelephonyTransferRequest {
   callId?: string;
@@ -56,8 +58,7 @@ export async function executeProviderCallTransfer(
   req: TelephonyTransferRequest
 ): Promise<TelephonyTransferResult> {
   const isEnabled = process.env.ENABLE_LIVE_TELEPHONY_TRANSFER === 'true';
-  const accountSid = process.env.TELEPHONY_PROVIDER_ACCOUNT_SID;
-  const authToken = process.env.TELEPHONY_PROVIDER_AUTH_TOKEN;
+  const { accountSid, authToken } = getCanonicalTelephonyCredentials();
 
   if (!isEnabled || !accountSid || !authToken) {
     return {
@@ -84,25 +85,37 @@ export async function executeProviderCallTransfer(
     if (isTwilioCallSid && accountSid && authToken) {
       providerName = 'TWILIO_REST_GATEWAY';
       const authHeader = `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}`;
-      const providerUrl = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Calls/${encodeURIComponent(req.callId!)}.json`;
+      const providerUrl = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(accountSid)}/Calls/${encodeURIComponent(req.callId!)}.json`;
 
-      const E164_PHONE_REGEX = /^\+?[1-9]\d{1,14}$/;
-      const cleanTargetPhone = req.targetPhone.replace(/[\s()-]/g, '');
+      // Strict E.164 phone number validation (+ followed by 1 to 15 digits)
+      const E164_PHONE_REGEX = /^\+[1-9]\d{1,14}$/;
+      let cleanTargetPhone = req.targetPhone.replace(/[\s()-]/g, '');
+      if (!cleanTargetPhone.startsWith('+')) {
+        cleanTargetPhone = `+${cleanTargetPhone}`;
+      }
+
       if (!E164_PHONE_REGEX.test(cleanTargetPhone)) {
+        clearTimeout(timeoutId);
         return {
           success: false,
           status: 'PROVIDER_ERROR',
           provider: 'TWILIO_REST_GATEWAY',
-          error: 'Target phone number does not conform to valid E.164 standard.',
+          error: 'Target phone number does not conform to valid E.164 standard (+[1-9]1..14).',
           message: 'Invalid target phone format for call transfer.',
         };
       }
 
-      const cleanCallerPhone = req.callerPhone ? req.callerPhone.replace(/[\s()-]/g, '') : '';
+      let cleanCallerPhone = req.callerPhone ? req.callerPhone.replace(/[\s()-]/g, '') : '';
+      if (cleanCallerPhone && !cleanCallerPhone.startsWith('+')) {
+        cleanCallerPhone = `+${cleanCallerPhone}`;
+      }
       const safeCallerPhone = cleanCallerPhone && E164_PHONE_REGEX.test(cleanCallerPhone) ? cleanCallerPhone : '';
-      const callerAttr = safeCallerPhone ? ` callerId="${encodeURIComponent(safeCallerPhone)}"` : '';
-      const safeTwiml = `<Response><Dial${callerAttr}>${encodeURIComponent(cleanTargetPhone)}</Dial></Response>`;
 
+      // Secure XML construction: real XML escaping, never URI-encoded literals in XML
+      const callerAttr = safeCallerPhone ? ` callerId="${escapeXml(safeCallerPhone)}"` : '';
+      const safeTwiml = `<Response><Dial${callerAttr}>${escapeXml(cleanTargetPhone)}</Dial></Response>`;
+
+      // Call Resource Update: ONLY send Twiml parameter (To is only for new outbound calls)
       const res = await fetch(providerUrl, {
         method: 'POST',
         headers: {
@@ -110,7 +123,6 @@ export async function executeProviderCallTransfer(
           'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: new URLSearchParams({
-          To: req.targetPhone,
           Twiml: safeTwiml,
         }).toString(),
         signal: controller.signal,
@@ -160,8 +172,10 @@ export async function executeProviderCallTransfer(
       };
     }
 
+    // Provider accepting updated TwiML is TRANSFER_REQUEST_ACCEPTED.
+    // TRANSFER_CONNECTED is reserved for provider callbacks proving the leg bridged.
     const transferStatus =
-      responseData?.status === 'completed' || responseData?.status === 'connected'
+      responseData?.status === 'completed'
         ? 'TRANSFER_CONNECTED'
         : 'TRANSFER_REQUEST_ACCEPTED';
 

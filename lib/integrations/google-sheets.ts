@@ -375,3 +375,55 @@ export function resetSheetsSyncIdempotency(): void {
   // Test cleanup helper
 }
 
+/**
+ * Authoritatively inspects the configured Google Sheet worksheet to determine
+ * whether a call row was already appended (Phase 30).
+ * Returns:
+ * - 'EXISTS': row containing externalCallId found in sheet -> safe to mark SUCCEEDED
+ * - 'NOT_FOUND': sheet verified, call ID proven absent -> safe to mark RETRYABLE
+ * - 'UNCERTAIN': provider unconfigured, unreachable, or timed out -> must remain UNKNOWN
+ */
+export async function checkIfCallExistsInGoogleSheets(
+  externalCallId: string,
+  tenantId: string = DEFAULT_TENANT_ID
+): Promise<'EXISTS' | 'NOT_FOUND' | 'UNCERTAIN'> {
+  const isMock = process.env.ENABLE_MOCK_INTEGRATIONS === 'true';
+  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+  const configuredTab = process.env.GOOGLE_SHEETS_WORKSHEET_NAME || 'LogiVoice_Calls';
+
+  if (!spreadsheetId) {
+    if (isMock) {
+      return 'NOT_FOUND';
+    }
+    return 'UNCERTAIN';
+  }
+
+  const accessToken = await getGoogleAccessToken();
+  if (!accessToken) {
+    return 'UNCERTAIN';
+  }
+
+  try {
+    // Read Column B (Call ID column) from target worksheet
+    const range = `${encodeURIComponent(configuredTab)}!B:B`;
+    const res = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${range}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(6000),
+      }
+    );
+
+    if (!res.ok) {
+      return 'UNCERTAIN';
+    }
+
+    const data = await res.json();
+    const rows = (data.values || []) as string[][];
+    const exists = rows.some((row) => row && row[0] === externalCallId);
+    return exists ? 'EXISTS' : 'NOT_FOUND';
+  } catch {
+    return 'UNCERTAIN';
+  }
+}
+

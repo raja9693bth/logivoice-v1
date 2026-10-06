@@ -1,7 +1,7 @@
 # LogiVoice V1 — Production Go-Live External Blockers
 
 > **Document Status**: Production Readiness Gate  
-> **Target Version**: V1.0.0  
+> **Target Version**: V1.0.1  
 > **Engineering Scope**: COMPLETE. All engineering-controlled items, fail-closed handlers, database idempotency, rate resolution, PostgreSQL migrations, and security gates are implemented. Only genuine human, client, or external regulatory approvals/credentials remain.
 
 ---

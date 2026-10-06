@@ -171,11 +171,27 @@ export async function processPostCallPipeline(
         tenantId
       );
     }
-
-    // 3. Normalized Intent and Sentiment
+    // 3. Normalized Intent, Sentiment, and Provider-Verified Outcome (Phase 17)
     const primaryIntent: CallIntent = payload.intent || 'GENERAL';
     const sentiment = payload.sentiment || 'NEUTRAL';
-    const outcome = payload.outcome || 'COMPLETED';
+    let outcome: CallOutcome = payload.outcome || 'COMPLETED';
+
+    // Phase 17: Model/transcript analysis must never upgrade unconfirmed transfers to TRANSFERRED
+    if (outcome === 'TRANSFERRED') {
+      const confirmedTransfer = await db.getConfirmedTransferForCall(payload.external_call_id, tenantId);
+      if (!confirmedTransfer || !confirmedTransfer.transferred) {
+        const latestTransferExec = await db.getLatestSuccessfulToolExecution(
+          payload.external_call_id,
+          'transfer_to_human',
+          tenantId
+        );
+        if (latestTransferExec?.business_status === 'TRANSFER_REQUEST_ACCEPTED') {
+          outcome = 'CALLBACK_SCHEDULED';
+        } else {
+          outcome = 'COMPLETED';
+        }
+      }
+    }
 
     // 4. Calculate Authoritative Lead Temperature
     const leadTemperature = computeLeadTemperature({
@@ -248,7 +264,7 @@ export async function processPostCallPipeline(
             target_role: payload.target_role,
           },
           recording_url: payload.recording_url,
-          agent_version: 'v1.0.0',
+          agent_version: 'v1.0.1',
         },
         tenantId
       );

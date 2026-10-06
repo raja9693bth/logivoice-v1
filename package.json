@@ -8,11 +8,12 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "tsx tests/backend.test.ts && tsx tests/voice-qa-scenarios.test.ts && tsx tests/concurrency.test.ts",
+    "test": "tsx tests/backend.test.ts && tsx tests/voice-qa-scenarios.test.ts && tsx tests/concurrency.test.ts && node --import tsx --test tests/proxy-504-regression.test.ts",
     "test:integration": "node --import tsx --test tests/db-integration.test.ts",
     "test:concurrency": "tsx tests/concurrency.test.ts",
-    "test:coverage": "node -e \"fs.mkdirSync('coverage', { recursive: true })\" && node --import tsx --test --test-concurrency=1 --experimental-test-coverage --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info tests/backend.test.ts tests/voice-qa-scenarios.test.ts tests/concurrency.test.ts",
-    "test:e2e": "playwright test"
+    "test:coverage": "node -e \"fs.mkdirSync('coverage', { recursive: true })\" && node --import tsx --test --test-concurrency=1 --experimental-test-coverage --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info tests/backend.test.ts tests/voice-qa-scenarios.test.ts tests/concurrency.test.ts tests/proxy-504-regression.test.ts",
+    "test:e2e": "playwright test",
+    "test:e2e:prod": "playwright test --config=playwright.prod.config.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.3",

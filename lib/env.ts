@@ -27,6 +27,7 @@ export const EnvironmentSchema = z
 
     // Tenant Configuration
     AUTHORITATIVE_TENANT_ID: z.string().uuid().default('00000000-0000-0000-0000-000000000001'),
+    ALLOW_PLACEHOLDER_TENANT_IN_PROD: z.enum(['true', 'false']).default('false'),
 
     // Supabase
     SUPABASE_URL: z.string().optional(),
@@ -60,7 +61,58 @@ export const EnvironmentSchema = z
     ENABLE_MOCK_INTEGRATIONS: z.enum(['true', 'false']).default('false'),
   })
   .superRefine((data, ctx) => {
-    // 1. Production Retell requirements
+    // 1. Production Supabase Contract (Phase 11)
+    if (data.NODE_ENV === 'production') {
+      const publicUrl = data.NEXT_PUBLIC_SUPABASE_URL || data.SUPABASE_URL;
+      const publicKey = data.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || data.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+      const secretKey = data.SUPABASE_SECRET_KEY;
+
+      if (!publicUrl) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'NEXT_PUBLIC_SUPABASE_URL is required in production',
+          path: ['NEXT_PUBLIC_SUPABASE_URL'],
+        });
+      }
+
+      if (!publicKey) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY is required in production',
+          path: ['NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY'],
+        });
+      }
+
+      if (!secretKey) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'SUPABASE_SECRET_KEY is required in production for server operations',
+          path: ['SUPABASE_SECRET_KEY'],
+        });
+      }
+
+      if (!data.CRON_SECRET) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'CRON_SECRET is required in production for worker invocation security',
+          path: ['CRON_SECRET'],
+        });
+      }
+
+      if (
+        data.AUTHORITATIVE_TENANT_ID === '00000000-0000-0000-0000-000000000001' &&
+        data.ALLOW_PLACEHOLDER_TENANT_IN_PROD !== 'true'
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'Placeholder tenant 00000000-0000-0000-0000-000000000001 is prohibited in production without ALLOW_PLACEHOLDER_TENANT_IN_PROD=true',
+          path: ['AUTHORITATIVE_TENANT_ID'],
+        });
+      }
+    }
+
+    // 2. Production Retell requirements
     if (data.NODE_ENV === 'production' && data.RETELL_API_KEY) {
       if (!data.RETELL_AGENT_ID) {
         ctx.addIssue({
@@ -71,7 +123,7 @@ export const EnvironmentSchema = z
       }
     }
 
-    // 2. Google Sheets tuple consistency
+    // 3. Google Sheets tuple consistency
     const hasAnySheets =
       Boolean(data.GOOGLE_SHEETS_SPREADSHEET_ID) ||
       Boolean(data.GOOGLE_CLIENT_ID) ||
@@ -89,21 +141,22 @@ export const EnvironmentSchema = z
       if (!data.GOOGLE_CLIENT_ID || !data.GOOGLE_CLIENT_SECRET || !data.GOOGLE_REFRESH_TOKEN) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: 'Complete OAuth tuple (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN) is required for Google Sheets',
+          message:
+            'Complete OAuth tuple (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN) is required for Google Sheets',
           path: ['GOOGLE_CLIENT_ID'],
         });
       }
     }
 
-    // 3. WhatsApp tuple consistency
+    // 4. WhatsApp tuple consistency
     const hasWhatsappKey = Boolean(data.WHATSAPP_API_KEY || data.WHATSAPP_API_TOKEN);
     const hasWhatsappPhone = Boolean(data.WHATSAPP_PHONE_NUMBER_ID);
     if ((hasWhatsappKey || hasWhatsappPhone) && data.ENABLE_MOCK_INTEGRATIONS !== 'true') {
       if (!hasWhatsappKey) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: 'WHATSAPP_API_KEY is required when WhatsApp phone number ID is set',
-          path: ['WHATSAPP_API_KEY'],
+          message: 'WHATSAPP_API_TOKEN (or WHATSAPP_API_KEY) is required when WhatsApp phone number ID is set',
+          path: ['WHATSAPP_API_TOKEN'],
         });
       }
       if (!hasWhatsappPhone) {
@@ -115,12 +168,15 @@ export const EnvironmentSchema = z
       }
     }
 
-    // 4. Live Telephony Transfer requirements
+    // 5. Live Telephony Transfer requirements (Phase 12)
     if (data.ENABLE_LIVE_TELEPHONY_TRANSFER === 'true') {
-      if (!data.TELEPHONY_PROVIDER_ACCOUNT_SID || !data.TELEPHONY_PROVIDER_AUTH_TOKEN) {
+      const accountSid = data.TELEPHONY_PROVIDER_ACCOUNT_SID || data.TWILIO_ACCOUNT_SID;
+      const authToken = data.TELEPHONY_PROVIDER_AUTH_TOKEN || data.TWILIO_AUTH_TOKEN;
+      if (!accountSid || !authToken) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: 'TELEPHONY_PROVIDER_ACCOUNT_SID and TELEPHONY_PROVIDER_AUTH_TOKEN are required when ENABLE_LIVE_TELEPHONY_TRANSFER is true',
+          message:
+            'TELEPHONY_PROVIDER_ACCOUNT_SID and TELEPHONY_PROVIDER_AUTH_TOKEN are required when ENABLE_LIVE_TELEPHONY_TRANSFER is true',
           path: ['TELEPHONY_PROVIDER_ACCOUNT_SID'],
         });
       }
@@ -160,4 +216,34 @@ export function getEnvironment(): ValidatedEnvironment {
     return EnvironmentSchema.parse(process.env);
   }
   return res.env;
+}
+
+/**
+ * Canonical helper for browser-safe Supabase publishable key (Phase 12).
+ */
+export function getCanonicalSupabasePublishableKey(): string {
+  return (
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    ''
+  );
+}
+
+/**
+ * Canonical helper for Telephony provider credentials (Phase 12).
+ */
+export function getCanonicalTelephonyCredentials(): { accountSid: string; authToken: string } {
+  return {
+    accountSid:
+      process.env.TELEPHONY_PROVIDER_ACCOUNT_SID || process.env.TWILIO_ACCOUNT_SID || '',
+    authToken:
+      process.env.TELEPHONY_PROVIDER_AUTH_TOKEN || process.env.TWILIO_AUTH_TOKEN || '',
+  };
+}
+
+/**
+ * Canonical helper for Meta WhatsApp API Token (Phase 12).
+ */
+export function getCanonicalWhatsAppToken(): string {
+  return process.env.WHATSAPP_API_TOKEN || process.env.WHATSAPP_API_KEY || '';
 }

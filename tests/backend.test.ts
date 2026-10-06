@@ -51,7 +51,7 @@ import { assembleVoiceRuntimeContext } from '../lib/voice/context-assembler';
 import { sendFollowupMessage } from '../lib/integrations/messaging';
 import { syncCallToGoogleSheets, resetSheetsSyncIdempotency } from '../lib/integrations/google-sheets';
 import { RETELL_TOOL_DEFINITIONS } from '../lib/voice/retell-tools';
-import { middleware } from '../middleware';
+import { proxy as middleware } from '../proxy';
 import { NextRequest } from 'next/server';
 
 let passedTests = 0;

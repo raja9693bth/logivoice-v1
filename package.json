@@ -13,7 +13,8 @@
     "test:concurrency": "tsx tests/concurrency.test.ts",
     "test:coverage": "node -e \"fs.mkdirSync('coverage', { recursive: true })\" && node --import tsx --test --test-concurrency=1 --experimental-test-coverage --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info tests/backend.test.ts tests/voice-qa-scenarios.test.ts tests/concurrency.test.ts tests/proxy-504-regression.test.ts",
     "test:e2e": "playwright test",
-    "test:e2e:prod": "playwright test --config=playwright.prod.config.ts"
+    "test:e2e:prod": "playwright test --config=playwright.prod.config.ts",
+    "playwright:install": "playwright install --with-deps chromium"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.3",

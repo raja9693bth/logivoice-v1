@@ -6,6 +6,12 @@ export interface HandleRoutingAuthOptions {
   timeoutMs?: number;
 }
 
+function makeLoginRedirect(request: NextRequest, key: string, val: string): NextResponse {
+  const loginUrl = new URL('/login', request.url);
+  loginUrl.searchParams.set(key, val);
+  return NextResponse.redirect(loginUrl);
+}
+
 /**
  * LOGIVOICE V1 — AUTHORITATIVE NEXT.JS 16 ROUTING PROXY AUTH HANDLER
  *
@@ -50,9 +56,7 @@ export async function handleRoutingAuth(
   );
 
   if (!hasAuthCookie) {
-    const loginUrl = new URL('/login', request.url);
-    loginUrl.searchParams.set('redirect', path);
-    return NextResponse.redirect(loginUrl);
+    return makeLoginRedirect(request, 'redirect', path);
   }
 
   // 3. Supabase Environment Presence Check
@@ -65,16 +69,12 @@ export async function handleRoutingAuth(
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
     '';
 
-  if (isProduction && (!supabaseUrl || !supabaseKey)) {
-    const loginUrl = new URL('/login', request.url);
-    loginUrl.searchParams.set('error', 'DEPLOYMENT_CONFIGURATION_REQUIRED');
-    return NextResponse.redirect(loginUrl);
-  }
-
   if (!supabaseUrl || !supabaseKey) {
-    const loginUrl = new URL('/login', request.url);
-    loginUrl.searchParams.set('redirect', path);
-    return NextResponse.redirect(loginUrl);
+    return makeLoginRedirect(
+      request,
+      isProduction ? 'error' : 'redirect',
+      isProduction ? 'DEPLOYMENT_CONFIGURATION_REQUIRED' : path
+    );
   }
 
   // 4. Bounded SSR Client Verification

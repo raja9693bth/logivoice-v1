@@ -140,6 +140,26 @@ function resolveUserMetadataContext(
   };
 }
 
+function resolveClaimsContext(
+  rawClaims: unknown,
+  isProduction: boolean,
+  label: string
+): AuthContext | null {
+  if (!rawClaims || typeof rawClaims !== 'object') return null;
+  const claims = rawClaims as Record<string, unknown>;
+  const userId = (claims.sub || claims.user_id || claims.id) as string;
+  if (!userId) return null;
+  const user = {
+    id: userId,
+    app_metadata: (claims.app_metadata as Record<string, unknown>) || {
+      tenant_id: claims.tenant_id,
+      role: claims.role || claims.user_role,
+    },
+  };
+  const ctx = resolveUserMetadataContext(user, isProduction, label);
+  return ctx.isAuthenticated ? ctx : null;
+}
+
 /**
  * Resolves the authenticated user, role, and tenant context from a Next.js request.
  * Strictly enforces that client-controlled headers cannot escalate privileges or override tenant boundaries.
@@ -215,18 +235,8 @@ export async function getAuthContext(
       const client = createAdminClient(2500);
       const { data: claimsData, error: claimsError } = await client.auth.getClaims(token);
       if (!claimsError && claimsData?.claims) {
-        const claims = claimsData.claims as Record<string, unknown>;
-        const user = {
-          id: (claims.sub || claims.user_id || claims.id) as string,
-          app_metadata: (claims.app_metadata as Record<string, unknown>) || {
-            tenant_id: claims.tenant_id,
-            role: claims.role || claims.user_role,
-          },
-        };
-        if (user.id) {
-          const authCtx = resolveUserMetadataContext(user, isProduction, 'JWT claims');
-          if (authCtx.isAuthenticated) return authCtx;
-        }
+        const authCtx = resolveClaimsContext(claimsData.claims, isProduction, 'JWT claims');
+        if (authCtx) return authCtx;
       }
 
       const { data: { user }, error } = await client.auth.getUser(token);
@@ -263,18 +273,8 @@ export async function getAuthContext(
 
         const { data: claimsData, error: claimsError } = await supabase.auth.getClaims();
         if (!claimsError && claimsData?.claims) {
-          const claims = claimsData.claims as Record<string, unknown>;
-          const user = {
-            id: (claims.sub || claims.user_id || claims.id) as string,
-            app_metadata: (claims.app_metadata as Record<string, unknown>) || {
-              tenant_id: claims.tenant_id,
-              role: claims.role || claims.user_role,
-            },
-          };
-          if (user.id) {
-            const authCtx = resolveUserMetadataContext(user, isProduction, 'cookie claims');
-            if (authCtx.isAuthenticated) return authCtx;
-          }
+          const authCtx = resolveClaimsContext(claimsData.claims, isProduction, 'cookie claims');
+          if (authCtx) return authCtx;
         }
 
         const { data: { user }, error } = await supabase.auth.getUser();

@@ -93,6 +93,26 @@ export function renderApprovedTemplate(
   }
 }
 
+export function buildFollowupTemplateData(
+  call: { customer?: { name?: string }; facts?: Record<string, any> },
+  config?: { brand_name?: string; business_name?: string; booking_url?: string }
+): FollowupTemplateData {
+  const brand = config?.brand_name || config?.business_name || 'LogiVoice';
+  return {
+    customerName: call?.customer?.name || 'Valued Shipper',
+    brand,
+    origin: call?.facts?.route_from,
+    destination: call?.facts?.route_to,
+    vehicleType: call?.facts?.vehicle_type,
+    quotedAmount: call?.facts?.quoted_amount,
+    trackingId: call?.facts?.tracking_id,
+    currentStatus: call?.facts?.tracking_status,
+    currentLocation: call?.facts?.tracking_location,
+    etaFormatted: call?.facts?.verified_eta,
+    bookingUrl: config?.booking_url,
+  };
+}
+
 /**
  * Executes a controlled follow-up send with claim-before-send locking and durable suppression check.
  */

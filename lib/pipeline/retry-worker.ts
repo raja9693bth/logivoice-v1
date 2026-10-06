@@ -11,7 +11,7 @@
 import { db } from '@/lib/db';
 import { processPostCallPipeline } from '@/lib/pipeline/post-call';
 import { syncCallToGoogleSheets, checkIfCallExistsInGoogleSheets } from '@/lib/integrations/google-sheets';
-import { sendControlledFollowup } from '@/lib/integrations/messaging';
+import { sendControlledFollowup, buildFollowupTemplateData } from '@/lib/integrations/messaging';
 import { SideEffectClaim, Call } from '@/types/logivoice';
 
 export interface RetryExecutionResult {
@@ -184,19 +184,7 @@ export async function runRetryWorker(limit = 10): Promise<{
           callId: call.id,
           recipientPhone: followup.recipient,
           templateId: (followup.template_id as any) || 'INQUIRY_RECEIVED',
-          templateData: {
-            customerName: call.customer?.name,
-            brand: config.brand_name || config.business_name || 'LogiVoice',
-            origin: call.facts?.route_from,
-            destination: call.facts?.route_to,
-            vehicleType: call.facts?.vehicle_type,
-            quotedAmount: call.facts?.quoted_amount,
-            trackingId: call.facts?.tracking_id,
-            currentStatus: call.facts?.tracking_status,
-            currentLocation: call.facts?.tracking_location,
-            etaFormatted: call.facts?.verified_eta,
-            bookingUrl: config.booking_url,
-          },
+          templateData: buildFollowupTemplateData(call, config),
           channel: 'WHATSAPP',
         });
 

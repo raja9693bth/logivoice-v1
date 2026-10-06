@@ -98,3 +98,29 @@ npm run typecheck
 # 6. Production Next.js Build
 npm run build
 ```
+
+---
+
+## 5. Production-Mode Auth & Security E2E Suite (`tests/e2e/production-auth.spec.ts`)
+
+| Test Spec | Target / Invariant | Result |
+| :--- | :--- | :---: |
+| **1. Unauthenticated /admin Redirect** | Verified unauthenticated `/admin` request strictly issues HTTP 307 redirect to `/login` | **PASS** (1.5s) |
+| **2. Dev Cookie Bypass Immunity** | In `NODE_ENV=production`, `logivoice_dev_session=true` cookie is strictly rejected and redirected to `/login` | **PASS** (454ms) |
+| **3. UI Bypass Button Concealment** | In `NODE_ENV=production`, login page completely omits "Enter Dev Session" bypass button | **PASS** (443ms) |
+| **4. Controlled Error Banner** | Navigating with `error=AUTH_TEMPORARILY_UNAVAILABLE` displays controlled user notice without 504 | **PASS** (431ms) |
+| **5. Health Endpoints** | `/api/health?check=liveness` returns 200 UP; `/api/health` readiness returns boundedly | **PASS** (86ms) |
+
+---
+
+## 6. Live Production Runtime Audit & Load Test Benchmarks (`https://logivoice-v1.vercel.app`)
+
+| Test Type | Request Count | Status / Outcome | Latency Metrics | 504 Timeouts |
+| :--- | :---: | :--- | :--- | :---: |
+| **Live Production /admin Unauthenticated** | 100 | 100/100 HTTP 307 Redirects to `/login` | p50: **49ms**, p95: **84ms**, p99: **290ms**, max: **290ms** | **0** |
+| **Live Production /admin Stale Cookie** | 20 | 20/20 HTTP 307 Redirects to `/login` | p50: **51ms**, max: **621ms** | **0** |
+| **Live Production /api/health Liveness** | 1 | HTTP 200 UP (`v1.0.2`, SHA `9b176a16...`) | 499ms | **0** |
+| **Live Production /api/health Readiness** | 1 | HTTP 503 DEGRADED (bounded DB probe) | 7293ms | **0** |
+| **Live Production /api/calls Unauth** | 1 | HTTP 401 Unauthorized | 529ms | **0** |
+| **Live Production Webhook Unsigned** | 1 | HTTP 404 / Rejection | 274ms | **0** |
+

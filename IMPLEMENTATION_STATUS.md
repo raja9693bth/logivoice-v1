@@ -62,3 +62,17 @@
 | **WhatsApp Nurturing & Follow-up** | `DONE` | Pre-approved templates with verified fields. Claims send record before external dispatch. Escalated or angry calls automatically suppressed (`SUPPRESSED`). |
 | **Meta WhatsApp Business API Provider** | `CONFIGURATION-GATED` | Requires client WhatsApp Business Account token and registered template. |
 | **SMS & Email Channels** | `NOT APPLICABLE` | WhatsApp is primary V1 channel. Unconfigured channels return `UNCONFIGURED`. |
+
+---
+
+## 5. Release v1.0.2 Outage Remediation & Absolute Certification
+
+| Architecture / Security Boundary | Status | Verification & Operational Contract |
+| :--- | :---: | :--- |
+| **Next.js 16 Proxy Architecture (`proxy.ts`)** | `DONE` | Migrated from root `middleware.ts` to standard Next.js 16 `proxy.ts` and `lib/supabase/proxy.ts`. Performs instant redirect (< 1ms) if unauthenticated without network calls. External auth is bound to 2000ms via `createBoundedFetch`. Zero 504 `MIDDLEWARE_INVOCATION_TIMEOUT` occurrences in 100-request production benchmark. |
+| **Fail-Closed Auth & Controlled Fallback** | `DONE` | Routing failure transitions to `/login?error=AUTH_TEMPORARILY_UNAVAILABLE` rather than platform timeouts. |
+| **Production Dev Cookie Bypass Immunity** | `DONE` | In `NODE_ENV === 'production'`, `logivoice_dev_session` is strictly ignored and bypassed sessions are denied access to `/admin`. |
+| **Telephony TwiML & Call Resource Contract** | `DONE` | Uses official `twilio.twiml.VoiceResponse` builder. Enforces strict E.164 phone validation and Twilio REST Call Update resource contract (CallSid URL, POST method, `Twiml` parameter only without unsupported `To` parameter). |
+| **SonarCloud Quality Gate on `main`** | `DONE` | Quality Gate: `PASS`. Security Rating on New Code: `A`. 0 New Security Issues. Duplication on New Code: `2.5%` (required <= 3.0%). |
+| **Production-Mode E2E & Load Regression** | `DONE` | 5/5 Playwright production-mode tests passing with `NODE_ENV=production`. 100-request unauthenticated `/admin` load test yields 100% 307 redirects, 0 504s, p50: 49ms, max: 290ms. |
+

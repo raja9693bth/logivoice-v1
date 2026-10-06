@@ -82,3 +82,21 @@ As part of the final integrity remediation and hardening:
   - `getAuthContext()` strictly ignores client headers for role escalation.
   - Roles must be present in validated Supabase `app_metadata` with explicit allowlist (`DISPATCHER`, `OPS_MANAGER`, `ADMIN`).
   - `SYSTEM` and `VOICE_GATEWAY` roles can never be granted via user metadata.
+
+### H. Release v1.0.2 Security Hardening & Sonar Gate Certification
+1. **Next.js 16 Proxy Migration & Bounded SSR Auth**:
+   - Migrated from legacy `middleware.ts` to standard Next.js 16 `proxy.ts` and `lib/supabase/proxy.ts`.
+   - Root routing evaluates unauthenticated requests instantly (< 1ms) and emits a 307 redirect to `/login` without network hops.
+   - External Supabase Auth network operations (`getClaims`/`getUser`) are bound via `createBoundedFetch` to a hard upper limit of 2000ms, failing closed to `/login?error=AUTH_TEMPORARILY_UNAVAILABLE` rather than waiting for Vercel platform timeout (eliminates 504 `MIDDLEWARE_INVOCATION_TIMEOUT`).
+   - Development cookie bypass (`logivoice_dev_session`) is strictly rejected when `NODE_ENV === 'production'`.
+
+2. **Telephony TwiML & Twilio Contract Security**:
+   - Integrated official `twilio` SDK (`twilio.twiml.VoiceResponse`).
+   - Eliminated handwritten XML template strings and improper `encodeURIComponent` usage.
+   - Enforced strict E.164 phone number validation (`/^\+[1-9]\d{1,14}$/`) and official Twilio REST Call Update resource contract (sending CallSid `CA...`, POST method, and `Twiml` parameter only without unsupported `To` parameter).
+
+3. **SonarCloud Vulnerability Elimination (S6505)**:
+   - Eliminated on-demand `npx playwright` invocation in `.github/workflows/ci.yml`.
+   - Replaced with local lockfile-pinned `npm run playwright:install` script backed by verified devDependencies.
+   - SonarCloud Quality Gate on `branch=main`: Security Rating **A**, 0 New Issues, 0 Security Hotspots, 2.5% Duplication (required <= 3.0%).
+

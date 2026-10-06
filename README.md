@@ -154,6 +154,7 @@ npm run build
 - [IMPLEMENTATION_STATUS.md](file:///./IMPLEMENTATION_STATUS.md): Complete feature-by-feature status breakdown.
 - [GO_LIVE_BLOCKERS.md](file:///./GO_LIVE_BLOCKERS.md): Remaining client/provider approvals before DNS cutover.
 - [SECURITY_NOTES.md](file:///./SECURITY_NOTES.md): Credential hygiene, HMAC verification, and formula injection mitigations.
-- [TEST_REPORT.md](file:///./TEST_REPORT.md): 206 passed automated test cases, PostgreSQL integration suite, and 32 voice QA scenarios.
-- [RUNBOOK.md](file:///./RUNBOOK.md): SRE deployment guide, liveness probes, and rollback procedures.
-- [MIGRATION_NOTES.md](file:///./MIGRATION_NOTES.md): Database schema updates, idempotency constraints, and RLS architecture.
+- [TEST_REPORT.md](file:///./TEST_REPORT.md): Passed automated test suites, PostgreSQL integration suite, 32 voice QA scenarios, production-mode Playwright E2E suite, and live 100-request production 504 regression benchmarks.
+- [RUNBOOK.md](file:///./RUNBOOK.md): SRE deployment guide, liveness probes, Next.js 16 Proxy operational contract, and rollback procedures.
+- [MIGRATION_NOTES.md](file:///./MIGRATION_NOTES.md): Database schema updates, idempotency constraints, rate card atomic concurrency, and RLS architecture.
+

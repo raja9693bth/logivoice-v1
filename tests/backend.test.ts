@@ -50,6 +50,7 @@ import { processPostCallPipeline, resetPostCallPipelineIdempotency } from '../li
 import { assembleVoiceRuntimeContext } from '../lib/voice/context-assembler';
 import { sendFollowupMessage } from '../lib/integrations/messaging';
 import { syncCallToGoogleSheets, resetSheetsSyncIdempotency } from '../lib/integrations/google-sheets';
+import { executeProviderCallTransfer } from '../lib/integrations/telephony';
 import { RETELL_TOOL_DEFINITIONS } from '../lib/voice/retell-tools';
 import { proxy as middleware } from '../proxy';
 import { NextRequest } from 'next/server';
@@ -1677,5 +1678,52 @@ describe('LOGIVOICE V1 — FORENSIC BACKEND AUTOMATED TEST SUITE', () => {
   const fulfilled = [rateResA, rateResB].filter((r) => r.status === 'fulfilled');
   const rejected = [rateResA, rateResB].filter((r) => r.status === 'rejected');
   assert(fulfilled.length === 1 && rejected.length === 1, 'Section 58.39: Two concurrent overlapping rate card creations serialize with exactly one winner and one conflict rejection');
+
+  // 40. Phase 14 & 15: Telephony Provider Call Transfer TwiML & Twilio Contract
+  const origTelephony = process.env.ENABLE_LIVE_TELEPHONY_TRANSFER;
+  const origSid = process.env.TWILIO_ACCOUNT_SID;
+  const origToken = process.env.TWILIO_AUTH_TOKEN;
+  try {
+    process.env.ENABLE_LIVE_TELEPHONY_TRANSFER = 'true';
+    process.env.TWILIO_ACCOUNT_SID = 'MOCK_TEST_ACCOUNT_SID_FOR_UNITTESTS';
+    process.env.TWILIO_AUTH_TOKEN = 'testtoken1234567890';
+
+    let capturedUrl = '';
+    let capturedMethod = '';
+    let capturedBody = '';
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any, opts: any) => {
+      capturedUrl = String(url);
+      capturedMethod = opts?.method;
+      capturedBody = String(opts?.body);
+      return new Response(JSON.stringify({ sid: 'CA1234567890abcdef1234567890abcdef', status: 'in-progress' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as any;
+
+    const transferRes = await executeProviderCallTransfer({
+      callId: 'CA1234567890abcdef1234567890abcdef',
+      callerPhone: '+919876543210',
+      targetPhone: '+919876543211',
+      targetRole: 'DISPATCHER',
+      reason: 'Caller requested human assistance',
+      tenantId: DEFAULT_TENANT_ID,
+    });
+
+    globalThis.fetch = origFetch;
+
+    assert(transferRes.success === true, 'Section 58.40: Telephony transfer returns success when Twilio accepts call update');
+    assert(transferRes.status === 'TRANSFER_REQUEST_ACCEPTED', 'Section 58.40: Status is TRANSFER_REQUEST_ACCEPTED');
+    assert(capturedUrl.includes('Calls/CA1234567890abcdef1234567890abcdef.json'), 'Section 58.40: Calls CallSid update URL');
+    assert(capturedMethod === 'POST', 'Section 58.40: HTTP method is POST');
+    assert(capturedBody.includes('Twiml='), 'Section 58.40: Body contains Twiml');
+    const sentTwiml = new URLSearchParams(capturedBody).get('Twiml') || '';
+    assert(sentTwiml.includes('<Dial callerId="+919876543210"><Number>+919876543211</Number></Dial>'), 'Section 58.40: TwiML contains valid Dial and Number elements');
+  } finally {
+    process.env.ENABLE_LIVE_TELEPHONY_TRANSFER = origTelephony;
+    process.env.TWILIO_ACCOUNT_SID = origSid;
+    process.env.TWILIO_AUTH_TOKEN = origToken;
+  }
   });
 });

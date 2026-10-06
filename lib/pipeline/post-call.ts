@@ -264,7 +264,7 @@ export async function processPostCallPipeline(
             target_role: payload.target_role,
           },
           recording_url: payload.recording_url,
-          agent_version: 'v1.0.1',
+          agent_version: 'v1.0.2',
         },
         tenantId
       );

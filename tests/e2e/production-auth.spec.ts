@@ -46,12 +46,12 @@ test.describe('LogiVoice V1 — Production Mode Auth & Proxy Security E2E', () =
     expect(liveRes.status()).toBe(200);
     const liveData = await liveRes.json();
     expect(liveData.status).toBe('UP');
-    expect(liveData.version).toBe('1.0.1');
+    expect(liveData.version).toBe('1.0.2');
 
     const readyRes = await request.get('/api/health');
     expect([200, 503]).toContain(readyRes.status());
     const readyData = await readyRes.json();
     expect(['HEALTHY', 'DEGRADED']).toContain(readyData.status);
-    expect(readyData.version).toBe('1.0.1');
+    expect(readyData.version).toBe('1.0.2');
   });
 });

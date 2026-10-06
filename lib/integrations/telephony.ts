@@ -10,6 +10,7 @@
  */
 
 import { getCanonicalTelephonyCredentials } from '@/lib/env';
+import twilio from 'twilio';
 
 export interface TelephonyTransferRequest {
   callId?: string;
@@ -111,9 +112,13 @@ export async function executeProviderCallTransfer(
       }
       const safeCallerPhone = cleanCallerPhone && E164_PHONE_REGEX.test(cleanCallerPhone) ? cleanCallerPhone : '';
 
-      // Secure XML construction: real XML escaping, never URI-encoded literals in XML
-      const callerAttr = safeCallerPhone ? ` callerId="${escapeXml(safeCallerPhone)}"` : '';
-      const safeTwiml = `<Response><Dial${callerAttr}>${escapeXml(cleanTargetPhone)}</Dial></Response>`;
+      // Secure TwiML construction: official Twilio VoiceResponse builder (immune to XML injection)
+      const twimlResponse = new twilio.twiml.VoiceResponse();
+      const dial = safeCallerPhone
+        ? twimlResponse.dial({ callerId: safeCallerPhone })
+        : twimlResponse.dial();
+      dial.number(cleanTargetPhone);
+      const safeTwiml = twimlResponse.toString();
 
       // Call Resource Update: ONLY send Twiml parameter (To is only for new outbound calls)
       const res = await fetch(providerUrl, {

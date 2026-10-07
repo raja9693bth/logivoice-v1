@@ -103,6 +103,9 @@ test.describe('LogiVoice V1 — Administrative Portal Real UI Mutation & Persist
     const submitBtn = page.locator('button:has-text("Create Rate Card"), button:has-text("Save Rate Card")');
     await submitBtn.click();
 
+    // Wait for drawer to close upon successful API response
+    await expect(originInput).toBeHidden({ timeout: 10000 });
+
     // Reload and verify persistence
     await page.reload();
     await expect(page.locator('h1')).toContainText('Approved Rate Cards');
@@ -135,6 +138,9 @@ test.describe('LogiVoice V1 — Administrative Portal Real UI Mutation & Persist
     // Save as draft using exact button label
     const saveDraftBtn = page.locator('button:has-text("Create Draft Policy")');
     await saveDraftBtn.click();
+
+    // Wait for drawer to close upon successful save
+    await expect(titleInput).toBeHidden({ timeout: 10000 });
 
     // Reload page
     await page.reload();
@@ -181,6 +187,6 @@ test.describe('LogiVoice V1 — Administrative Portal Real UI Mutation & Persist
     // Verify call detail page
     await page.waitForURL('**/admin/calls/**', { timeout: 10000 });
     await expect(page.locator('h1')).toContainText('Call Investigation:');
-    await expect(page.locator('text=Call Intelligence & Forensic Facts')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('text=Extracted Commercial Facts')).toBeVisible({ timeout: 10000 });
   });
 });

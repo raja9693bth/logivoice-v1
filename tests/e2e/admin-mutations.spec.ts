@@ -120,11 +120,11 @@ test.describe('LogiVoice V1 — Administrative Portal Real UI Mutation & Persist
     await effectiveFromInput.fill('2026-10-01');
 
     // Submit rate card and wait for network 201/200
-    const submitBtn = page.locator('button:has-text("Create Rate Card")');
+    const submitBtn = page.locator('button:has-text("Save Rate Card")');
     await expect(submitBtn).toBeVisible({ timeout: 5000 });
 
     const [createResponse] = await Promise.all([
-      page.waitForResponse((res) => res.url().includes('/api/rate-cards') && (res.status() === 200 || res.status() === 201), { timeout: 10000 }),
+      page.waitForResponse((res) => res.url().includes('/api/rates') && (res.status() === 200 || res.status() === 201), { timeout: 10000 }),
       submitBtn.click(),
     ]);
     expect(createResponse.ok()).toBeTruthy();

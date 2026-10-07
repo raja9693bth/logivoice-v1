@@ -94,13 +94,21 @@ async function getGoogleAccessToken(): Promise<string | null> {
   }
 }
 
-export async function syncCallToGoogleSheets(
-  call: Call,
-  lead?: Lead | null
-): Promise<SheetSyncResult> {
-  const tenantId = call.tenant_id || DEFAULT_TENANT_ID;
+/**
+ * Canonical Google Sheets target resolver (Phase 5).
+ * Resolves spreadsheet ID and target worksheet tab authoritatively from tenant client_configs,
+ * falling back gracefully to environment variables.
+ * Shared between normal synchronization and UNKNOWN reconciliation to prevent target drift.
+ */
+export async function resolveGoogleSheetsTarget(
+  tenantId: string = DEFAULT_TENANT_ID
+): Promise<{
+  spreadsheetId?: string;
+  worksheetName: string;
+  isConfigured: boolean;
+}> {
   let spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
-  let targetWorksheet = process.env.GOOGLE_SHEETS_WORKSHEET_NAME || 'LogiVoice_Calls';
+  let worksheetName = process.env.GOOGLE_SHEETS_WORKSHEET_NAME || 'LogiVoice_Calls';
 
   try {
     const config = await db.getClientConfig(tenantId);
@@ -109,11 +117,27 @@ export async function syncCallToGoogleSheets(
     }
     const customTab = (config.sheets_config as Record<string, unknown>)?.worksheet_name;
     if (typeof customTab === 'string' && customTab.trim()) {
-      targetWorksheet = customTab.trim();
+      worksheetName = customTab.trim();
     }
   } catch {
     // Graceful fallback to env config
   }
+
+  return {
+    spreadsheetId,
+    worksheetName,
+    isConfigured: Boolean(spreadsheetId),
+  };
+}
+
+export async function syncCallToGoogleSheets(
+  call: Call,
+  lead?: Lead | null
+): Promise<SheetSyncResult> {
+  const tenantId = call.tenant_id || DEFAULT_TENANT_ID;
+  const target = await resolveGoogleSheetsTarget(tenantId);
+  const spreadsheetId = target.spreadsheetId;
+  const targetWorksheet = target.worksheetName;
 
   if (!spreadsheetId) {
     return {
@@ -388,8 +412,9 @@ export async function checkIfCallExistsInGoogleSheets(
   tenantId: string = DEFAULT_TENANT_ID
 ): Promise<'EXISTS' | 'NOT_FOUND' | 'UNCERTAIN'> {
   const isMock = process.env.ENABLE_MOCK_INTEGRATIONS === 'true';
-  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
-  const configuredTab = process.env.GOOGLE_SHEETS_WORKSHEET_NAME || 'LogiVoice_Calls';
+  const target = await resolveGoogleSheetsTarget(tenantId);
+  const spreadsheetId = target.spreadsheetId;
+  const configuredTab = target.worksheetName;
 
   if (!spreadsheetId) {
     if (isMock) {
@@ -404,7 +429,7 @@ export async function checkIfCallExistsInGoogleSheets(
   }
 
   try {
-    // Read Column B (Call ID column) from target worksheet
+    // Read Column B (Call ID column) from tenant target worksheet
     const range = `${encodeURIComponent(configuredTab)}!B:B`;
     const res = await fetch(
       `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${range}`,

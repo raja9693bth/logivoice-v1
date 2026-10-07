@@ -20,6 +20,7 @@
 | **B-08** | **Approved Call Recording & AI Voice Disclosure Script** | Client Legal / Compliance Department | `client_configs.greeting_text`, `lib/voice/context-assembler.ts` | Place test call and verify agent initial greeting includes legally compliant AI identity and call recording disclosure. |
 | **B-09** | **Data Retention & PII Masking Regulatory Policy** | Client Data Protection Officer | `client_configs.retention_days`, cron maintenance script | Verify audit logs and call records honor agreed retention windows and customer phone numbers remain masked in logs. |
 | **B-10** | **Shared Development Credential Rotation** | GCP Console Admin, Retell Admin, Supabase Owner | Respective cloud provider consoles | Perform manual secret rotation on any credentials touched in shared development environments before production DNS cutover. |
+| **B-11** | **Production Cron Scheduler / Hosting Plan Upgrade (Sub-Minute / 5-Min Retry SLA)** | DevOps / Cloud Infrastructure Team | Vercel Project Settings (Pro plan) or external webhook trigger (Cloudflare Worker / AWS EventBridge) | Vercel Hobby plan natively limits cron frequency to daily (`0 0 * * *`). For production minute-scale retry SLAs (e.g. 5-min intervals), upgrade to Vercel Pro or trigger `/api/cron/retry-worker` via an authorized external scheduler using `Authorization: Bearer ${CRON_SECRET}`. |
 
 ---
 

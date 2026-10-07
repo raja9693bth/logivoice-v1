@@ -201,8 +201,12 @@ export async function POST(req: NextRequest) {
 
       const reason = (call?.disconnection_reason || (callData.disconnection_reason as string) || '').toLowerCase();
       let outcome: CallOutcome = 'COMPLETED';
-      if (reason.includes('transfer')) outcome = 'TRANSFERRED';
-      else if (reason.includes('callback')) outcome = 'CALLBACK_SCHEDULED';
+      if (reason.includes('transfer')) {
+        const confirmedTransfer = await db.getConfirmedTransferForCall(externalCallId, tenantId);
+        outcome = confirmedTransfer?.transferred ? 'TRANSFERRED' : 'CALLBACK_SCHEDULED';
+      } else if (reason.includes('callback')) {
+        outcome = 'CALLBACK_SCHEDULED';
+      }
       else if (reason.includes('miss') || reason.includes('no_answer') || reason.includes('timeout')) outcome = 'MISSED';
       else if (reason.includes('fail') || reason.includes('error')) outcome = 'FAILED';
       else if (reason.includes('user_hangup') && durationSec < 10) outcome = 'ABANDONED';

@@ -48,9 +48,10 @@ import { retrieveRelevantKnowledge } from '../lib/knowledge/retrieval';
 import { computeLeadTemperature } from '../lib/rules/lead-temperature';
 import { processPostCallPipeline, resetPostCallPipelineIdempotency } from '../lib/pipeline/post-call';
 import { assembleVoiceRuntimeContext } from '../lib/voice/context-assembler';
-import { sendFollowupMessage } from '../lib/integrations/messaging';
-import { syncCallToGoogleSheets, resetSheetsSyncIdempotency } from '../lib/integrations/google-sheets';
+import { sendFollowupMessage, sendControlledFollowup } from '../lib/integrations/messaging';
+import { syncCallToGoogleSheets, resetSheetsSyncIdempotency, resolveGoogleSheetsTarget, checkIfCallExistsInGoogleSheets } from '../lib/integrations/google-sheets';
 import { executeProviderCallTransfer } from '../lib/integrations/telephony';
+import { reconcileUnknownClaims } from '../lib/pipeline/retry-worker';
 import { RETELL_TOOL_DEFINITIONS } from '../lib/voice/retell-tools';
 import { proxy as middleware } from '../proxy';
 import { NextRequest } from 'next/server';
@@ -1725,5 +1726,50 @@ describe('LOGIVOICE V1 — FORENSIC BACKEND AUTOMATED TEST SUITE', () => {
     process.env.TWILIO_ACCOUNT_SID = origSid;
     process.env.TWILIO_AUTH_TOKEN = origToken;
   }
+
+  // 41. Phase 5: Tenant-Aware Google Sheets Target Resolution
+  const tenantTargetDefault = await resolveGoogleSheetsTarget(DEFAULT_TENANT_ID);
+  assert(tenantTargetDefault.worksheetName === 'LogiVoice_Calls', 'Section 58.41: Default tenant resolves canonical worksheet');
+
+  const customTenantId = '11111111-2222-3333-4444-555555555555';
+  await db.updateClientConfig(customTenantId, {
+    sheets_config: {
+      sync_enabled: true,
+      spreadsheet_id: 'custom-tenant-sheet-xyz',
+      worksheet_name: 'Custom_Tenant_Tab',
+    },
+  });
+
+  const tenantTargetCustom = await resolveGoogleSheetsTarget(customTenantId);
+  assert(tenantTargetCustom.spreadsheetId === 'custom-tenant-sheet-xyz', 'Section 58.41: Custom tenant resolves tenant-specific spreadsheet ID');
+  assert(tenantTargetCustom.worksheetName === 'Custom_Tenant_Tab', 'Section 58.41: Custom tenant resolves tenant-specific worksheet tab');
+
+  // 42. Phase 4: WhatsApp UNKNOWN Reconciliation Idempotency
+  const unknownClaimKey = `followup:${DEFAULT_TENANT_ID}:unknown-test-call-123`;
+  const claimRes = await db.claimSideEffect(DEFAULT_TENANT_ID, unknownClaimKey, 'FOLLOWUP_SEND', 'test-call-123');
+  if (claimRes.claimed) {
+    await db.recordSideEffectUnknown(DEFAULT_TENANT_ID, unknownClaimKey, 'Simulated timeout during Meta API send', {}, claimRes.claim_token);
+  }
+  await reconcileUnknownClaims(10);
+  const unkAfter = await db.getSideEffectClaim(DEFAULT_TENANT_ID, unknownClaimKey);
+  assert(unkAfter?.status === 'UNKNOWN', 'Section 58.42: WhatsApp UNKNOWN claim with uncertain status remains UNKNOWN without blind resend');
+
+  // 43. Phase 10: No Claim Leaks for EMAIL and Unconfigured Channels
+  const emailCallId = `email-leak-check-${Date.now()}`;
+  const emailRes = await sendControlledFollowup({
+    tenantId: DEFAULT_TENANT_ID,
+    callId: emailCallId,
+    recipientPhone: '+919876543210',
+    templateId: 'INQUIRY_RECEIVED',
+    templateData: { customerName: 'Test' },
+    channel: 'EMAIL',
+  });
+  assert(emailRes.status === 'UNCONFIGURED', 'Section 58.43: EMAIL returns UNCONFIGURED status');
+  const emailClaim = await db.getSideEffectClaim(DEFAULT_TENANT_ID, `followup:${DEFAULT_TENANT_ID}:${emailCallId}`);
+  assert(emailClaim?.status !== 'PROCESSING', 'Section 58.43: EMAIL branch does not leak claim in PROCESSING state');
+
+  // 44. Phase 7: Telephony Transfer Outcome Guard
+  const confirmedNoBridge = await db.getConfirmedTransferForCall('unconfirmed-call-999', DEFAULT_TENANT_ID);
+  assert(confirmedNoBridge === null, 'Section 58.44: Unconfirmed or in-progress transfer returns null for confirmed bridge');
   });
 });

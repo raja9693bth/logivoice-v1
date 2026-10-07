@@ -291,10 +291,11 @@ export async function getAuthContext(
   if (!isProduction && 'cookies' in req && req.cookies && typeof req.cookies.get === 'function') {
     const devCookie = req.cookies.get('logivoice_dev_session')?.value;
     if (devCookie === 'true') {
+      const devRole = (req.cookies.get('logivoice_dev_role')?.value as UserRole) || 'ADMIN';
       return {
-        userId: 'dispatcher-local-01',
+        userId: 'admin-local-01',
         tenantId: DEFAULT_TENANT_ID,
-        role: 'DISPATCHER',
+        role: devRole,
         isAuthenticated: true,
         source: 'DEV_SESSION',
       };

@@ -315,9 +315,24 @@ export async function reconcileUnknownClaims(limit = 10): Promise<{
         }
       } else if (claim.job_type === 'FOLLOWUP_SEND') {
         let isDispatched = false;
+        let isProvenNotSent = false;
         let providerMsgId: string | undefined;
 
-        if (claim.call_id) {
+        // Authoritatively check claim result and provider reference
+        const claimRecord = await db.getSideEffectClaim(tenantId, claimKey);
+        const claimResult = claimRecord?.result as Record<string, unknown> | undefined;
+
+        if (claimRecord?.provider_reference) {
+          isDispatched = true;
+          providerMsgId = claimRecord.provider_reference;
+        } else if (claimResult?.provider_message_id) {
+          isDispatched = true;
+          providerMsgId = String(claimResult.provider_message_id);
+        } else if (claimResult?.proven_not_sent === true || claimResult?.provider_not_sent === true) {
+          isProvenNotSent = true;
+        }
+
+        if (!isDispatched && claim.call_id) {
           const followup = await db.getFollowupByCallId(claim.call_id, tenantId);
           if (followup && (followup.status === 'SENT' || followup.status === 'DELIVERED')) {
             isDispatched = true;
@@ -341,8 +356,8 @@ export async function reconcileUnknownClaims(limit = 10): Promise<{
             status: 'PROCESSED',
             message: 'Reconciliation confirmed WhatsApp follow-up was dispatched',
           });
-        } else if (claim.call_id) {
-          // Controlled safe resend only when distinct call record exists
+        } else if (isProvenNotSent) {
+          // Phase 4: Only transition UNKNOWN -> RETRYABLE when non-delivery is positively proven
           await transitionUnknownClaim(
             tenantId,
             claimKey,
@@ -355,16 +370,16 @@ export async function reconcileUnknownClaims(limit = 10): Promise<{
             claim_key: claimKey,
             job_type: claim.job_type,
             status: 'PROCESSED',
-            message: 'Reconciled from UNKNOWN to RETRYABLE for controlled send',
+            message: 'Reconciliation verified non-delivery: safe for controlled retry',
           });
         } else {
-          // Phase 31: If uncertain or missing call record, do not blindly resend
+          // Phase 4 & Phase 31: If provider status is uncertain, NEVER blindly resend; remain UNKNOWN for operator/webhook review
           await db.updateClaimReconciliation(tenantId, claimKey, 'STILL_UNKNOWN');
           results.push({
             claim_key: claimKey,
             job_type: claim.job_type,
             status: 'UNKNOWN',
-            message: 'Follow-up provider status uncertain: remained UNKNOWN for operator review',
+            message: 'Follow-up provider status uncertain: remained UNKNOWN awaiting webhook/operator verification (never blindly resent)',
           });
         }
       } else {

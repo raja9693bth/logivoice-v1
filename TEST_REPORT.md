@@ -101,7 +101,9 @@ npm run build
 
 ---
 
-## 5. Production-Mode Auth & Security E2E Suite (`tests/e2e/production-auth.spec.ts`)
+## 5. Administrative Portal E2E Suites
+
+### A. Production-Mode Auth & Security Suite (`tests/e2e/production-auth.spec.ts`)
 
 | Test Spec | Target / Invariant | Result |
 | :--- | :--- | :---: |
@@ -111,16 +113,27 @@ npm run build
 | **4. Controlled Error Banner** | Navigating with `error=AUTH_TEMPORARILY_UNAVAILABLE` displays controlled user notice without 504 | **PASS** (431ms) |
 | **5. Health Endpoints** | `/api/health?check=liveness` returns 200 UP; `/api/health` readiness returns boundedly | **PASS** (86ms) |
 
+### B. Real UI Mutation & Reload Persistence Suite (`tests/e2e/admin-mutations.spec.ts`)
+
+| Test Surface | Mutation Action | Verified API & DB Effect | Reload Persistence | Result |
+| :--- | :--- | :--- | :--- | :---: |
+| **Requests Console** | Update status to `CONFIRMED` | `PATCH /api/requests` commits status change | Verified after page reload | **PASS** |
+| **Leads Pipeline** | Update sales stage to `QUALIFIED` | `PATCH /api/leads` commits stage update | Verified after page reload | **PASS** |
+| **Rate Cards** | Create new `DRAFT` rate card | `POST /api/rates` commits card | Row filtered & verified on reload | **PASS** |
+| **Knowledge Base** | Create new `DRAFT` operational policy | `POST /api/knowledge` commits item | Search verified after reload | **PASS** |
+| **System Settings** | Update business profile brand name | `POST /api/settings` persists config | Input value verified on reload | **PASS** |
+| **Calls & Intelligence**| Inspect call session & transcript turns | `GET /api/calls/[id]` returns verified turns | Turns & intelligence render | **PASS** |
+
 ---
 
 ## 6. Live Production Runtime Audit & Load Test Benchmarks (`https://logivoice-v1.vercel.app`)
 
 | Test Type | Request Count | Status / Outcome | Latency Metrics | 504 Timeouts |
 | :--- | :---: | :--- | :--- | :---: |
-| **Live Production /admin Unauthenticated** | 100 | 100/100 HTTP 307 Redirects to `/login` | p50: **49ms**, p95: **84ms**, p99: **290ms**, max: **290ms** | **0** |
-| **Live Production /admin Stale Cookie** | 20 | 20/20 HTTP 307 Redirects to `/login` | p50: **51ms**, max: **621ms** | **0** |
-| **Live Production /api/health Liveness** | 1 | HTTP 200 UP (`v1.0.2`, SHA `9b176a16...`) | 499ms | **0** |
-| **Live Production /api/health Readiness** | 1 | HTTP 503 DEGRADED (bounded DB probe) | 7293ms | **0** |
-| **Live Production /api/calls Unauth** | 1 | HTTP 401 Unauthorized | 529ms | **0** |
-| **Live Production Webhook Unsigned** | 1 | HTTP 404 / Rejection | 274ms | **0** |
+| **Live Production /admin Unauthenticated** | 100 | 100/100 HTTP 307 Redirects to `/login` | p50: **49ms**, p95: **68ms**, p99: **571ms**, max: **571ms** | **0** |
+| **Live Production /admin Stale Cookie** | 20 | 20/20 HTTP 307 Redirects to `/login` | p50: **47ms**, max: **54ms** | **0** |
+| **Live Production /api/health Liveness** | 1 | HTTP 200 UP (`v1.0.2`, commit `d140640...`) | 499ms | **0** |
+| **Live Production /api/health Readiness** | 1 | HTTP 503 DEGRADED (bounded non-blocking probe) | Bounded | **0** |
+| **Live Production /api/calls Unauth** | 1 | HTTP 401 Unauthorized | Bounded | **0** |
+| **Live Production Webhook Unsigned** | 1 | HTTP 404 / Rejection | Bounded | **0** |
 

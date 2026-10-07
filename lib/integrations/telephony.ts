@@ -177,12 +177,9 @@ export async function executeProviderCallTransfer(
       };
     }
 
-    // Provider accepting updated TwiML is TRANSFER_REQUEST_ACCEPTED.
-    // TRANSFER_CONNECTED is reserved for provider callbacks proving the leg bridged.
-    const transferStatus =
-      responseData?.status === 'completed'
-        ? 'TRANSFER_CONNECTED'
-        : 'TRANSFER_REQUEST_ACCEPTED';
+    // Provider accepting updated TwiML is strictly TRANSFER_REQUEST_ACCEPTED.
+    // TRANSFER_CONNECTED is reserved for verified provider callbacks/events proving the destination leg bridged.
+    const transferStatus = 'TRANSFER_REQUEST_ACCEPTED';
 
     return {
       success: true,

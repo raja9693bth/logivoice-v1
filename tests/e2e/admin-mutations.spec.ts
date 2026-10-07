@@ -31,7 +31,7 @@ test.describe('LogiVoice V1 — Administrative Portal Real UI Mutation & Persist
     if (await confirmBtn.isVisible()) {
       await confirmBtn.click();
       // Status badge in drawer updates
-      await expect(page.locator('text=CONFIRMED').first()).toBeVisible({ timeout: 5000 });
+      await expect(page.locator('span:has-text("CONFIRMED")').first()).toBeVisible({ timeout: 5000 });
     }
 
     // Reload page and verify persistence across reload
@@ -58,10 +58,10 @@ test.describe('LogiVoice V1 — Administrative Portal Real UI Mutation & Persist
     const qualifiedBtn = page.locator('button:has-text("Mark Qualified")');
     if (await qualifiedBtn.isVisible()) {
       await qualifiedBtn.click();
-      await expect(page.locator('text=QUALIFIED').first()).toBeVisible({ timeout: 5000 });
+      await expect(page.locator('span:has-text("QUALIFIED")').first()).toBeVisible({ timeout: 5000 });
     }
 
-    // Reload and assert persistence
+    // Reload page and assert persistence
     await page.reload();
     await expect(page.locator('h1')).toContainText('Leads & Post-Call Nurturing');
     await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
@@ -86,6 +86,12 @@ test.describe('LogiVoice V1 — Administrative Portal Real UI Mutation & Persist
 
     const vehicleInput = page.locator('input#formVehicle');
     await vehicleInput.fill('32ft Multi-Axle');
+
+    const minWeightInput = page.locator('input#formMinWeight');
+    await minWeightInput.fill('5.0');
+
+    const maxWeightInput = page.locator('input#formMaxWeight');
+    await maxWeightInput.fill('15.0');
 
     const priceInput = page.locator('input#formPrice');
     await priceInput.fill('38000');
@@ -126,8 +132,8 @@ test.describe('LogiVoice V1 — Administrative Portal Real UI Mutation & Persist
     const contentInput = page.locator('textarea#knowledge-content, textarea#content');
     await contentInput.fill('Reefer container temperatures must remain between -18C and -22C throughout transit.');
 
-    // Save as draft
-    const saveDraftBtn = page.locator('button:has-text("Save as Draft")');
+    // Save as draft using exact button label
+    const saveDraftBtn = page.locator('button:has-text("Create Draft Policy")');
     await saveDraftBtn.click();
 
     // Reload page
@@ -145,8 +151,7 @@ test.describe('LogiVoice V1 — Administrative Portal Real UI Mutation & Persist
     await page.goto('/admin/settings');
     await expect(page.locator('h1')).toContainText('System & Tenant Settings');
 
-    // Fill test brand name
-    const brandInput = page.locator('input#brandName, input[name="brandName"]').first();
+    const brandInput = page.locator('input[name="brand_name"], input#brandName, input[placeholder*="Brand"]').first();
     if (await brandInput.isVisible()) {
       await brandInput.fill('LogiVoice Prime Fleet');
 
@@ -169,13 +174,13 @@ test.describe('LogiVoice V1 — Administrative Portal Real UI Mutation & Persist
     // Wait for calls table
     await expect(page.locator('table tbody tr').first()).toBeVisible({ timeout: 10000 });
 
-    // Open first call details
-    const inspectBtn = page.locator('table tbody tr').first().locator('button:has-text("Inspect")');
-    await inspectBtn.click();
+    // Open first call details via Full link
+    const fullLink = page.locator('table tbody tr').first().locator('a:has-text("Full")');
+    await fullLink.click();
 
     // Verify call detail page
     await page.waitForURL('**/admin/calls/**', { timeout: 10000 });
-    await expect(page.locator('h1')).toContainText('Call Session');
+    await expect(page.locator('h1')).toContainText('Call Investigation:');
     await expect(page.locator('text=Call Intelligence & Forensic Facts')).toBeVisible({ timeout: 10000 });
   });
 });

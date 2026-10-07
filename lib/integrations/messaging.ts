@@ -200,25 +200,55 @@ export async function sendControlledFollowup(
       const data = await res.json();
       if (res.ok && data.messages?.[0]?.id) {
         const providerMessageId = data.messages[0].id;
-        await db.completeSideEffect(
-          tenantId,
-          claimKey,
-          {
-            business_status: 'SENT',
-            provider_message_id: providerMessageId,
-            provider: 'META_WHATSAPP_CLOUD_API',
-            sent_at: new Date().toISOString(),
-          },
-          claimResult.claim_token
-        );
+        try {
+          await db.completeSideEffect(
+            tenantId,
+            claimKey,
+            {
+              business_status: 'SENT',
+              provider_message_id: providerMessageId,
+              provider: 'META_WHATSAPP_CLOUD_API',
+              provider_accepted: true,
+              sent_at: new Date().toISOString(),
+            },
+            claimResult.claim_token
+          );
 
-        return {
-          success: true,
-          status: 'SENT',
-          providerMessageId,
-          provider: 'META_WHATSAPP_CLOUD_API',
-          renderedText,
-        };
+          return {
+            success: true,
+            status: 'SENT',
+            providerMessageId,
+            provider: 'META_WHATSAPP_CLOUD_API',
+            renderedText,
+          };
+        } catch (dbErr: any) {
+          // Directive Section 4: If local DB settlement fails after provider acceptance,
+          // NEVER mark as ordinary RETRYABLE. Use UNKNOWN / RECONCILIATION_REQUIRED
+          // with durable provider truth retained to prevent duplicate message dispatch.
+          const dbErrMsg = dbErr instanceof Error ? dbErr.message : 'Database error completing side effect claim';
+          await db.recordSideEffectUnknown(
+            tenantId,
+            claimKey,
+            `Local DB settlement failed after Meta accepted message: ${dbErrMsg}`,
+            {
+              business_status: 'SENT',
+              provider_message_id: providerMessageId,
+              provider: 'META_WHATSAPP_CLOUD_API',
+              provider_accepted: true,
+              reconciliation_required: true,
+            },
+            claimResult.claim_token
+          );
+
+          return {
+            success: false,
+            status: 'UNKNOWN',
+            providerMessageId,
+            provider: 'META_WHATSAPP_CLOUD_API',
+            renderedText,
+            error: `Local DB settlement failed after Meta accepted message: ${dbErrMsg}`,
+          };
+        }
       } else {
         const errMsg = data.error?.message || `WhatsApp Cloud API HTTP ${res.status}`;
         await db.failSideEffect(tenantId, claimKey, errMsg, true, 60000, claimResult.claim_token);

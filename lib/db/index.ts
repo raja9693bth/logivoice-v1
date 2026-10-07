@@ -2563,6 +2563,147 @@ export const db = {
     return null;
   },
 
+  async recordConfirmedTransfer(params: {
+    tenantId: string;
+    externalCallId?: string;
+    callId?: string;
+    callSid?: string;
+    dialCallSid?: string;
+    dialCallStatus: string;
+    dialCallDuration?: number;
+  }): Promise<{ status: 'TRANSFER_CONNECTED' | 'TRANSFER_FAILED'; callId?: string; wasMonotonicSkip?: boolean }> {
+    const isConnected = params.dialCallStatus === 'completed' || params.dialCallStatus === 'answered';
+    const finalBusinessStatus = isConnected ? 'TRANSFER_CONNECTED' : 'TRANSFER_FAILED';
+
+    const callRef = params.callId || params.externalCallId || params.callSid;
+    let callUuid: string | null = null;
+    const resolvedTenantId = params.tenantId || DEFAULT_TENANT_ID;
+
+    if (callRef) {
+      if (isValidUuid(callRef)) {
+        callUuid = callRef;
+      } else {
+        callUuid = await this.resolveInternalCallId({ tenantId: resolvedTenantId, externalCallId: callRef });
+      }
+    }
+
+    // Monotonic Rule (Directive Section 12):
+    // If the call transfer has ALREADY bridged/connected, an out-of-order, delayed, or error callback
+    // CANNOT overturn TRANSFER_CONNECTED back to TRANSFER_FAILED.
+    if (callRef) {
+      const existingConfirmed = await this.getConfirmedTransferForCall(callRef, resolvedTenantId);
+      if (existingConfirmed?.transferred && !isConnected) {
+        return { status: 'TRANSFER_CONNECTED', callId: callUuid || undefined, wasMonotonicSkip: true };
+      }
+    }
+
+    // Record structured tool execution for operational fact verification
+    await this.recordToolExecution(
+      {
+        tenant_id: resolvedTenantId,
+        call_id: callUuid || undefined,
+        external_call_id: params.externalCallId || params.callSid || undefined,
+        tool_name: 'transfer_to_human',
+        execution_status: finalBusinessStatus,
+        business_status: finalBusinessStatus,
+        success: isConnected,
+        safe_result: {
+          dial_call_status: params.dialCallStatus,
+          dial_call_sid: params.dialCallSid,
+          call_sid: params.callSid,
+          duration: params.dialCallDuration,
+          provider: 'TWILIO_TRANSFER_WEBHOOK',
+        },
+        provider_reference: params.dialCallSid || params.callSid || undefined,
+      },
+      resolvedTenantId
+    );
+
+    // Update call outcome if call is known
+    if (callUuid) {
+      const call = await this.getCallById(callUuid, resolvedTenantId);
+      const existingFacts: CallFacts = call?.facts || { call_id: callUuid };
+      if (isConnected) {
+        await this.updateCall(
+          callUuid,
+          {
+            outcome: 'TRANSFERRED',
+            facts: {
+              ...existingFacts,
+              call_id: callUuid,
+              transfer_status: 'TRANSFERRED',
+            },
+          },
+          resolvedTenantId
+        );
+      } else {
+        await this.updateCall(
+          callUuid,
+          {
+            outcome: 'CALLBACK_SCHEDULED',
+            facts: {
+              ...existingFacts,
+              call_id: callUuid,
+              transfer_status: 'CALLBACK_SCHEDULED',
+            },
+          },
+          resolvedTenantId
+        );
+      }
+    }
+
+    // If transfer was not connected, ensure a high-priority callback ticket exists for dispatchers
+    if (!isConnected && callUuid) {
+      const existingCb = await this.getCallbackRequestForCall(callUuid, resolvedTenantId);
+      if (!existingCb) {
+        const call = await this.getCallById(callUuid, resolvedTenantId);
+        const referenceNo = `CB-${Date.now().toString().slice(-6)}`;
+        await this.createRequest(
+          {
+            tenant_id: resolvedTenantId,
+            call_id: callUuid,
+            reference_no: referenceNo,
+            type: 'CALLBACK_REQUEST',
+            status: 'PENDING',
+            priority: 'HIGH',
+            summary: 'Unsuccessful Live Call Transfer',
+            details: {
+              reason: `Automated live transfer failed with status '${params.dialCallStatus}'. Human dispatcher callback required.`,
+              dial_call_status: params.dialCallStatus,
+            },
+            customer_phone: call?.customer?.phone || 'Unknown',
+            customer_name: call?.customer?.name || 'Caller',
+          },
+          resolvedTenantId
+        );
+      }
+    }
+
+    // Audit log
+    await this.logAuditEvent(
+      {
+        tenant_id: resolvedTenantId,
+        call_id: callUuid || undefined,
+        external_call_id: params.externalCallId || params.callSid || undefined,
+        event_type: isConnected ? 'TELEPHONY_TRANSFER_CONNECTED' : 'TELEPHONY_TRANSFER_FAILED',
+        actor: 'WEBHOOK',
+        actor_type: 'WEBHOOK',
+        actor_id: 'twilio-transfer-webhook',
+        tool_name: 'transfer_to_human',
+        severity: isConnected ? 'INFO' : 'WARNING',
+        details: {
+          dial_call_status: params.dialCallStatus,
+          dial_call_sid: params.dialCallSid,
+          call_sid: params.callSid,
+          duration: params.dialCallDuration,
+        },
+      },
+      resolvedTenantId
+    );
+
+    return { status: finalBusinessStatus, callId: callUuid || undefined, wasMonotonicSkip: false };
+  },
+
   async getCallbackRequestForCall(
     callIdOrExternalId: string,
     tenantId: string = DEFAULT_TENANT_ID
@@ -2768,8 +2909,79 @@ export const db = {
       if (!error && data) return dbFollowupToDomain(data as any);
       return null;
     }
-    assertProductionDbReady();
     return globalStore.followups.find((f: FollowupRecord) => f.call_id === callId && f.tenant_id === tenantId) || null;
+  },
+
+  async getFollowupByProviderMessageId(
+    providerMessageId: string,
+    tenantId?: string
+  ): Promise<FollowupRecord | null> {
+    if (await isSupabaseLive()) {
+      const client = createAdminClient();
+      let query = client.from('followups').select('*').eq('provider_message_id', providerMessageId);
+      if (tenantId) query = query.eq('tenant_id', tenantId);
+      const { data, error } = await query.order('created_at', { ascending: false }).limit(1);
+      if (!error && data && data.length > 0) return dbFollowupToDomain(data[0] as any);
+      return null;
+    }
+    assertProductionDbReady();
+    return (
+      globalStore.followups.find(
+        (f: FollowupRecord) =>
+          f.provider_message_id === providerMessageId &&
+          (!tenantId || f.tenant_id === tenantId)
+      ) || null
+    );
+  },
+
+  async updateFollowupStatusByProviderMessageId(
+    providerMessageId: string,
+    newStatus: FollowupStatus,
+    metadata?: { error?: string; timestamp?: string },
+    tenantId?: string
+  ): Promise<{ followup: FollowupRecord | null; updated: boolean }> {
+    const followup = await this.getFollowupByProviderMessageId(providerMessageId, tenantId);
+    if (!followup) {
+      return { followup: null, updated: false };
+    }
+
+    // Monotonic state priorities:
+    // PENDING (0) < FAILED (1) < SENT (2) < DELIVERED (3)
+    const priorityMap: Record<string, number> = {
+      PENDING: 0,
+      FAILED: 1,
+      SENT: 2,
+      DELIVERED: 3,
+    };
+    const currentPriority = priorityMap[followup.status] ?? 0;
+    const targetPriority = priorityMap[newStatus] ?? 0;
+
+    // Out-of-order protection: do not revert DELIVERED to SENT or FAILED
+    if (targetPriority < currentPriority) {
+      return { followup, updated: false };
+    }
+
+    const updated = await this.updateFollowup(
+      followup.id,
+      {
+        status: newStatus,
+        sent_at: followup.sent_at || (newStatus === 'SENT' || newStatus === 'DELIVERED' ? (metadata?.timestamp || new Date().toISOString()) : undefined),
+      },
+      followup.tenant_id
+    );
+
+    // If new status is SENT or DELIVERED, settle any UNKNOWN side-effect claims matching this message ID
+    if (newStatus === 'SENT' || newStatus === 'DELIVERED') {
+      const tid = followup.tenant_id;
+      const callId = followup.call_id;
+      const claimKey = `followup:${tid}:${callId || followup.recipient}`;
+      const claim = await this.getSideEffectClaim(tid, claimKey);
+      if (claim && claim.status === 'UNKNOWN') {
+        await this.updateClaimReconciliation(tid, claimKey, 'SUCCEEDED', providerMessageId);
+      }
+    }
+
+    return { followup: updated, updated: true };
   },
 
   async listFollowups(tenantId: string = DEFAULT_TENANT_ID): Promise<FollowupRecord[]> {

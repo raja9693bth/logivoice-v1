@@ -113,10 +113,16 @@ export async function executeProviderCallTransfer(
       const safeCallerPhone = cleanCallerPhone && E164_PHONE_REGEX.test(cleanCallerPhone) ? cleanCallerPhone : '';
 
       // Secure TwiML construction: official Twilio VoiceResponse builder (immune to XML injection)
+      // Secure TwiML construction: official Twilio VoiceResponse builder with connected-leg callback action
       const twimlResponse = new twilio.twiml.VoiceResponse();
-      const dial = safeCallerPhone
-        ? twimlResponse.dial({ callerId: safeCallerPhone })
-        : twimlResponse.dial();
+      const dialOptions: { callerId?: string; action: string; method: 'POST' } = {
+        action: '/api/webhooks/twilio/transfer',
+        method: 'POST',
+      };
+      if (safeCallerPhone) {
+        dialOptions.callerId = safeCallerPhone;
+      }
+      const dial = twimlResponse.dial(dialOptions);
       dial.number(cleanTargetPhone);
       const safeTwiml = twimlResponse.toString();
 

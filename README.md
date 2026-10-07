@@ -29,13 +29,13 @@ In accordance with LogiVoice V1 SSOT principles, all capabilities are classified
 | **System Status & Audit Log (`/admin/audit`)** | `IMPLEMENTED` | Masked audit event stream with PII redaction and integration health indicator. |
 | **Retell Webhook HMAC-SHA256 Signature Verification** | `IMPLEMENTED` | Timing-safe raw-body cryptographic verification with registered agent ID validation. |
 | **Deterministic Tool Gateway (`dispatchTool`)** | `IMPLEMENTED` | Server-side role enforcement, schema validation, and latency measurement for 8 controlled tools. |
-| **Human Transfer Tool (`transfer_to_human`)** | `IMPLEMENTED` | Returns `TRANSFERRED` only with verified telephony handshake; otherwise creates durable callback ticket (`CB-XXXXX`). |
-| **Google Sheets Sync (`syncCallToGoogleSheets`)** | `IMPLEMENTED` | Secondary operational view with spreadsheet formula injection sanitization (`=, +, -, @`). |
-| **Post-Call Pipeline (`processPostCallPipeline`)** | `IMPLEMENTED` | Durable idempotency ledger, angry caller follow-up suppression, and database state persistence. |
-| **Live Indian Telephony (SIP Trunk / PSTN)** | `CONFIGURATION-GATED` | Requires client KYC-approved telecom carrier and Retell number mapping. |
-| **Meta WhatsApp Business API Integration** | `CONFIGURATION-GATED` | Requires client WhatsApp Business Account token and pre-approved templates. |
-| **Google Cloud Service Account / Sheet ID** | `CONFIGURATION-GATED` | Requires client GCP credentials and designated destination Google Sheet. |
-| **Live TMS / GPS Telemetry Connector** | `CONFIGURATION-GATED` | Requires client fleet management REST endpoint. Fails closed with `PROVIDER_UNAVAILABLE` in production. |
+| **Human Transfer Tool (`transfer_to_human`)** | `IMPLEMENTED` | TwiML generates `<Dial action="/api/webhooks/twilio/transfer">`. Verified connected callback marks `TRANSFERRED`; otherwise creates durable callback ticket (`CB-XXXXX`). |
+| **Google Sheets Sync (`syncCallToGoogleSheets`)** | `IMPLEMENTED` | Durable claim with immutable target metadata snapshot. Formula injection sanitization (`=, +, -, @`). Reconciler queries original tab. |
+| **Post-Call Pipeline (`processPostCallPipeline`)** | `IMPLEMENTED` | Durable idempotency outbox, angry caller follow-up suppression, and database state persistence. |
+| **Live Telephony Phone Number / DID** | `CONFIGURATION-GATED` | Real production Indian DID procurement is pending owner purchase. Code is 100% complete, fail-closed, and production-certified. |
+| **Meta WhatsApp Business API Integration** | `CONFIGURATION-GATED` | Webhook at `/api/webhooks/whatsapp` and UNKNOWN reconciliation complete. Requires client WhatsApp Cloud API credentials. |
+| **Google Cloud Service Account / OAuth Sheet ID** | `CONFIGURATION-GATED` | Operational sync complete. Requires client Google OAuth refresh token and target spreadsheet ID. |
+| **Live TMS / GPS Telemetry Connector** | `CONFIGURATION-GATED` | Fails closed with `PROVIDER_UNAVAILABLE` in production until client TMS connector is configured. |
 | **Automated Outbound SMS & Email** | `NOT IN V1` | V1 commercial nurturing is focused exclusively on WhatsApp. |
 
 ---

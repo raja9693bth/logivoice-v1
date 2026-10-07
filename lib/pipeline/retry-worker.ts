@@ -268,9 +268,18 @@ export async function reconcileUnknownClaims(limit = 10): Promise<{
             message: 'Reconciliation confirmed Google Sheets append completed',
           });
         } else {
-          // Authoritatively query target worksheet to prevent duplicate appends (Phase 30)
+          // Read original claim metadata to ensure reconciliation targets the EXACT same sheet (Directive Section 8)
+          const originalClaimMeta = claimRecord?.result as Record<string, unknown> | undefined;
+          const originalTarget = originalClaimMeta?.target_spreadsheet_id
+            ? {
+                spreadsheetId: String(originalClaimMeta.target_spreadsheet_id),
+                worksheetName: originalClaimMeta.target_worksheet_name ? String(originalClaimMeta.target_worksheet_name) : undefined,
+              }
+            : undefined;
+
+          // Authoritatively query target worksheet to prevent duplicate appends (Directive Section 7 & 8)
           const externalCallId = claimKey.split(':').pop() || '';
-          const sheetPresence = await checkIfCallExistsInGoogleSheets(externalCallId, tenantId);
+          const sheetPresence = await checkIfCallExistsInGoogleSheets(externalCallId, tenantId, originalTarget);
 
           if (sheetPresence === 'EXISTS') {
             await transitionUnknownClaim(

@@ -1,16 +1,19 @@
 # LogiVoice V1 — Security & Credential Hygiene Report
 
 ## 1. Executive Security Summary
-LogiVoice V1 implements a defense-in-depth security model across its voice agent gateway, web operations portal, Supabase database, and third-party integrations (Retell AI, Google Sheets, WhatsApp).
+LogiVoice V1 implements a defense-in-depth security model across its voice agent gateway, web operations portal, Supabase database, and third-party integrations (Retell AI, Google Sheets, WhatsApp, Twilio).
 
-As part of the final integrity remediation and hardening:
+As part of the final client-production certification:
 1. Complete static credential scan performed across repository tree, Git history, fixtures, and documentation.
 2. Zero unencrypted or plaintext credentials exist in tracked source code.
 3. Elevated service-role credentials (`SUPABASE_SECRET_KEY`) are strictly confined to server-side data access and never exposed to browser sessions or cookie verifications.
-4. Cryptographic signature verification enforced for Retell voice webhooks and dedicated custom tool secret authentication for function execution.
-5. Spreadsheet formula injection mitigation implemented for Google Sheets integration.
-6. Role-based access control (RBAC), customer shipment privacy, and tenant isolation enforced server-side.
-7. Production CSP hardened without `unsafe-eval`, connect-src constrained, and `frame-ancestors 'none'`.
+4. Cryptographic signature verification enforced for Retell voice webhooks (`retell-sdk` HMAC-SHA256 with timestamp replay bounds) and dedicated custom tool secret authentication.
+5. Official Meta WhatsApp Cloud API webhook implemented at `/api/webhooks/whatsapp` with challenge verification (`hub.challenge`), HMAC-SHA256 signature verification (`X-Hub-Signature-256`), and monotonic state preservation.
+6. Twilio connected-leg transfer callback implemented at `/api/webhooks/twilio/transfer` with official `twilio.validateRequest` signature verification (`X-Twilio-Signature`) and monotonic state transition rules.
+7. Google Sheets immutable target metadata stored in durable claims (`target_spreadsheet_id`, `target_worksheet_name`, `external_call_id`) to prevent configuration drift attacks during reconciliation.
+8. Spreadsheet formula injection mitigation implemented for Google Sheets integration.
+9. Role-based access control (RBAC), customer shipment privacy, and tenant isolation enforced server-side.
+10. Production CSP hardened without `unsafe-eval`, connect-src constrained, and `frame-ancestors 'none'`.
 
 ---
 
@@ -21,8 +24,9 @@ As part of the final integrity remediation and hardening:
 | **Google OAuth Client Secret** | No client secret committed to repository files or Git history. | Protected in `.gitignore` and `.dockerignore` (`client_secret*.json`, `*service-account*.json`). |
 | **Supabase Secret Key** | Server-only `process.env.SUPABASE_SECRET_KEY` used in `lib/supabase/server.ts`. | Elevated secret key is server-only. Browser sessions use standard publishable anon key. |
 | **Retell API Key & Tool Secret** | Server-only environment variables. Dedicated `RETELL_TOOL_SECRET` used for narrow tool endpoint authority rather than broad account key. | Fail-closed validation in production: missing signature/secret or unmapped agent ID returns HTTP 401/403. |
-| **Google Sheets Spreadsheet ID** | Configured via environment variable or database setting. | Explicitly validated; silent fallback to arbitrary spreadsheets or first tabs is prohibited. |
-| **Telephony / WhatsApp Keys** | Server-side only (`WHATSAPP_API_KEY`, `TELEPHONY_PROVIDER_AUTH_TOKEN`). | When unconfigured, transitions to `UNCONFIGURED` state without mock data leakage. |
+| **Google Sheets Spreadsheet ID** | Configured via environment variable or database setting. Immutable claim snapshot prevents target hijacking. | Explicitly validated; silent fallback to arbitrary spreadsheets or first tabs is prohibited. |
+| **Telephony / Twilio Credentials**| Server-side only (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`). | Request signature verified via official Twilio SDK (`twilio.validateRequest`). Forged or tampered requests rejected with HTTP 401. |
+| **Meta WhatsApp Business API** | Server-side only (`WHATSAPP_API_TOKEN`, `WHATSAPP_APP_SECRET`). | Webhook signature verified via HMAC-SHA256 (`X-Hub-Signature-256`). Forged requests rejected with HTTP 401. |
 
 ---
 
@@ -58,45 +62,41 @@ As part of the final integrity remediation and hardening:
   - Constant-time comparison using `crypto.timingSafeEqual`.
   - Agent ID validation ensuring the call belongs to the tenant's configured agent.
 
-### C. Narrow Tool Endpoint Authority & Rate Limiting
-- **Risk**: Exposing broad Retell account API credentials for custom function execution, or flooding the tool gateway.
+### C. Meta WhatsApp Webhook Security (`/api/webhooks/whatsapp`)
+- **Risk**: Attacker spoofing delivery confirmations to trigger unauthorized state changes or poison claim reconciliations.
 - **Mitigation**:
-  - `app/api/retell/tool/route.ts` supports dedicated `RETELL_TOOL_SECRET` or signature verification.
-  - In-memory sliding window rate limiter protects tool route against abuse.
+  - GET challenge verification validates `hub.verify_token` against `WHATSAPP_WEBHOOK_VERIFY_TOKEN`.
+  - POST delivery events validate `X-Hub-Signature-256` HMAC-SHA256 signature using `WHATSAPP_APP_SECRET`.
+  - Monotonic status hierarchy prevents out-of-order `SENT` events from overturning verified `DELIVERED` status.
 
-### D. Consignment Tracking Privacy & Customer Ownership
+### D. Twilio Transfer Webhook Security (`/api/webhooks/twilio/transfer`)
+- **Risk**: Attacker forging transfer completion to trick the system into reporting successful live human handoffs.
+- **Mitigation**:
+  - Route validates `X-Twilio-Signature` using official `twilio.validateRequest(authToken, signature, url, params)`.
+  - Monotonic transition rules ensure `TRANSFER_CONNECTED` cannot be overturned by late failure callbacks.
+  - Only genuine provider evidence marks business outcome as `TRANSFERRED`.
+
+### E. Google Sheets Immutable Target Metadata
+- **Risk**: Tenant settings changed after an uncertain append, causing reconciliation to check or write to an attacker-controlled spreadsheet.
+- **Mitigation**:
+  - `side_effect_claims` records snapshot of `target_spreadsheet_id`, `target_worksheet_name`, and `external_call_id`.
+  - Reconciler strictly inspects original target metadata, eliminating configuration drift.
+
+### F. Consignment Tracking Privacy & Customer Ownership
 - **Risk**: Callers querying arbitrary LR numbers to inspect competitor or cross-customer shipments.
 - **Mitigation**: `get_tracking_status` verifies caller phone ownership against the registered customer on the consignment unless bearer lookup is explicitly enabled in tenant configuration.
 
-### E. Outbox Claim Pattern & Concurrency Protection
+### G. Outbox Claim Pattern & Concurrency Protection
 - **Risk**: Concurrent webhook replays or cluster worker restarts causing duplicate WhatsApp messages or multiple Google Sheet appends.
 - **Mitigation**: Durable Postgres table `side_effect_claims` acquires an atomic row lock in status `PROCESSING` before any external network side effect is dispatched. Subsequent replays are safely skipped.
 
-### F. PII Minimization in Audit Logs
+### H. PII Minimization in Audit Logs
 - **Risk**: Storing unmasked phone numbers and authorization tokens in permanent audit tables.
 - **Mitigation**: Centralized `sanitizeAuditArguments` masks phone numbers (`+91 98******432`), redacts credentials/tokens, and hashes large message payloads before persistence in `audit_events`.
 
-### G. Server-Side Tenant & Privilege Boundary
+### I. Server-Side Tenant & Privilege Boundary
 - **Risk**: Client sending custom headers (`x-tenant-id`, `x-user-role`) to escalate to `ADMIN` or access another tenant's data.
 - **Mitigation**: 
   - `getAuthContext()` strictly ignores client headers for role escalation.
   - Roles must be present in validated Supabase `app_metadata` with explicit allowlist (`DISPATCHER`, `OPS_MANAGER`, `ADMIN`).
   - `SYSTEM` and `VOICE_GATEWAY` roles can never be granted via user metadata.
-
-### H. Release v1.0.2 Security Hardening & Sonar Gate Certification
-1. **Next.js 16 Proxy Migration & Bounded SSR Auth**:
-   - Migrated from legacy `middleware.ts` to standard Next.js 16 `proxy.ts` and `lib/supabase/proxy.ts`.
-   - Root routing evaluates unauthenticated requests instantly (< 1ms) and emits a 307 redirect to `/login` without network hops.
-   - External Supabase Auth network operations (`getClaims`/`getUser`) are bound via `createBoundedFetch` to a hard upper limit of 2000ms, failing closed to `/login?error=AUTH_TEMPORARILY_UNAVAILABLE` rather than waiting for Vercel platform timeout (eliminates 504 `MIDDLEWARE_INVOCATION_TIMEOUT`).
-   - Development cookie bypass (`logivoice_dev_session`) is strictly rejected when `NODE_ENV === 'production'`.
-
-2. **Telephony TwiML & Twilio Contract Security**:
-   - Integrated official `twilio` SDK (`twilio.twiml.VoiceResponse`).
-   - Eliminated handwritten XML template strings and improper `encodeURIComponent` usage.
-   - Enforced strict E.164 phone number validation (`/^\+[1-9]\d{1,14}$/`) and official Twilio REST Call Update resource contract (sending CallSid `CA...`, POST method, and `Twiml` parameter only without unsupported `To` parameter).
-
-3. **SonarCloud Vulnerability Elimination (S6505)**:
-   - Eliminated on-demand `npx playwright` invocation in `.github/workflows/ci.yml`.
-   - Replaced with local lockfile-pinned `npm run playwright:install` script backed by verified devDependencies.
-   - SonarCloud Quality Gate on `branch=main`: Security Rating **A**, 0 New Issues, 0 Security Hotspots, 2.5% Duplication (required <= 3.0%).
-

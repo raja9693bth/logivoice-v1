@@ -91,7 +91,7 @@ describe('PostgreSQL Runtime Truth & Database Integrity Suite', () => {
   // =========================================================================
   // 1. FRESH DATABASE: ALL MIGRATIONS FROM ZERO
   // =========================================================================
-  it('1. Fresh Database: Applies all 5 migrations in order from zero', async () => {
+  it('1. Fresh Database: Applies all 8 migrations in order from zero', async () => {
     const freshClient = new Client({ connectionString: getDbUrl(FRESH_DB_NAME) });
     await freshClient.connect();
 

@@ -314,19 +314,57 @@ export async function syncCallToGoogleSheets(
     const updatedRange: string | undefined = appendData.updates?.updatedRange;
     const rowIndex = updatedRange ? Number.parseInt(updatedRange.replace(/[^0-9]/g, ''), 10) : undefined;
 
-    // 6. Complete durable claim with mandatory claim_token
-    await db.completeSideEffect(
-      tenantId,
-      claimKey,
-      {
-        business_status: 'SYNCED',
-        updatedRange,
-        rowIndex,
-        worksheet: activeTab,
-        synced_at: new Date().toISOString(),
-      },
-      claimResult.claim_token
-    );
+    // In-memory tracking for deterministic mock / test verification
+    const mockAppendedKey = `${spreadsheetId}:${activeTab}:${call.external_call_id}`;
+    mockAppendedCalls.add(mockAppendedKey);
+
+    // 6. Complete durable claim with mandatory claim_token and immutable target metadata
+    try {
+      await db.completeSideEffect(
+        tenantId,
+        claimKey,
+        {
+          business_status: 'SYNCED',
+          updatedRange,
+          rowIndex,
+          worksheet: activeTab,
+          target_spreadsheet_id: spreadsheetId,
+          target_worksheet_name: activeTab,
+          external_call_id: call.external_call_id,
+          synced_at: new Date().toISOString(),
+        },
+        claimResult.claim_token
+      );
+    } catch (dbErr: any) {
+      // Directive Section 7 & 8: If append succeeded on Google's side, but local DB settlement fails,
+      // DO NOT mark as ordinary RETRYABLE. Record UNKNOWN / RECONCILIATION_REQUIRED with original target metadata!
+      const dbErrMsg = dbErr instanceof Error ? dbErr.message : 'Database error completing Sheets claim';
+      await db.recordSideEffectUnknown(
+        tenantId,
+        claimKey,
+        `Google Sheets append succeeded on provider, but local DB completion failed: ${dbErrMsg}`,
+        {
+          business_status: 'SYNCED',
+          append_succeeded: true,
+          updatedRange,
+          rowIndex,
+          target_spreadsheet_id: spreadsheetId,
+          target_worksheet_name: activeTab,
+          external_call_id: call.external_call_id,
+          reconciliation_required: true,
+        },
+        claimResult.claim_token
+      );
+
+      return {
+        synced: false,
+        status: 'FAILED',
+        provider: 'GOOGLE_SHEETS_API_V4',
+        spreadsheet_id: spreadsheetId,
+        worksheet_name: activeTab,
+        error: `Append succeeded on Google Sheets but DB settlement failed: ${dbErrMsg}`,
+      };
+    }
 
     // 7. Audit log confirmed sync
     await db.logAuditEvent(
@@ -371,7 +409,11 @@ export async function syncCallToGoogleSheets(
         tenantId,
         claimKey,
         `Google Sheets append timed out or uncertain: ${errMsg}`,
-        {},
+        {
+          target_spreadsheet_id: spreadsheetId,
+          target_worksheet_name: targetWorksheet,
+          external_call_id: call.external_call_id,
+        },
         claimResult.claim_token
       );
       return {
@@ -392,27 +434,38 @@ export async function syncCallToGoogleSheets(
   }
 }
 
+// In-memory tracking for testing multi-tenant isolation and mock presence
+const mockAppendedCalls = new Set<string>();
+
 /**
  * Resets Google Sheets sync idempotency for testing suites.
  */
 export function resetSheetsSyncIdempotency(): void {
-  // Test cleanup helper
+  mockAppendedCalls.clear();
 }
 
 /**
  * Authoritatively inspects the configured Google Sheet worksheet to determine
- * whether a call row was already appended (Phase 30).
+ * whether a call row was already appended (Directive Section 7 & 8).
+ * Accepts optional targetOverride so reconciliation uses the original claim target metadata,
+ * preventing target drift if tenant configuration changes later.
  * Returns:
- * - 'EXISTS': row containing externalCallId found in sheet -> safe to mark SUCCEEDED
+ * - 'EXISTS': row containing externalCallId found in target sheet -> safe to mark SUCCEEDED
  * - 'NOT_FOUND': sheet verified, call ID proven absent -> safe to mark RETRYABLE
  * - 'UNCERTAIN': provider unconfigured, unreachable, or timed out -> must remain UNKNOWN
  */
 export async function checkIfCallExistsInGoogleSheets(
   externalCallId: string,
-  tenantId: string = DEFAULT_TENANT_ID
+  tenantId: string = DEFAULT_TENANT_ID,
+  targetOverride?: { spreadsheetId?: string; worksheetName?: string }
 ): Promise<'EXISTS' | 'NOT_FOUND' | 'UNCERTAIN'> {
   const isMock = process.env.ENABLE_MOCK_INTEGRATIONS === 'true';
-  const target = await resolveGoogleSheetsTarget(tenantId);
+  const target = targetOverride?.spreadsheetId
+    ? {
+        spreadsheetId: targetOverride.spreadsheetId,
+        worksheetName: targetOverride.worksheetName || 'LogiVoice_Calls',
+      }
+    : await resolveGoogleSheetsTarget(tenantId);
   const spreadsheetId = target.spreadsheetId;
   const configuredTab = target.worksheetName;
 
@@ -421,6 +474,11 @@ export async function checkIfCallExistsInGoogleSheets(
       return 'NOT_FOUND';
     }
     return 'UNCERTAIN';
+  }
+
+  if (isMock) {
+    const mockKey = `${spreadsheetId}:${configuredTab}:${externalCallId}`;
+    return mockAppendedCalls.has(mockKey) ? 'EXISTS' : 'NOT_FOUND';
   }
 
   const accessToken = await getGoogleAccessToken();

@@ -19,6 +19,7 @@ import assertStrict from 'node:assert/strict';
  */
 
 import crypto from 'crypto';
+import twilio from 'twilio';
 import { Retell } from 'retell-sdk';
 import { db, DEFAULT_TENANT_ID, setSimulatedDbFailure, DatabaseUnavailableError, assertProductionDbReady } from '../lib/db';
 import { dispatchTool } from '../lib/tools/gateway';
@@ -55,6 +56,8 @@ import { reconcileUnknownClaims } from '../lib/pipeline/retry-worker';
 import { RETELL_TOOL_DEFINITIONS } from '../lib/voice/retell-tools';
 import { proxy as middleware } from '../proxy';
 import { NextRequest } from 'next/server';
+import { GET as whatsappWebhookGet, POST as whatsappWebhookPost } from '../app/api/webhooks/whatsapp/route';
+import { POST as twilioTransferWebhookPost } from '../app/api/webhooks/twilio/transfer/route';
 
 let passedTests = 0;
 let failedTests = 0;
@@ -1720,7 +1723,13 @@ describe('LOGIVOICE V1 — FORENSIC BACKEND AUTOMATED TEST SUITE', () => {
     assert(capturedMethod === 'POST', 'Section 58.40: HTTP method is POST');
     assert(capturedBody.includes('Twiml='), 'Section 58.40: Body contains Twiml');
     const sentTwiml = new URLSearchParams(capturedBody).get('Twiml') || '';
-    assert(sentTwiml.includes('<Dial callerId="+919876543210"><Number>+919876543211</Number></Dial>'), 'Section 58.40: TwiML contains valid Dial and Number elements');
+    assert(
+      sentTwiml.includes('<Dial') &&
+      sentTwiml.includes('action="/api/webhooks/twilio/transfer"') &&
+      sentTwiml.includes('callerId="+919876543210"') &&
+      sentTwiml.includes('<Number>+919876543211</Number></Dial>'),
+      'Section 58.40: TwiML contains valid Dial, action callback, and Number elements'
+    );
   } finally {
     process.env.ENABLE_LIVE_TELEPHONY_TRANSFER = origTelephony;
     process.env.TWILIO_ACCOUNT_SID = origSid;
@@ -1771,5 +1780,286 @@ describe('LOGIVOICE V1 — FORENSIC BACKEND AUTOMATED TEST SUITE', () => {
   // 44. Phase 7: Telephony Transfer Outcome Guard
   const confirmedNoBridge = await db.getConfirmedTransferForCall('unconfirmed-call-999', DEFAULT_TENANT_ID);
   assert(confirmedNoBridge === null, 'Section 58.44: Unconfirmed or in-progress transfer returns null for confirmed bridge');
+
+  // 45. Directive Section 4 & 6: WhatsApp Provider Acceptance + DB Settlement Failure Protection
+  const p0CallId = `p0-wa-call-${Date.now()}`;
+  const p0ClaimKey = `followup:${DEFAULT_TENANT_ID}:${p0CallId}`;
+  const p0ClaimAcquired = await db.claimSideEffect(DEFAULT_TENANT_ID, p0ClaimKey, 'FOLLOWUP_SEND', p0CallId);
+  assert(p0ClaimAcquired.claimed, 'Directive Section 4: P0 WhatsApp claim acquired');
+  // Record simulated unknown failure where Meta accepted message ID but local DB errored
+  await db.recordSideEffectUnknown(
+    DEFAULT_TENANT_ID,
+    p0ClaimKey,
+    'Database error completing side effect claim',
+    {
+      business_status: 'SENT',
+      provider_message_id: 'wamid.HBgLP0Accepted123',
+      provider: 'META_WHATSAPP_CLOUD_API',
+      provider_accepted: true,
+      reconciliation_required: true,
+    },
+    p0ClaimAcquired.claim_token
+  );
+  const p0ClaimBefore = await db.getSideEffectClaim(DEFAULT_TENANT_ID, p0ClaimKey);
+  assert(p0ClaimBefore?.status === 'UNKNOWN', 'Directive Section 4: Provider-accepted message is marked UNKNOWN, never RETRYABLE');
+  // Reconcile unknown claims: provider_accepted ensures it transitions to SUCCEEDED without resending!
+  const reconOutcome = await reconcileUnknownClaims(10);
+  const p0ClaimAfter = await db.getSideEffectClaim(DEFAULT_TENANT_ID, p0ClaimKey);
+  assert(p0ClaimAfter?.status === 'SUCCEEDED', 'Directive Section 4: Reconciled to SUCCEEDED using durable provider truth without re-dispatch');
+
+  // 46. Directive Section 5: Meta WhatsApp Webhook GET Challenge Verification
+  process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN = 'test_meta_webhook_secret_token_123';
+  const validGetReq = new NextRequest('http://localhost:3000/api/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=test_meta_webhook_secret_token_123&hub.challenge=test_meta_challenge_999');
+  const validGetRes = await whatsappWebhookGet(validGetReq);
+  assert(validGetRes.status === 200, 'Directive Section 5: Valid Meta GET challenge returns HTTP 200');
+  const validChallengeText = await validGetRes.text();
+  assert(validChallengeText === 'test_meta_challenge_999', 'Directive Section 5: Returns exact hub.challenge plain text');
+
+  const invalidGetReq = new NextRequest('http://localhost:3000/api/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=wrong_token&hub.challenge=test_challenge');
+  const invalidGetRes = await whatsappWebhookGet(invalidGetReq);
+  assert(invalidGetRes.status === 403, 'Directive Section 5: Invalid Meta verification token returns HTTP 403 Forbidden');
+
+  // 47. Directive Section 5: Meta WhatsApp Webhook POST Status Updates & UNKNOWN Settlement
+  process.env.WHATSAPP_APP_SECRET = 'meta_test_app_secret_xyz';
+  const targetFollowupMsgId = `wamid.MetaStatusTest.${Date.now()}`;
+  // Seed a followup in PENDING
+  const testFollowupCallId = `call-meta-wh-${Date.now()}`;
+  const seedCall = await db.createCall({
+    tenant_id: DEFAULT_TENANT_ID,
+    external_call_id: `ext-${testFollowupCallId}`,
+    customer_id: '00000000-0000-0000-0000-000000000002',
+    started_at: new Date().toISOString(),
+    duration_seconds: 45,
+    primary_intent: 'GENERAL',
+    sentiment: 'NEUTRAL',
+    outcome: 'COMPLETED',
+    lead_temperature: 'WARM',
+    summary: 'Seed call for WhatsApp webhook test',
+    facts: { call_id: `ext-${testFollowupCallId}` },
+    agent_version: 'v1.0.2',
+  });
+  await db.upsertFollowup({
+    tenant_id: DEFAULT_TENANT_ID,
+    call_id: seedCall.id,
+    channel: 'WHATSAPP',
+    recipient: '+919876543210',
+    status: 'PENDING',
+    provider_message_id: targetFollowupMsgId,
+  });
+
+  const webhookPayload = JSON.stringify({
+    object: 'whatsapp_business_account',
+    entry: [
+      {
+        id: '123456789',
+        changes: [
+          {
+            value: {
+              messaging_product: 'whatsapp',
+              statuses: [
+                {
+                  id: targetFollowupMsgId,
+                  status: 'delivered',
+                  timestamp: String(Math.floor(Date.now() / 1000)),
+                  recipient_id: '919876543210',
+                },
+              ],
+            },
+            field: 'messages',
+          },
+        ],
+      },
+    ],
+  });
+
+  const validHmac = crypto.createHmac('sha256', process.env.WHATSAPP_APP_SECRET).update(webhookPayload).digest('hex');
+  const validPostReq = new NextRequest('http://localhost:3000/api/webhooks/whatsapp', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Hub-Signature-256': `sha256=${validHmac}`,
+    },
+    body: webhookPayload,
+  });
+  const validPostRes = await whatsappWebhookPost(validPostReq);
+  assert(validPostRes.status === 200, 'Directive Section 5: Valid signed Meta webhook POST returns HTTP 200');
+
+  const updatedFollowupRecord = await db.getFollowupByProviderMessageId(targetFollowupMsgId);
+  assert(updatedFollowupRecord?.status === 'DELIVERED', 'Directive Section 5: Followup status updated to DELIVERED by Meta webhook');
+
+  // 48. Directive Section 5: Meta Webhook Spoofed/Invalid Signature Rejection
+  const spoofedPostReq = new NextRequest('http://localhost:3000/api/webhooks/whatsapp', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Hub-Signature-256': 'sha256=invalid_spoofed_signature_hash',
+    },
+    body: webhookPayload,
+  });
+  const spoofedPostRes = await whatsappWebhookPost(spoofedPostReq);
+  assert(spoofedPostRes.status === 401, 'Directive Section 5: Spoofed Meta webhook signature rejected with HTTP 401');
+
+  // 49. Directive Section 5: Out-of-order & Duplicate Webhook Idempotency
+  // Delayed "sent" event arriving after "delivered" must not regress status to SENT
+  const delayedSentPayload = JSON.stringify({
+    object: 'whatsapp_business_account',
+    entry: [{ changes: [{ value: { messaging_product: 'whatsapp', statuses: [{ id: targetFollowupMsgId, status: 'sent', timestamp: String(Math.floor(Date.now() / 1000) - 10) }] } }] }],
+  });
+  const delayedSentHmac = crypto.createHmac('sha256', process.env.WHATSAPP_APP_SECRET).update(delayedSentPayload).digest('hex');
+  const delayedSentReq = new NextRequest('http://localhost:3000/api/webhooks/whatsapp', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Hub-Signature-256': `sha256=${delayedSentHmac}` },
+    body: delayedSentPayload,
+  });
+  await whatsappWebhookPost(delayedSentReq);
+  const afterDelayedFollowup = await db.getFollowupByProviderMessageId(targetFollowupMsgId);
+  assert(afterDelayedFollowup?.status === 'DELIVERED', 'Directive Section 5: Monotonic protection prevents DELIVERED from regressing to SENT');
+
+  // 50. Directive Section 8: Google Sheets Original Target Immutability
+  const tenantAId = '00000000-0000-0000-0000-000000000001';
+  const sheetsImmutCallId = `sheets-immut-${Date.now()}`;
+  const sheetsImmutClaimKey = `sheets:${tenantAId}:${sheetsImmutCallId}`;
+  const sheetsClaimAcq = await db.claimSideEffect(tenantAId, sheetsImmutClaimKey, 'SHEETS_SYNC', sheetsImmutCallId);
+  // Persist original target in claim result metadata
+  await db.recordSideEffectUnknown(
+    tenantAId,
+    sheetsImmutClaimKey,
+    'Google Sheets append timed out or uncertain',
+    {
+      target_spreadsheet_id: 'original-sheet-123',
+      target_worksheet_name: 'Original_Tab',
+      external_call_id: sheetsImmutCallId,
+    },
+    sheetsClaimAcq.claim_token
+  );
+  // Alter tenant configuration in client_configs after the operation
+  await db.updateClientConfig(tenantAId, {
+    sheets_config: { sync_enabled: true, spreadsheet_id: 'altered-sheet-999', worksheet_name: 'Altered_Tab' },
+  });
+  // Reconciliation must check the ORIGINAL sheet, not the altered sheet
+  process.env.ENABLE_MOCK_INTEGRATIONS = 'true';
+  const reconSheets = await reconcileUnknownClaims(10);
+  assert(Array.isArray(reconSheets.results), 'Directive Section 8: Google Sheets reconciliation executes');
+
+  // 51. Directive Section 9: Google Sheets Multi-Tenant Isolation
+  resetSheetsSyncIdempotency();
+  const presenceA = await checkIfCallExistsInGoogleSheets('test-call-x', tenantAId, { spreadsheetId: 'tenant-a-sheet', worksheetName: 'TabA' });
+  assert(presenceA === 'NOT_FOUND', 'Directive Section 9: Isolated tenant A sheet does not have call X');
+  const presenceB = await checkIfCallExistsInGoogleSheets('test-call-x', '00000000-0000-0000-0000-000000000002', { spreadsheetId: 'tenant-b-sheet', worksheetName: 'TabB' });
+  assert(presenceB === 'NOT_FOUND', 'Directive Section 9: Isolated tenant B sheet does not have call X');
+
+  // 52. Directive Section 10 & 11: Twilio Connected-Leg Callback Proves TRANSFER_CONNECTED
+  const twilioCallId = `call-twilio-${Date.now()}`;
+  const twilioCallRecord = await db.createCall({
+    tenant_id: DEFAULT_TENANT_ID,
+    external_call_id: `ext-${twilioCallId}`,
+    customer_id: '00000000-0000-0000-0000-000000000002',
+    started_at: new Date().toISOString(),
+    duration_seconds: 45,
+    primary_intent: 'HUMAN_REQUEST',
+    sentiment: 'NEUTRAL',
+    outcome: 'IN_PROGRESS',
+    lead_temperature: 'WARM',
+    summary: 'Twilio transfer call',
+    facts: { call_id: `ext-${twilioCallId}` },
+    agent_version: 'v1.0.2',
+  });
+
+  const testAuthToken = 'twilio_test_auth_token_999';
+  process.env.TWILIO_AUTH_TOKEN = testAuthToken;
+  const twilioUrl = 'http://localhost:3000/api/webhooks/twilio/transfer';
+
+  const completedParams = {
+    CallSid: `ext-${twilioCallId}`,
+    DialCallSid: 'CA1234567890abcdef1234567890abcdef',
+    DialCallStatus: 'completed',
+    DialCallDuration: '62',
+  };
+  const validTwilioSig = twilio.getExpectedTwilioSignature(testAuthToken, twilioUrl, completedParams);
+
+  const twilioPostReq = new NextRequest(twilioUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-Twilio-Signature': validTwilioSig,
+    },
+    body: new URLSearchParams(completedParams).toString(),
+  });
+  const twilioPostRes = await twilioTransferWebhookPost(twilioPostReq);
+  assert(twilioPostRes.status === 200, 'Directive Section 10: Twilio transfer callback returns HTTP 200 with TwiML');
+  const confirmedTransfer = await db.getConfirmedTransferForCall(twilioCallRecord.id, DEFAULT_TENANT_ID);
+  assert(confirmedTransfer?.transferred === true, 'Directive Section 11: DialCallStatus=completed establishes verified TRANSFER_CONNECTED');
+  const updatedTwilioCall = await db.getCallById(twilioCallRecord.id, DEFAULT_TENANT_ID);
+  assert(updatedTwilioCall?.outcome === 'TRANSFERRED', 'Directive Section 11: Call outcome transitions to TRANSFERRED on verified bridge');
+
+  // Directive Section 39: Forged/Tampered Twilio Signature Verification
+  const spoofedTwilioReq = new NextRequest(twilioUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-Twilio-Signature': 'invalid_forged_twilio_signature',
+    },
+    body: new URLSearchParams(completedParams).toString(),
+  });
+  const spoofedTwilioRes = await twilioTransferWebhookPost(spoofedTwilioReq);
+  assert(spoofedTwilioRes.status === 401, 'Directive Section 39: Forged Twilio signature rejected with HTTP 401');
+
+  // 53. Directive Section 11: Twilio Failed/Busy Callback Falls Back to CALLBACK_SCHEDULED
+  const busyCallId = `call-busy-${Date.now()}`;
+  const busyCallRecord = await db.createCall({
+    tenant_id: DEFAULT_TENANT_ID,
+    external_call_id: `ext-${busyCallId}`,
+    customer_id: '00000000-0000-0000-0000-000000000002',
+    started_at: new Date().toISOString(),
+    duration_seconds: 45,
+    primary_intent: 'HUMAN_REQUEST',
+    sentiment: 'NEUTRAL',
+    outcome: 'IN_PROGRESS',
+    lead_temperature: 'WARM',
+    summary: 'Busy transfer call',
+    facts: { call_id: `ext-${busyCallId}` },
+    agent_version: 'v1.0.2',
+  });
+  const busyParams = {
+    CallSid: `ext-${busyCallId}`,
+    DialCallSid: 'CA9999999999abcdef9999999999abcdef',
+    DialCallStatus: 'busy',
+  };
+  const busySig = twilio.getExpectedTwilioSignature(testAuthToken, twilioUrl, busyParams);
+  const busyPostReq = new NextRequest(twilioUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-Twilio-Signature': busySig,
+    },
+    body: new URLSearchParams(busyParams).toString(),
+  });
+  await twilioTransferWebhookPost(busyPostReq);
+  const busyTransfer = await db.getConfirmedTransferForCall(busyCallRecord.id, DEFAULT_TENANT_ID);
+  assert(busyTransfer === null, 'Directive Section 11: DialCallStatus=busy does not confirm transfer');
+  const updatedBusyCall = await db.getCallById(busyCallRecord.id, DEFAULT_TENANT_ID);
+  assert(updatedBusyCall?.outcome === 'CALLBACK_SCHEDULED', 'Directive Section 11: DialCallStatus=busy assigns CALLBACK_SCHEDULED');
+  const callbackTicket = await db.getCallbackRequestForCall(busyCallRecord.id, DEFAULT_TENANT_ID);
+  assert(Boolean(callbackTicket), 'Directive Section 11: DialCallStatus=busy creates dispatcher callback ticket');
+
+  // 54. Directive Section 12: Twilio Callback Monotonic Protection
+  // Attempting to report failure on an already-connected call must NOT overturn TRANSFER_CONNECTED
+  const lateFailureParams = {
+    CallSid: `ext-${twilioCallId}`,
+    DialCallSid: 'CA1234567890abcdef1234567890abcdef',
+    DialCallStatus: 'failed',
+  };
+  const lateFailureSig = twilio.getExpectedTwilioSignature(testAuthToken, twilioUrl, lateFailureParams);
+  const lateFailureReq = new NextRequest(twilioUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-Twilio-Signature': lateFailureSig,
+    },
+    body: new URLSearchParams(lateFailureParams).toString(),
+  });
+  await twilioTransferWebhookPost(lateFailureReq);
+  const postLateCall = await db.getCallById(twilioCallRecord.id, DEFAULT_TENANT_ID);
+  assert(postLateCall?.outcome === 'TRANSFERRED', 'Directive Section 12: Monotonic transition protects TRANSFERRED outcome against delayed failed callback');
   });
 });

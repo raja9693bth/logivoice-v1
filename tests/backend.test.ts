@@ -1734,6 +1734,7 @@ describe('LOGIVOICE V1 — FORENSIC BACKEND AUTOMATED TEST SUITE', () => {
   const customTenantId = '11111111-2222-3333-4444-555555555555';
   await db.updateClientConfig(customTenantId, {
     sheets_config: {
+      sync_enabled: true,
       spreadsheet_id: 'custom-tenant-sheet-xyz',
       worksheet_name: 'Custom_Tenant_Tab',
     },

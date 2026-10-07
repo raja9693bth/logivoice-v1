@@ -103,7 +103,7 @@ export interface ClientConfig {
   }>;
   tracking_config: { provider: string; identifier_type: string };
   followup_config: { enabled: boolean; default_channel: FollowupChannel; suppress_opt_outs: boolean };
-  sheets_config: { sync_enabled: boolean; spreadsheet_id?: string };
+  sheets_config: { sync_enabled: boolean; spreadsheet_id?: string; worksheet_name?: string };
   created_at: string;
   updated_at: string;
 }

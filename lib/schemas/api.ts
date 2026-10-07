@@ -293,6 +293,7 @@ export const UpdateSettingsApiSchema = z.object({
     .object({
       sync_enabled: z.boolean(),
       spreadsheet_id: z.string().max(100).optional(),
+      worksheet_name: z.string().max(100).optional(),
     })
     .optional(),
 }).strict();

@@ -266,6 +266,16 @@ export async function sendControlledFollowup(
   }
 
   if (channel === 'EMAIL') {
+    await db.completeSideEffect(
+      tenantId,
+      claimKey,
+      {
+        business_status: 'UNCONFIGURED',
+        status: 'UNCONFIGURED',
+        error: 'EMAIL channel is not supported / unconfigured.',
+      },
+      claimResult.claim_token
+    );
     return {
       success: false,
       status: 'UNCONFIGURED',
@@ -280,6 +290,16 @@ export async function sendControlledFollowup(
       process.env.SMS_API_KEY || process.env.TWILIO_AUTH_TOKEN || process.env.ENABLE_MOCK_INTEGRATIONS === 'true'
     );
     if (!isSmsConfigured) {
+      await db.completeSideEffect(
+        tenantId,
+        claimKey,
+        {
+          business_status: 'UNCONFIGURED',
+          status: 'UNCONFIGURED',
+          error: 'SMS channel is unconfigured.',
+        },
+        claimResult.claim_token
+      );
       return {
         success: false,
         status: 'UNCONFIGURED',

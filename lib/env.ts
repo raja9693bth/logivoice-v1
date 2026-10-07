@@ -61,9 +61,9 @@ export const EnvironmentSchema = z
     ENABLE_MOCK_INTEGRATIONS: z.enum(['true', 'false']).default('false'),
   })
   .superRefine((data, ctx) => {
-    // 1. Production Supabase Contract (Phase 11)
+    // 1. Production Supabase Contract (Phase 11 & Phase 9)
     if (data.NODE_ENV === 'production') {
-      const publicUrl = data.NEXT_PUBLIC_SUPABASE_URL || data.SUPABASE_URL;
+      const publicUrl = data.NEXT_PUBLIC_SUPABASE_URL;
       const publicKey = data.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || data.NEXT_PUBLIC_SUPABASE_ANON_KEY;
       const secretKey = data.SUPABASE_SECRET_KEY;
 

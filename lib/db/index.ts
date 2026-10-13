@@ -2945,20 +2945,26 @@ export const db = {
       return { followup: null, updated: false };
     }
 
-    // Monotonic state priorities:
-    // PENDING (0) < FAILED (1) < SENT (2) < DELIVERED (3)
-    const priorityMap: Record<string, number> = {
-      PENDING: 0,
-      FAILED: 1,
-      SENT: 2,
-      DELIVERED: 3,
-    };
-    const currentPriority = priorityMap[followup.status] ?? 0;
-    const targetPriority = priorityMap[newStatus] ?? 0;
-
-    // Out-of-order protection: do not revert DELIVERED to SENT or FAILED
-    if (targetPriority < currentPriority) {
+    // Monotonic state transitions:
+    // - DELIVERED: Terminal success (never regress to SENT, PENDING, or FAILED)
+    // - FAILED: Terminal failure (never regress to PENDING or SENT)
+    // - SENT: Can transition to DELIVERED or FAILED (never regress to PENDING)
+    // - PENDING: Can transition to SENT, DELIVERED, or FAILED
+    if (followup.status === newStatus) {
       return { followup, updated: false };
+    }
+    if (followup.status === 'DELIVERED') {
+      return { followup, updated: false };
+    }
+    if (followup.status === 'FAILED') {
+      if (newStatus === 'PENDING' || newStatus === 'SENT') {
+        return { followup, updated: false };
+      }
+    }
+    if (followup.status === 'SENT') {
+      if (newStatus === 'PENDING') {
+        return { followup, updated: false };
+      }
     }
 
     const updated = await this.updateFollowup(
@@ -2966,18 +2972,66 @@ export const db = {
       {
         status: newStatus,
         sent_at: followup.sent_at || (newStatus === 'SENT' || newStatus === 'DELIVERED' ? (metadata?.timestamp || new Date().toISOString()) : undefined),
+        suppression_reason: newStatus === 'FAILED' ? metadata?.error || followup.suppression_reason : followup.suppression_reason,
       },
       followup.tenant_id
     );
 
-    // If new status is SENT or DELIVERED, settle any UNKNOWN side-effect claims matching this message ID
-    if (newStatus === 'SENT' || newStatus === 'DELIVERED') {
-      const tid = followup.tenant_id;
-      const callId = followup.call_id;
-      const claimKey = `followup:${tid}:${callId || followup.recipient}`;
+    // Reconcile and transition underlying side-effect claims to terminal status in DB
+    const tid = followup.tenant_id;
+    const callId = followup.call_id;
+    const candidateClaimKeys = [
+      callId ? `followup:${tid}:${callId}` : null,
+      `followup:${tid}:${followup.recipient}`,
+    ].filter(Boolean) as string[];
+
+    for (const claimKey of candidateClaimKeys) {
       const claim = await this.getSideEffectClaim(tid, claimKey);
-      if (claim && claim.status === 'UNKNOWN') {
-        await this.updateClaimReconciliation(tid, claimKey, 'SUCCEEDED', providerMessageId);
+      if (claim) {
+        if (newStatus === 'SENT' || newStatus === 'DELIVERED') {
+          if (claim.status !== 'SUCCEEDED') {
+            await this.updateClaimReconciliation(tid, claimKey, 'SUCCEEDED', providerMessageId);
+          }
+        } else if (newStatus === 'FAILED') {
+          if (claim.status !== 'SUCCEEDED' && claim.status !== 'FAILED') {
+            await this.updateClaimReconciliation(tid, claimKey, 'FAILED', providerMessageId);
+          }
+        }
+      }
+    }
+
+    // Also reconcile any claims matching provider_message_id directly
+    if (providerMessageId) {
+      if (await isSupabaseLive()) {
+        const client = createAdminClient();
+        const { data: matchedClaims } = await client
+          .from('side_effect_claims')
+          .select('claim_key, status')
+          .eq('tenant_id', tid)
+          .contains('result', { provider_message_id: providerMessageId });
+        if (matchedClaims) {
+          for (const mc of matchedClaims) {
+            if ((newStatus === 'SENT' || newStatus === 'DELIVERED') && mc.status !== 'SUCCEEDED') {
+              await this.updateClaimReconciliation(tid, mc.claim_key, 'SUCCEEDED', providerMessageId);
+            } else if (newStatus === 'FAILED' && mc.status !== 'SUCCEEDED' && mc.status !== 'FAILED') {
+              await this.updateClaimReconciliation(tid, mc.claim_key, 'FAILED', providerMessageId);
+            }
+          }
+        }
+      } else {
+        const matched = globalStore.side_effect_claims.filter(
+          (c) =>
+            c.tenant_id === tid &&
+            (c.provider_reference === providerMessageId ||
+              (c.result as any)?.provider_message_id === providerMessageId)
+        );
+        for (const mc of matched) {
+          if ((newStatus === 'SENT' || newStatus === 'DELIVERED') && mc.status !== 'SUCCEEDED') {
+            await this.updateClaimReconciliation(tid, mc.claim_key, 'SUCCEEDED', providerMessageId);
+          } else if (newStatus === 'FAILED' && mc.status !== 'SUCCEEDED' && mc.status !== 'FAILED') {
+            await this.updateClaimReconciliation(tid, mc.claim_key, 'FAILED', providerMessageId);
+          }
+        }
       }
     }
 
@@ -3431,14 +3485,42 @@ export const db = {
     providerRef?: string
   ): Promise<void> {
     const nowIso = new Date().toISOString();
+    const isTerminalSuccess = resultStatus === 'SUCCEEDED';
+    const isTerminalFailed = resultStatus === 'FAILED';
+    const isKnownStatus = ['SUCCEEDED', 'FAILED', 'RETRYABLE', 'UNKNOWN'].includes(resultStatus);
+
     if (await isSupabaseLive()) {
       const client = createAdminClient();
       const updates: Record<string, unknown> = {
         updated_at: nowIso,
       };
-      if (providerRef) {
-        updates.provider_reference = providerRef;
+      if (isKnownStatus) {
+        updates.status = resultStatus;
+        if (isTerminalSuccess || isTerminalFailed) {
+          updates.completed_at = nowIso;
+        }
       }
+
+      // Fetch existing result payload to merge reconciliation metadata safely without writing non-existent columns
+      const { data: existingRow } = await client
+        .from('side_effect_claims')
+        .select('result')
+        .eq('tenant_id', tenantId)
+        .eq('claim_key', claimKey)
+        .maybeSingle();
+
+      const existingResult = (existingRow?.result as Record<string, unknown>) || {};
+      const mergedResult: Record<string, unknown> = {
+        ...existingResult,
+        reconciled_at: nowIso,
+        reconciliation_result: resultStatus,
+      };
+      if (providerRef) {
+        mergedResult.provider_message_id = providerRef;
+        mergedResult.provider_reference = providerRef;
+      }
+      updates.result = mergedResult;
+
       await client
         .from('side_effect_claims')
         .update(updates)
@@ -3452,10 +3534,22 @@ export const db = {
       (c) => c.tenant_id === tenantId && c.claim_key === claimKey
     );
     if (claim) {
+      if (isKnownStatus) {
+        claim.status = resultStatus as SideEffectStatus;
+        if (isTerminalSuccess || isTerminalFailed) {
+          claim.completed_at = nowIso;
+        }
+      }
       claim.last_reconciled_at = nowIso;
       claim.reconciliation_attempts = (claim.reconciliation_attempts || 0) + 1;
       claim.reconciliation_result = resultStatus;
       if (providerRef) claim.provider_reference = providerRef;
+      claim.result = {
+        ...(claim.result || {}),
+        reconciled_at: nowIso,
+        reconciliation_result: resultStatus,
+        ...(providerRef ? { provider_message_id: providerRef, provider_reference: providerRef } : {}),
+      };
       claim.updated_at = nowIso;
     }
   },

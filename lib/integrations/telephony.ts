@@ -80,13 +80,14 @@ export async function executeProviderCallTransfer(
   let responseData: any = null;
 
   try {
-    // A. Twilio REST Gateway (Requires genuine Twilio CallSid starting with CA)
-    const isTwilioCallSid = Boolean(req.callId && /^CA[0-9a-fA-F]{32}$/.test(req.callId));
+    // A. Twilio REST Gateway (Requires genuine Twilio CallSid starting with CA followed by 32 hex chars)
+    const rawCallId = (req.callId || '').trim();
+    const isTwilioCallSid = Boolean(rawCallId && /^CA[0-9a-fA-F]{32}$/.test(rawCallId));
 
     if (isTwilioCallSid && accountSid && authToken) {
       providerName = 'TWILIO_REST_GATEWAY';
       const authHeader = `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}`;
-      const providerUrl = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(accountSid)}/Calls/${encodeURIComponent(req.callId!)}.json`;
+      const providerUrl = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(accountSid)}/Calls/${encodeURIComponent(rawCallId)}.json`;
 
       // Strict E.164 phone number validation (+ followed by 1 to 15 digits)
       const E164_PHONE_REGEX = /^\+[1-9]\d{1,14}$/;
@@ -164,11 +165,14 @@ export async function executeProviderCallTransfer(
       providerTransferId = data.sid || data.id;
     } else {
       clearTimeout(timeoutId);
+      const isPlaceholder = /^(current|active|this|none|null|undefined)$/i.test(rawCallId);
       return {
         success: false,
-        status: 'PROVIDER_ERROR',
+        status: isPlaceholder || !rawCallId ? 'UNCONFIGURED' : 'PROVIDER_ERROR',
         provider: 'TELEPHONY_GATEWAY',
-        error: 'Active call transfer requires a valid Twilio CallSid (CA...) or supported telephony provider integration.',
+        error: isPlaceholder
+          ? `Arbitrary placeholder string "${rawCallId}" is not a valid CallSid. Active call transfer requires a verified Twilio CallSid (CA...).`
+          : 'Active call transfer requires a valid Twilio CallSid (CA...) or supported telephony provider integration.',
         message: 'No active provider telephony context found for call transfer.',
       };
     }

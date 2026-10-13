@@ -13,6 +13,7 @@
 
 import crypto from 'crypto';
 import { db, DEFAULT_TENANT_ID } from '@/lib/db';
+import { isValidUuid } from '@/lib/db/mappers';
 import { TransferToHumanInput, TransferToHumanOutput } from '@/lib/schemas/tools';
 import { executeProviderCallTransfer } from '@/lib/integrations/telephony';
 import { normalizePhoneNumber, formatMaskedPhone } from '@/lib/utils';
@@ -29,7 +30,7 @@ async function logTransferAudit(
     await db.logAuditEvent(
       {
         tenant_id: tenantId,
-        call_id: callId,
+        call_id: callId && isValidUuid(callId) ? callId : undefined,
         event_type: 'CALL_ESCALATED',
         actor: 'AI_AGENT',
         actor_type: 'AI_AGENT',
@@ -82,11 +83,56 @@ export async function executeTransferToHuman(
 
     const targetPhone = targetContact?.phone ? normalizePhoneNumber(targetContact.phone) : undefined;
 
-    // Check if live telephony transfer is configured & invoke actual provider
-    if (targetPhone) {
+    // 1. Sanitize & resolve call identifiers — NEVER send arbitrary strings like "current" as CallSid
+    const rawCallId = (input.call_id || '').trim();
+    const isPlaceholderCallId = !rawCallId || /^(current|active|this|none|null|undefined)$/i.test(rawCallId);
+
+    let verifiedCallSid: string | undefined;
+    let resolvedDbCallId: string | undefined;
+    let resolvedCallerPhone: string | undefined;
+    let resolvedCallerName: string | undefined;
+
+    if (!isPlaceholderCallId) {
+      if (/^CA[0-9a-fA-F]{32}$/.test(rawCallId)) {
+        verifiedCallSid = rawCallId;
+        const callByExt = await db.getCallByExternalId(rawCallId, tenantId);
+        if (callByExt) {
+          resolvedDbCallId = callByExt.id;
+          resolvedCallerPhone = (callByExt.facts as any)?.caller_phone || (callByExt.facts as any)?.customer_phone || callByExt.customer?.phone;
+          resolvedCallerName = (callByExt.facts as any)?.caller_name || callByExt.customer?.name;
+        }
+      } else if (isValidUuid(rawCallId)) {
+        resolvedDbCallId = rawCallId;
+        const callByUuid = await db.getCallById(rawCallId, tenantId);
+        if (callByUuid) {
+          if (callByUuid.external_call_id && /^CA[0-9a-fA-F]{32}$/.test(callByUuid.external_call_id)) {
+            verifiedCallSid = callByUuid.external_call_id;
+          }
+          resolvedCallerPhone = (callByUuid.facts as any)?.caller_phone || (callByUuid.facts as any)?.customer_phone || callByUuid.customer?.phone;
+          resolvedCallerName = (callByUuid.facts as any)?.caller_name || callByUuid.customer?.name;
+        }
+      } else {
+        const callByExt = await db.getCallByExternalId(rawCallId, tenantId);
+        if (callByExt) {
+          resolvedDbCallId = callByExt.id;
+          if (callByExt.external_call_id && /^CA[0-9a-fA-F]{32}$/.test(callByExt.external_call_id)) {
+            verifiedCallSid = callByExt.external_call_id;
+          }
+          resolvedCallerPhone = (callByExt.facts as any)?.caller_phone || (callByExt.facts as any)?.customer_phone || callByExt.customer?.phone;
+          resolvedCallerName = (callByExt.facts as any)?.caller_name || callByExt.customer?.name;
+        }
+      }
+    }
+
+    const effectiveCallerPhone = input.caller_phone || resolvedCallerPhone;
+    const effectiveCallerName = input.caller_name || resolvedCallerName;
+
+    // Check if live telephony transfer is configured & a genuine CallSid exists
+    const isLiveTransferEnabled = process.env.ENABLE_LIVE_TELEPHONY_TRANSFER === 'true';
+    if (targetPhone && verifiedCallSid && isLiveTransferEnabled) {
       const providerResult = await executeProviderCallTransfer({
-        callId: input.call_id,
-        callerPhone: input.caller_phone ? normalizePhoneNumber(input.caller_phone) : undefined,
+        callId: verifiedCallSid,
+        callerPhone: effectiveCallerPhone ? normalizePhoneNumber(effectiveCallerPhone) : undefined,
         targetPhone,
         targetRole: targetContact.role,
         targetName: targetContact.name,
@@ -107,7 +153,7 @@ export async function executeTransferToHuman(
             : 'TRANSFER_REQUEST_ACCEPTED';
 
         // Audit log verified provider escalation
-        await logTransferAudit(tenantId, input.call_id, input.reason, targetContact.role, targetPhone, {
+        await logTransferAudit(tenantId, resolvedDbCallId, input.reason, targetContact.role, targetPhone, {
           context_summary: input.context_summary,
           provider: providerResult.provider,
           provider_transfer_id: providerResult.providerTransferId,
@@ -134,7 +180,7 @@ export async function executeTransferToHuman(
           await db.logAuditEvent(
             {
               tenant_id: tenantId,
-              call_id: input.call_id,
+              call_id: resolvedDbCallId,
               event_type: 'CALL_ESCALATION_FAILED',
               actor: 'AI_AGENT',
               actor_type: 'AI_AGENT',
@@ -159,12 +205,12 @@ export async function executeTransferToHuman(
     }
 
     // Fallback: If caller phone is missing, live transfer cannot fall back to a callback
-    if (!input.caller_phone) {
+    if (!effectiveCallerPhone) {
       try {
         await db.logAuditEvent(
           {
             tenant_id: tenantId,
-            call_id: input.call_id,
+            call_id: resolvedDbCallId,
             event_type: 'CALL_ESCALATION_FAILED',
             actor: 'AI_AGENT',
             actor_type: 'AI_AGENT',
@@ -190,8 +236,9 @@ export async function executeTransferToHuman(
     }
 
     // Fallback: Urgent Callback Task with deterministic idempotency & collision-safe reference
-    const normalizedCallerPhone = normalizePhoneNumber(input.caller_phone);
-    const idempotencyKey = `cb-${tenantId}-${input.call_id || 'direct'}-${Buffer.from(input.reason).toString('hex').slice(0, 16)}`;
+    const normalizedCallerPhone = normalizePhoneNumber(effectiveCallerPhone);
+    const safeCallToken = resolvedDbCallId || (verifiedCallSid ? verifiedCallSid.slice(0, 16) : 'direct');
+    const idempotencyKey = `cb-${tenantId}-${safeCallToken}-${Buffer.from(input.reason).toString('hex').slice(0, 16)}`;
     const matched = await db.getRequestByIdempotencyKey(idempotencyKey, tenantId);
     if (matched) {
       return {
@@ -211,9 +258,9 @@ export async function executeTransferToHuman(
       {
         reference_no: callbackRef,
         tenant_id: tenantId,
-        call_id: input.call_id || undefined,
+        call_id: resolvedDbCallId,
         customer_id: customerId,
-        customer_name: input.caller_name || existingCustomer?.name || 'Inbound Caller',
+        customer_name: effectiveCallerName || existingCustomer?.name || 'Inbound Caller',
         customer_phone: normalizedCallerPhone,
         type: 'CALLBACK_REQUEST',
         status: 'PENDING',
@@ -232,7 +279,7 @@ export async function executeTransferToHuman(
     );
 
     // Audit log fallback callback creation
-    await logTransferAudit(tenantId, input.call_id, input.reason, targetContact?.role, targetPhone, {
+    await logTransferAudit(tenantId, resolvedDbCallId, input.reason, targetContact?.role, targetPhone, {
       callback_reference: callbackRef,
       fallback_mode: 'URGENT_CALLBACK',
       provider_confirmed: false,

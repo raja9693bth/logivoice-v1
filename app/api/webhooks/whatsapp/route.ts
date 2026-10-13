@@ -24,8 +24,15 @@ export async function GET(req: NextRequest) {
 
     const expectedToken =
       process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN ||
-      process.env.WHATSAPP_VERIFY_TOKEN ||
-      'logivoice_whatsapp_verify_token';
+      process.env.WHATSAPP_VERIFY_TOKEN;
+
+    if (!expectedToken) {
+      console.error('[WhatsAppWebhook:GET] WHATSAPP_WEBHOOK_VERIFY_TOKEN is unconfigured; failing closed');
+      return NextResponse.json(
+        { error: 'Forbidden: Webhook verify token is not configured' },
+        { status: 403 }
+      );
+    }
 
     if (mode === 'subscribe' && verifyToken === expectedToken) {
       return new Response(challenge || '', {

@@ -1915,6 +1915,101 @@ describe('LOGIVOICE V1 — FORENSIC BACKEND AUTOMATED TEST SUITE', () => {
   const afterDelayedFollowup = await db.getFollowupByProviderMessageId(targetFollowupMsgId);
   assert(afterDelayedFollowup?.status === 'DELIVERED', 'Directive Section 5: Monotonic protection prevents DELIVERED from regressing to SENT');
 
+  // 49a. WhatsApp Webhook GET Challenge Fail-Closed when Token is Unconfigured
+  const savedVerifyToken = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
+  delete process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
+  delete process.env.WHATSAPP_VERIFY_TOKEN;
+  const noTokenGetReq = new NextRequest('http://localhost:3000/api/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=logivoice_whatsapp_verify_token&hub.challenge=test_challenge');
+  const noTokenGetRes = await whatsappWebhookGet(noTokenGetReq);
+  assert(noTokenGetRes.status === 403, 'WhatsApp Webhook GET challenge fails closed with 403 when verify token is unconfigured');
+  process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN = savedVerifyToken;
+
+  // 49b. WhatsApp Monotonic Transition: SENT -> FAILED is accepted when provider reports failure
+  const testFailedMsgId = `wamid.FailedTransitionTest.${Date.now()}`;
+  const seedFailedFollowup = await db.upsertFollowup({
+    tenant_id: DEFAULT_TENANT_ID,
+    call_id: seedCall.id,
+    channel: 'WHATSAPP',
+    recipient: '+919876543211',
+    status: 'SENT',
+    provider_message_id: testFailedMsgId,
+  });
+  assert(seedFailedFollowup.followup.status === 'SENT', 'Seed followup established in SENT');
+  const failedOutcome = await db.updateFollowupStatusByProviderMessageId(
+    testFailedMsgId,
+    'FAILED',
+    { error: 'Message undeliverable to recipient' }
+  );
+  assert(failedOutcome.updated === true, 'Provider FAILED webhook after SENT is accepted and marked updated');
+  assert(failedOutcome.followup?.status === 'FAILED', 'Followup successfully transitioned from SENT to FAILED');
+
+  // 49c. WhatsApp Claim Reconciliation: delivery event transitions side_effect_claims status to SUCCEEDED in DB
+  const reconSeedCall = await db.createCall({
+    tenant_id: DEFAULT_TENANT_ID,
+    external_call_id: `ext-call-recon-${Date.now()}`,
+    customer_id: '00000000-0000-0000-0000-000000000002',
+    started_at: new Date().toISOString(),
+    duration_seconds: 30,
+    primary_intent: 'GENERAL',
+    sentiment: 'NEUTRAL',
+    outcome: 'COMPLETED',
+    lead_temperature: 'WARM',
+    summary: 'Seed call for claim reconciliation test',
+    facts: { call_id: `ext-call-recon-${Date.now()}` },
+    agent_version: 'v1.0.2',
+  });
+  const claimReconCallId = reconSeedCall.id;
+  const claimReconKey = `followup:${DEFAULT_TENANT_ID}:${claimReconCallId}`;
+  const claimReconMsgId = `wamid.ReconClaim.${Date.now()}`;
+  const claimAcq = await db.claimSideEffect(DEFAULT_TENANT_ID, claimReconKey, 'FOLLOWUP_SEND', claimReconCallId);
+  assert(claimAcq.claimed, 'Claim acquired for reconciliation test');
+  await db.recordSideEffectUnknown(
+    DEFAULT_TENANT_ID,
+    claimReconKey,
+    'Pending provider confirmation',
+    { provider_message_id: claimReconMsgId },
+    claimAcq.claim_token
+  );
+  const claimBeforeRecon = await db.getSideEffectClaim(DEFAULT_TENANT_ID, claimReconKey);
+  assert(claimBeforeRecon?.status === 'UNKNOWN', 'Claim in UNKNOWN status awaiting webhook');
+
+  await db.upsertFollowup({
+    tenant_id: DEFAULT_TENANT_ID,
+    call_id: claimReconCallId,
+    channel: 'WHATSAPP',
+    recipient: '+919876543212',
+    status: 'PENDING',
+    provider_message_id: claimReconMsgId,
+  });
+
+  const reconUpdateRes = await db.updateFollowupStatusByProviderMessageId(claimReconMsgId, 'DELIVERED');
+  assert(reconUpdateRes.updated, 'Followup marked DELIVERED');
+  const claimAfterRecon = await db.getSideEffectClaim(DEFAULT_TENANT_ID, claimReconKey);
+  assert(claimAfterRecon?.status === 'SUCCEEDED', 'Side-effect claim status transitioned to SUCCEEDED in database on delivery');
+  assert(Boolean(claimAfterRecon?.completed_at), 'Side-effect claim completed_at is populated');
+
+  // 49d. Telephony Transfer Hardening: "current" placeholder rejected as CallSid, graceful fallback to CALLBACK_SCHEDULED
+  process.env.ENABLE_LIVE_TELEPHONY_TRANSFER = 'true';
+  process.env.TELEPHONY_PROVIDER_ACCOUNT_SID = 'AC_test_mock_sid';
+  process.env.TELEPHONY_PROVIDER_AUTH_TOKEN = 'auth_token_mock';
+
+  const transferCurrentRes = await dispatchTool({
+    tool_name: 'transfer_to_human',
+    arguments: {
+      call_id: 'current',
+      caller_phone: '+91 98201 55432',
+      reason: 'Urgent human assistance requested',
+      target_role: 'Dispatcher',
+    },
+  }, auth);
+  assert(transferCurrentRes.status === 'CALLBACK_SCHEDULED', 'Transfer with "current" CallSid gracefully falls back to CALLBACK_SCHEDULED without calling Twilio');
+  assert(Boolean((transferCurrentRes as any).result?.callback_reference), 'Callback ticket reference created for fallback');
+
+  delete process.env.ENABLE_LIVE_TELEPHONY_TRANSFER;
+  delete process.env.TELEPHONY_PROVIDER_ACCOUNT_SID;
+  delete process.env.TELEPHONY_PROVIDER_AUTH_TOKEN;
+
+
   // 50. Directive Section 8: Google Sheets Original Target Immutability
   const tenantAId = '00000000-0000-0000-0000-000000000001';
   const sheetsImmutCallId = `sheets-immut-${Date.now()}`;
